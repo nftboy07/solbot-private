@@ -1,10 +1,12 @@
 """Jupiter DEX aggregator client for swap execution.
 
 Uses aiohttp for async HTTP requests to Jupiter's quote and swap APIs.
+Supports paper trading mode for simulation without real transactions.
 """
 
 import asyncio
 import time
+import uuid
 from typing import Optional
 
 import aiohttp
@@ -24,12 +26,26 @@ LAMPORTS_PER_SOL = 1_000_000_000
 
 
 class JupiterClient:
-    """Async client for Jupiter V6 API - quote, swap, and execute."""
+    """Async client for Jupiter V6 API - quote, swap, and execute.
+
+    Supports paper trading mode where quotes are fetched but transactions
+    are simulated locally without on-chain execution.
+    """
 
     def __init__(self, config: JupiterConfig, wallet: Wallet):
         self._config = config
         self._wallet = wallet
         self._session: Optional[aiohttp.ClientSession] = None
+        self._paper_trades: list[TradeResult] = []
+
+    @property
+    def is_paper_mode(self) -> bool:
+        return self._config.paper_trade
+
+    @property
+    def paper_trades(self) -> list[TradeResult]:
+        """Access paper trade history."""
+        return self._paper_trades
 
     async def start(self):
         """Initialize the aiohttp session."""
@@ -38,13 +54,18 @@ class JupiterClient:
             timeout=timeout,
             headers={"Accept": "application/json"},
         )
-        logger.info("Jupiter client initialized")
+        mode = "PAPER" if self._config.paper_trade else "LIVE"
+        logger.info(f"Jupiter client initialized | mode={mode}")
 
     async def stop(self):
         """Close the aiohttp session."""
         if self._session:
             await self._session.close()
             self._session = None
+
+        if self._paper_trades:
+            self._print_paper_summary()
+
         logger.info("Jupiter client closed")
 
     async def get_quote(
@@ -108,6 +129,9 @@ class JupiterClient:
     async def execute_swap(self, output_mint: str) -> TradeResult:
         """Execute a full swap: quote -> build tx -> sign -> send.
 
+        In paper trading mode, fetches a real quote but simulates the
+        execution without sending any on-chain transaction.
+
         Args:
             output_mint: Target token to buy.
 
@@ -116,7 +140,7 @@ class JupiterClient:
         """
         start_time = time.time()
 
-        # Step 1: Get quote with retries
+        # Step 1: Get quote with retries (always real, even in paper mode)
         quote = None
         for attempt in range(self._config.max_retries):
             quote = await self.get_quote(output_mint)
@@ -139,6 +163,50 @@ class JupiterClient:
             f"{quote.out_amount} tokens | impact={quote.price_impact_pct:.4f}%"
         )
 
+        # Paper trading: simulate execution
+        if self._config.paper_trade:
+            return await self._execute_paper_trade(quote, output_mint, start_time)
+
+        # Live trading: build, sign, and send
+        return await self._execute_live_trade(quote, output_mint, start_time)
+
+    async def _execute_paper_trade(
+        self, quote: SwapQuote, output_mint: str, start_time: float
+    ) -> TradeResult:
+        """Simulate a trade without sending a real transaction.
+
+        Logs the trade as if it were executed and stores in paper trade history.
+        """
+        # Simulate a small execution delay (network latency)
+        await asyncio.sleep(0.05)
+        latency = (time.time() - start_time) * 1000
+
+        # Generate a fake signature for tracking
+        paper_sig = f"PAPER_{uuid.uuid4().hex[:16]}"
+
+        result = TradeResult(
+            success=True,
+            token_mint=output_mint,
+            tx_signature=paper_sig,
+            amount_in=quote.in_amount / LAMPORTS_PER_SOL,
+            amount_out=quote.out_amount,
+            latency_ms=latency,
+        )
+
+        self._paper_trades.append(result)
+
+        logger.info(
+            f"[PAPER] SWAP SIMULATED | {result.amount_in:.4f} SOL -> "
+            f"{result.amount_out} tokens | impact={quote.price_impact_pct:.4f}% | "
+            f"{latency:.0f}ms | id={paper_sig}"
+        )
+
+        return result
+
+    async def _execute_live_trade(
+        self, quote: SwapQuote, output_mint: str, start_time: float
+    ) -> TradeResult:
+        """Execute a real on-chain swap transaction."""
         # Step 2: Build swap transaction
         tx_data = await self._build_swap_transaction(quote)
         if not tx_data:
@@ -241,7 +309,7 @@ class JupiterClient:
             }
 
             # Use the configured RPC URL
-            rpc_url = "https://api.mainnet-beta.solana.com"
+            rpc_url = self._config.rpc_url or "https://api.mainnet-beta.solana.com"
             async with self._session.post(rpc_url, json=payload) as resp:
                 result = await resp.json()
                 if "error" in result:
@@ -252,3 +320,17 @@ class JupiterClient:
         except Exception as e:
             logger.error(f"Sign/send error: {e}")
             return None
+
+    def _print_paper_summary(self):
+        """Print paper trading session summary."""
+        total_sol = sum(t.amount_in for t in self._paper_trades)
+        logger.info("=" * 60)
+        logger.info("[PAPER] TRADING SESSION SUMMARY")
+        logger.info(f"  Total simulated trades: {len(self._paper_trades)}")
+        logger.info(f"  Total SOL spent (sim):  {total_sol:.4f}")
+        avg_latency = (
+            sum(t.latency_ms for t in self._paper_trades) / len(self._paper_trades)
+            if self._paper_trades else 0
+        )
+        logger.info(f"  Avg quote latency:      {avg_latency:.0f}ms")
+        logger.info("=" * 60)
