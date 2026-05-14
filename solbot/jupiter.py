@@ -321,16 +321,164 @@ class JupiterClient:
             logger.error(f"Sign/send error: {e}")
             return None
 
+    # ── Sell Operations ────────────────────────────────────────────────
+
+    async def execute_sell(self, input_mint: str, token_amount: int) -> TradeResult:
+        """Execute a sell: swap tokens back to SOL via Jupiter.
+
+        Args:
+            input_mint: Token mint to sell.
+            token_amount: Amount of tokens to sell (in base units).
+
+        Returns:
+            TradeResult with SOL received in amount_out.
+        """
+        start_time = time.time()
+
+        # Get quote: token -> SOL
+        quote = await self._get_sell_quote(input_mint, token_amount)
+        if not quote:
+            return TradeResult(
+                success=False,
+                token_mint=input_mint,
+                side="sell",
+                error="Failed to get sell quote",
+                latency_ms=(time.time() - start_time) * 1000,
+            )
+
+        logger.info(
+            f"Sell quote: {quote.in_amount} tokens -> "
+            f"{quote.out_amount / LAMPORTS_PER_SOL:.4f} SOL"
+        )
+
+        # Build and send transaction
+        tx_data = await self._build_swap_transaction(quote)
+        if not tx_data:
+            return TradeResult(
+                success=False,
+                token_mint=input_mint,
+                side="sell",
+                error="Failed to build sell transaction",
+                latency_ms=(time.time() - start_time) * 1000,
+            )
+
+        tx_signature = await self._sign_and_send(tx_data)
+        latency = (time.time() - start_time) * 1000
+
+        if tx_signature:
+            return TradeResult(
+                success=True,
+                token_mint=input_mint,
+                side="sell",
+                tx_signature=tx_signature,
+                amount_in=quote.in_amount,
+                amount_out=quote.out_amount / LAMPORTS_PER_SOL,
+                latency_ms=latency,
+            )
+        else:
+            return TradeResult(
+                success=False,
+                token_mint=input_mint,
+                side="sell",
+                error="Sell transaction send failed",
+                latency_ms=latency,
+            )
+
+    async def execute_paper_sell(
+        self, mint: str, token_amount: float, estimated_sol_value: float
+    ) -> TradeResult:
+        """Simulate a sell in paper trading mode.
+
+        Args:
+            mint: Token mint being sold.
+            token_amount: Tokens being sold.
+            estimated_sol_value: Estimated SOL value of the sell.
+
+        Returns:
+            TradeResult with simulated success.
+        """
+        start_time = time.time()
+        await asyncio.sleep(0.03)  # Simulate latency
+        latency = (time.time() - start_time) * 1000
+
+        paper_sig = f"PAPER_SELL_{uuid.uuid4().hex[:12]}"
+
+        result = TradeResult(
+            success=True,
+            token_mint=mint,
+            side="sell",
+            tx_signature=paper_sig,
+            amount_in=token_amount,
+            amount_out=estimated_sol_value,
+            latency_ms=latency,
+        )
+
+        self._paper_trades.append(result)
+
+        logger.info(
+            f"[PAPER] SELL SIMULATED | {token_amount:.0f} tokens -> "
+            f"{estimated_sol_value:.4f} SOL | {latency:.0f}ms | id={paper_sig}"
+        )
+        return result
+
+    async def _get_sell_quote(self, input_mint: str, token_amount: int) -> Optional[SwapQuote]:
+        """Get a quote for selling tokens back to SOL."""
+        if not self._session:
+            return None
+
+        params = {
+            "inputMint": input_mint,
+            "outputMint": SOL_MINT,
+            "amount": str(token_amount),
+            "slippageBps": str(self._config.slippage_bps),
+            "onlyDirectRoutes": "false",
+            "asLegacyTransaction": "false",
+        }
+
+        try:
+            async with self._session.get(
+                f"{self._config.api_url}/quote", params=params
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(f"Sell quote failed ({resp.status}): {body[:200]}")
+                    return None
+
+                data = await resp.json()
+                return SwapQuote(
+                    input_mint=input_mint,
+                    output_mint=SOL_MINT,
+                    in_amount=int(data["inAmount"]),
+                    out_amount=int(data["outAmount"]),
+                    price_impact_pct=float(data.get("priceImpactPct", 0)),
+                    slippage_bps=self._config.slippage_bps,
+                    route_plan=data.get("routePlan", []),
+                )
+        except asyncio.TimeoutError:
+            logger.error("Sell quote timed out")
+            return None
+        except Exception as e:
+            logger.error(f"Sell quote error: {e}")
+            return None
+
+    # ── Summary ─────────────────────────────────────────────────────────
+
     def _print_paper_summary(self):
         """Print paper trading session summary."""
-        total_sol = sum(t.amount_in for t in self._paper_trades)
+        buys = [t for t in self._paper_trades if t.side == "buy"]
+        sells = [t for t in self._paper_trades if t.side == "sell"]
+        total_sol_spent = sum(t.amount_in for t in buys)
+        total_sol_received = sum(t.amount_out for t in sells)
         logger.info("=" * 60)
         logger.info("[PAPER] TRADING SESSION SUMMARY")
         logger.info(f"  Total simulated trades: {len(self._paper_trades)}")
-        logger.info(f"  Total SOL spent (sim):  {total_sol:.4f}")
+        logger.info(f"  Buys:  {len(buys)} | SOL spent: {total_sol_spent:.4f}")
+        logger.info(f"  Sells: {len(sells)} | SOL received: {total_sol_received:.4f}")
+        net = total_sol_received - total_sol_spent
+        logger.info(f"  Net P&L (sim): {net:+.4f} SOL")
         avg_latency = (
             sum(t.latency_ms for t in self._paper_trades) / len(self._paper_trades)
             if self._paper_trades else 0
         )
-        logger.info(f"  Avg quote latency:      {avg_latency:.0f}ms")
+        logger.info(f"  Avg latency: {avg_latency:.0f}ms")
         logger.info("=" * 60)

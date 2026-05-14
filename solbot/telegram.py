@@ -1,7 +1,12 @@
-"""Async Telegram alert client for qualified token notifications.
+"""Async Telegram alert client for Solbot notifications.
 
 Uses aiohttp to send messages to Telegram Bot API without blocking
-the main event loop.
+the main event loop. Supports alerts for:
+- New qualified tokens
+- Buy executions (success/failure)
+- Sell executions (stop loss, take profit, trailing stop)
+- Blacklist events
+- Emergency kill switch activation
 """
 
 import asyncio
@@ -11,7 +16,7 @@ import aiohttp
 
 from solbot.config import TelegramConfig
 from solbot.logger import get_logger
-from solbot.models import TokenEvent
+from solbot.models import PositionSnapshot, TokenEvent
 from solbot.scoring import Confidence, TokenScore
 
 logger = get_logger("telegram")
@@ -20,12 +25,12 @@ logger = get_logger("telegram")
 class TelegramAlert:
     """Async Telegram bot client for sending trade alerts.
 
-    Sends formatted alerts for tokens that pass filters, including:
-    - Mint address (clickable link)
-    - Liquidity (SOL)
-    - Market cap (USD)
-    - Buy pressure score
-    - Confidence classification
+    Sends formatted alerts for:
+    - Tokens passing filters (with scores)
+    - Buy executions
+    - Sell executions (with P&L and reason)
+    - Blacklist additions
+    - Kill switch activations
     """
 
     def __init__(self, config: TelegramConfig):
@@ -57,52 +62,115 @@ class TelegramAlert:
             self._session = None
         logger.info("Telegram client closed")
 
+    # ── Token Detection Alerts ──────────────────────────────────────────
+
     async def send_token_alert(self, score: TokenScore):
-        """Send a formatted alert for a qualified token.
-
-        Args:
-            score: TokenScore containing the evaluated token and scores.
-        """
+        """Send a formatted alert for a qualified token."""
         if not self._enabled or not self._session:
             return
+        if not self._config.alert_on_qualified:
+            return
 
-        token = score.token
-        message = self._format_alert(token, score)
-
+        message = self._format_token_alert(score)
         async with self._rate_limiter:
             await self._send_message(message)
 
-    async def send_trade_alert(self, score: TokenScore, tx_signature: Optional[str], success: bool):
-        """Send alert when a trade is executed (or fails).
+    # ── Buy Alerts ──────────────────────────────────────────────────────
 
-        Args:
-            score: TokenScore for the traded token.
-            tx_signature: Transaction signature (None if failed).
-            success: Whether the trade succeeded.
-        """
+    async def send_buy_alert(
+        self,
+        score: TokenScore,
+        tx_signature: Optional[str],
+        success: bool,
+        amount_sol: float = 0.0,
+        amount_tokens: float = 0.0,
+        is_paper: bool = False,
+    ):
+        """Send alert when a buy is executed (or fails)."""
         if not self._enabled or not self._session:
             return
+        if not self._config.alert_on_trade:
+            return
 
-        token = score.token
         if success:
-            message = self._format_trade_success(token, score, tx_signature)
+            message = self._format_buy_success(
+                score, tx_signature, amount_sol, amount_tokens, is_paper
+            )
         else:
-            message = self._format_trade_failure(token, score)
+            message = self._format_buy_failure(score)
 
         async with self._rate_limiter:
             await self._send_message(message)
 
-    async def send_startup_message(self):
+    # ── Sell Alerts ─────────────────────────────────────────────────────
+
+    async def send_sell_alert(self, snapshot: PositionSnapshot, is_paper: bool = False):
+        """Send alert when a position is sold (any reason)."""
+        if not self._enabled or not self._session:
+            return
+        if not self._config.alert_on_sell:
+            return
+
+        message = self._format_sell_alert(snapshot, is_paper)
+        async with self._rate_limiter:
+            await self._send_message(message)
+
+    # ── Blacklist Alerts ────────────────────────────────────────────────
+
+    async def send_blacklist_alert(
+        self,
+        creator_address: str,
+        reason: str,
+        related_symbol: str = "",
+        related_mint: str = "",
+    ):
+        """Send alert when a creator is blacklisted."""
+        if not self._enabled or not self._session:
+            return
+        if not self._config.alert_on_blacklist:
+            return
+
+        message = self._format_blacklist_alert(
+            creator_address, reason, related_symbol, related_mint
+        )
+        async with self._rate_limiter:
+            await self._send_message(message)
+
+    # ── Kill Switch Alert ───────────────────────────────────────────────
+
+    async def send_kill_switch_alert(self, reason: str, positions_closed: int):
+        """Send alert when the emergency kill switch is triggered."""
+        if not self._enabled or not self._session:
+            return
+
+        message = (
+            f"🚨🚨🚨 <b>KILL SWITCH ACTIVATED</b> 🚨🚨🚨\n\n"
+            f"<b>Reason:</b> {reason}\n"
+            f"<b>Positions closed:</b> {positions_closed}\n\n"
+            f"All trading has been halted.\n"
+            f"Manual intervention required."
+        )
+        async with self._rate_limiter:
+            await self._send_message(message)
+
+    # ── Startup Alert ───────────────────────────────────────────────────
+
+    async def send_startup_message(self, mode: str = "PAPER", positions: int = 0, blacklisted: int = 0):
         """Send a bot startup notification."""
         if not self._enabled or not self._session:
             return
 
         message = (
-            "🤖 <b>SOLBOT ONLINE</b>\n\n"
-            "Monitoring Pump.fun for new tokens\n"
-            "Jupiter execution ready"
+            f"🤖 <b>SOLBOT ONLINE</b>\n\n"
+            f"<b>Mode:</b> {mode}\n"
+            f"<b>Open positions:</b> {positions}\n"
+            f"<b>Blacklisted creators:</b> {blacklisted}\n\n"
+            f"Monitoring Pump.fun for new tokens\n"
+            f"Jupiter execution ready"
         )
         await self._send_message(message)
+
+    # ── Internal: Message Sending ───────────────────────────────────────
 
     async def _send_message(self, text: str):
         """Send a message via Telegram Bot API."""
@@ -130,24 +198,22 @@ class TelegramAlert:
         except Exception as e:
             logger.error(f"Telegram error: {e}")
 
-    def _format_alert(self, token: TokenEvent, score: TokenScore) -> str:
-        """Format a token alert message."""
-        confidence_emoji = {
-            Confidence.HIGH: "🟢",
-            Confidence.MEDIUM: "🟡",
-            Confidence.LOW: "🔴",
-        }
-        emoji = confidence_emoji.get(score.confidence, "⚪")
+    # ── Internal: Message Formatting ────────────────────────────────────
+
+    def _format_token_alert(self, score: TokenScore) -> str:
+        """Format a token detection alert."""
+        token = score.token
+        emoji = self._confidence_emoji(score.confidence)
 
         flags_str = ""
         if score.flags:
-            flag_emojis = []
-            for f in score.flags[:5]:  # Limit displayed flags
+            flag_lines = []
+            for f in score.flags[:5]:
                 if f.startswith("VERY_") or f.startswith("DUST_") or f.startswith("INSTANT_"):
-                    flag_emojis.append(f"⚠️ {f}")
+                    flag_lines.append(f"  ⚠️ {f}")
                 else:
-                    flag_emojis.append(f"✅ {f}")
-            flags_str = "\n".join(flag_emojis)
+                    flag_lines.append(f"  ✅ {f}")
+            flags_str = "\n".join(flag_lines)
 
         message = (
             f"{emoji} <b>NEW TOKEN DETECTED</b>\n\n"
@@ -165,7 +231,6 @@ class TelegramAlert:
         if flags_str:
             message += f"\n<b>Flags:</b>\n{flags_str}\n"
 
-        # Solscan link
         message += (
             f"\n🔗 <a href=\"https://solscan.io/token/{token.mint}\">Solscan</a>"
             f" | <a href=\"https://pump.fun/{token.mint}\">Pump.fun</a>"
@@ -173,25 +238,34 @@ class TelegramAlert:
 
         return message
 
-    def _format_trade_success(
-        self, token: TokenEvent, score: TokenScore, tx_signature: Optional[str]
+    def _format_buy_success(
+        self,
+        score: TokenScore,
+        tx_signature: Optional[str],
+        amount_sol: float,
+        amount_tokens: float,
+        is_paper: bool,
     ) -> str:
-        """Format a successful trade alert."""
+        """Format a successful buy alert."""
+        token = score.token
+        mode_tag = " [PAPER]" if is_paper else ""
         tx_link = ""
-        if tx_signature:
+        if tx_signature and not tx_signature.startswith("PAPER_"):
             tx_link = f'\n🔗 <a href="https://solscan.io/tx/{tx_signature}">View TX</a>'
 
         return (
-            f"✅ <b>BUY EXECUTED</b>\n\n"
+            f"✅ <b>BUY EXECUTED{mode_tag}</b>\n\n"
             f"<b>Token:</b> {token.symbol} ({token.name})\n"
             f"<b>Mint:</b> <code>{token.mint}</code>\n"
+            f"<b>Amount:</b> {amount_sol:.4f} SOL → {amount_tokens:.0f} tokens\n"
             f"<b>Confidence:</b> {score.confidence.value}\n"
             f"<b>Score:</b> {score.composite_score:.1f}/100"
             f"{tx_link}"
         )
 
-    def _format_trade_failure(self, token: TokenEvent, score: TokenScore) -> str:
-        """Format a failed trade alert."""
+    def _format_buy_failure(self, score: TokenScore) -> str:
+        """Format a failed buy alert."""
+        token = score.token
         return (
             f"❌ <b>BUY FAILED</b>\n\n"
             f"<b>Token:</b> {token.symbol} ({token.name})\n"
@@ -199,3 +273,87 @@ class TelegramAlert:
             f"<b>Confidence:</b> {score.confidence.value}\n"
             f"<b>Score:</b> {score.composite_score:.1f}/100"
         )
+
+    def _format_sell_alert(self, snap: PositionSnapshot, is_paper: bool) -> str:
+        """Format a sell execution alert with P&L."""
+        mode_tag = " [PAPER]" if is_paper else ""
+
+        # Emoji based on P&L
+        if snap.pnl_pct >= 50:
+            pnl_emoji = "🚀"
+        elif snap.pnl_pct >= 0:
+            pnl_emoji = "💚"
+        else:
+            pnl_emoji = "🔴"
+
+        # Reason emoji
+        reason_emojis = {
+            "stop_loss": "🛑 Stop Loss",
+            "take_profit_1": "🎯 Take Profit 1 (partial)",
+            "take_profit_2": "🎯 Take Profit 2 (partial)",
+            "take_profit_3": "🎯 Take Profit 3 (final)",
+            "trailing_stop": "📉 Trailing Stop",
+            "emergency": "🚨 Emergency",
+            "rug_detected": "💀 Rug Detected",
+            "manual": "👤 Manual",
+        }
+        reason_display = reason_emojis.get(snap.sell_reason or "", snap.sell_reason or "Unknown")
+
+        tx_link = ""
+        if snap.exit_tx and not snap.exit_tx.startswith("PAPER_"):
+            tx_link = f'\n🔗 <a href="https://solscan.io/tx/{snap.exit_tx}">View TX</a>'
+
+        return (
+            f"{pnl_emoji} <b>SELL EXECUTED{mode_tag}</b>\n\n"
+            f"<b>Token:</b> {snap.symbol} ({snap.name})\n"
+            f"<b>Mint:</b> <code>{snap.mint}</code>\n\n"
+            f"📊 <b>Trade Result:</b>\n"
+            f"  Entry: {snap.entry_price_sol:.4f} SOL\n"
+            f"  Exit:  {snap.exit_amount_sol:.4f} SOL\n"
+            f"  P&L:   {snap.pnl_pct:+.1f}% ({snap.pnl_sol:+.4f} SOL)\n"
+            f"  Peak:  {snap.highest_price_sol:.4f} SOL\n\n"
+            f"<b>Reason:</b> {reason_display}\n"
+            f"<b>Held:</b> {snap.age_seconds:.0f}s"
+            f"{tx_link}"
+        )
+
+    def _format_blacklist_alert(
+        self,
+        creator_address: str,
+        reason: str,
+        related_symbol: str,
+        related_mint: str,
+    ) -> str:
+        """Format a blacklist addition alert."""
+        reason_display = {
+            "rug_liquidity_pull": "Liquidity pulled",
+            "rug_mint_authority": "Mint authority abuse",
+            "rug_rapid_dump": "Rapid price dump",
+            "rug_stop_loss_hit": "Stop loss triggered (auto-blacklist)",
+            "repeated_rugs": "Multiple rug incidents",
+            "suspicious_pattern": "Suspicious trading pattern",
+            "manual": "Manual blacklist",
+        }.get(reason, reason)
+
+        token_info = ""
+        if related_symbol:
+            token_info = f"\n<b>Token:</b> {related_symbol}"
+        if related_mint:
+            token_info += f"\n<b>Mint:</b> <code>{related_mint}</code>"
+
+        return (
+            f"🚫 <b>CREATOR BLACKLISTED</b>\n\n"
+            f"<b>Creator:</b> <code>{creator_address}</code>\n"
+            f"<b>Reason:</b> {reason_display}"
+            f"{token_info}\n\n"
+            f"All future tokens from this creator will be blocked."
+        )
+
+    @staticmethod
+    def _confidence_emoji(confidence: Confidence) -> str:
+        """Get emoji for confidence level."""
+        return {
+            Confidence.HIGH: "🟢",
+            Confidence.MEDIUM: "🟡",
+            Confidence.LOW: "🔴",
+        }.get(confidence, "⚪")
