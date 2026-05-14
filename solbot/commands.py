@@ -63,6 +63,9 @@ class CommandHandler:
     Integrates with the running Solbot instance to provide real-time
     management via Telegram commands. Only responds to authorized
     admin chat IDs.
+
+    Also routes /solbot-prefixed commands through IPC to maintain
+    PM2-separated process architecture with OpenClaw.
     """
 
     def __init__(self, config: TelegramConfig, bot: "Solbot"):
@@ -81,6 +84,18 @@ class CommandHandler:
         if admin_str:
             self._admin_ids.add(admin_str)
 
+        # IPC router for /solbot commands (OpenClaw integration)
+        from solbot.ipc_client import OpenClawSolbotRouter
+        ipc_config = bot._config.ipc if hasattr(bot._config, 'ipc') else None
+        if ipc_config and ipc_config.auth_token:
+            self._solbot_router = OpenClawSolbotRouter(
+                socket_path=ipc_config.socket_path,
+                auth_token=ipc_config.auth_token,
+                admin_chat_ids=self._admin_ids,
+            )
+        else:
+            self._solbot_router = None
+
     async def start(self):
         """Start the command polling loop."""
         if not self._config.enabled or not self._config.bot_token:
@@ -92,6 +107,12 @@ class CommandHandler:
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info("Telegram command handler started")
+
+        # Log IPC router status
+        if self._solbot_router and self._solbot_router.is_configured:
+            logger.info("OpenClaw /solbot IPC router: REGISTERED (routing /solbot commands via IPC)")
+        else:
+            logger.info("OpenClaw /solbot IPC router: DISABLED (direct command handling only)")
 
     async def stop(self):
         """Stop the command polling loop."""
@@ -177,6 +198,13 @@ class CommandHandler:
         if not text.startswith("/"):
             return
 
+        # ── /solbot prefix: route through IPC to Solbot ─────────────────
+        # Intercepts: /solbot status, /solbot positions, /solbot kill confirm, etc.
+        lower_text = text.lower()
+        if lower_text.startswith("/solbot"):
+            await self._route_solbot_command(chat_id, text)
+            return
+
         parts = text.split(maxsplit=1)
         command = parts[0].lower().split("@")[0]  # Handle /command@botname
         args = parts[1] if len(parts) > 1 else ""
@@ -193,7 +221,8 @@ class CommandHandler:
             await self._reply(
                 chat_id,
                 "❓ Unknown command. Available:\n"
-                "/status /positions /pnl /pause /resume /blacklist /kill /logs"
+                "/status /positions /pnl /pause /resume /blacklist /kill /logs\n"
+                "/solbot <cmd> - Route to Solbot via IPC"
             )
 
     def _get_handler(self, command: str):
@@ -211,6 +240,79 @@ class CommandHandler:
             "/help": self._cmd_help,
         }
         return handlers.get(command)
+
+    # ── /solbot IPC Routing ─────────────────────────────────────────────
+
+    async def _route_solbot_command(self, chat_id: str, text: str):
+        """Route /solbot-prefixed commands through the IPC bridge.
+
+        If IPC router is configured, sends the command to Solbot via
+        Unix socket and returns the response. If not configured, falls
+        back to direct command execution (same process).
+
+        Args:
+            chat_id: Telegram chat ID.
+            text: Full message text (e.g., "/solbot status")
+        """
+        # If IPC router is available (separate process mode)
+        if self._solbot_router and self._solbot_router.is_configured:
+            logger.debug(f"IPC routing: {text}")
+
+            response = await self._solbot_router.handle_command(chat_id, text)
+            await self._reply(chat_id, response)
+            logger.debug(f"IPC response delivered for: {text}")
+            return
+
+        # Fallback: handle directly in same process (no IPC needed)
+        # Parse "/solbot <command> [args]" -> route to local handler
+        parts = text.strip().split(maxsplit=2)
+        if len(parts) < 2:
+            await self._reply(
+                chat_id,
+                "🤖 <b>SOLBOT COMMANDS</b>\n\n"
+                "<b>Usage:</b> /solbot &lt;command&gt; [args]\n\n"
+                "<b>Available:</b>\n"
+                "  /solbot status\n"
+                "  /solbot positions\n"
+                "  /solbot pnl\n"
+                "  /solbot pause\n"
+                "  /solbot resume\n"
+                "  /solbot blacklist [addr]\n"
+                "  /solbot kill confirm\n"
+                "  /solbot logs [N]"
+            )
+            return
+
+        subcommand = parts[1].lower().strip()
+        args = parts[2] if len(parts) > 2 else ""
+
+        # Map subcommand to existing handler
+        handler_map = {
+            "status": self._cmd_status,
+            "positions": self._cmd_positions,
+            "pnl": self._cmd_pnl,
+            "pause": self._cmd_pause,
+            "resume": self._cmd_resume,
+            "blacklist": self._cmd_blacklist,
+            "kill": self._cmd_kill,
+            "logs": self._cmd_logs,
+            "help": self._cmd_help,
+        }
+
+        handler = handler_map.get(subcommand)
+        if handler:
+            logger.debug(f"Direct routing /solbot {subcommand} (no IPC)")
+            try:
+                await handler(chat_id, args)
+            except Exception as e:
+                logger.error(f"/solbot {subcommand} error: {e}")
+                await self._reply(chat_id, f"❌ Error: {e}")
+        else:
+            await self._reply(
+                chat_id,
+                f"❓ Unknown subcommand: {subcommand}\n\n"
+                "Available: status, positions, pnl, pause, resume, blacklist, kill, logs"
+            )
 
     # ── Command Handlers ────────────────────────────────────────────────
 
