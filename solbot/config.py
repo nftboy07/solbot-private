@@ -45,6 +45,7 @@ class TelegramConfig:
     alert_on_trade: bool = field(default_factory=lambda: os.getenv("TELEGRAM_ALERT_TRADE", "true").lower() in ("true", "1", "yes"))
     alert_on_sell: bool = field(default_factory=lambda: os.getenv("TELEGRAM_ALERT_SELL", "true").lower() in ("true", "1", "yes"))
     alert_on_blacklist: bool = field(default_factory=lambda: os.getenv("TELEGRAM_ALERT_BLACKLIST", "true").lower() in ("true", "1", "yes"))
+    commands_enabled: bool = field(default_factory=lambda: os.getenv("TELEGRAM_COMMANDS_ENABLED", "true").lower() in ("true", "1", "yes"))
 
 
 @dataclass(frozen=True)

@@ -10,14 +10,17 @@ Architecture:
     7. JupiterClient (async/aiohttp) -> swap execution (live or paper)
     8. PositionManager monitor loop -> stop loss, take profit, trailing stop
     9. Kill switch -> emergency halt on catastrophic loss
+   10. CommandHandler -> Telegram command polling for remote management
 """
 
 import asyncio
+import logging
 import signal
 from time import time
 from typing import Optional
 
 from solbot.blacklist import BlacklistReason, CreatorBlacklist
+from solbot.commands import CommandHandler, log_capture
 from solbot.config import BotConfig
 from solbot.database import Database
 from solbot.filters import TokenFilter
@@ -31,6 +34,17 @@ from solbot.telegram import TelegramAlert
 from solbot.wallet import Wallet
 
 logger = get_logger("bot")
+
+
+class _LogCaptureHandler(logging.Handler):
+    """Logging handler that feeds into the command system's log buffer."""
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            log_capture.add(msg)
+        except Exception:
+            pass
 
 
 class Solbot:
@@ -56,8 +70,10 @@ class Solbot:
         self._telegram: Optional[TelegramAlert] = None
         self._blacklist: Optional[CreatorBlacklist] = None
         self._positions: Optional[PositionManager] = None
+        self._commands: Optional[CommandHandler] = None
         self._running = False
-        self._killed = False  # Kill switch state
+        self._paused = False   # Pause state (stops new buys, monitoring continues)
+        self._killed = False   # Kill switch state
 
         # Kill switch tracking
         self._total_realized_pnl_sol: float = 0.0
@@ -137,6 +153,19 @@ class Solbot:
         # Start position monitoring (auto-sell loop)
         await self._positions.start_monitoring()
 
+        # Attach log capture handler for /logs command
+        root_logger = logging.getLogger("solbot")
+        capture_handler = _LogCaptureHandler()
+        capture_handler.setFormatter(logging.Formatter(
+            fmt="%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        root_logger.addHandler(capture_handler)
+
+        # Start Telegram command handler
+        self._commands = CommandHandler(self._config.telegram, self)
+        await self._commands.start()
+
         self._running = True
         mode = "PAPER" if self._config.jupiter.paper_trade else "LIVE"
         logger.info(
@@ -163,6 +192,9 @@ class Solbot:
     async def stop(self):
         """Gracefully shut down all components."""
         self._running = False
+
+        if self._commands:
+            await self._commands.stop()
 
         if self._positions:
             await self._positions.stop_monitoring()
@@ -213,24 +245,29 @@ class Solbot:
         # Step 4: Send Telegram alert for all qualified tokens
         asyncio.create_task(self._telegram.send_token_alert(score))
 
-        # Step 5: Only buy HIGH confidence tokens
+        # Step 5: Check pause state (alerts still fire, buys don't)
+        if self._paused:
+            logger.debug(f"PAUSED - skipping buy for {token.symbol}")
+            return
+
+        # Step 6: Only buy HIGH confidence tokens
         if score.confidence != Confidence.HIGH:
             logger.info(
                 f"SKIP TRADE: {token.symbol} | conf={score.confidence.value} (need HIGH)"
             )
             return
 
-        # Step 6: Check position limits and cooldown
+        # Step 7: Check position limits and cooldown
         if not self._positions.can_buy():
             logger.info(f"SKIP TRADE: {token.symbol} | position limits or cooldown active")
             return
 
-        # Step 7: Don't double-buy
+        # Step 8: Don't double-buy
         if self._positions.has_position(token.mint):
             logger.debug(f"SKIP: already holding {token.symbol}")
             return
 
-        # Step 8: Execute buy
+        # Step 9: Execute buy
         await self._execute_buy(token, score)
 
     # ── Buy Execution ───────────────────────────────────────────────────
