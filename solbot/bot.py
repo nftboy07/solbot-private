@@ -19,13 +19,16 @@ import signal
 from time import time
 from typing import Optional
 
+from solbot.birdeye import BirdeyeClient
 from solbot.blacklist import BlacklistReason, CreatorBlacklist
 from solbot.commands import CommandHandler, log_capture
 from solbot.config import BotConfig
 from solbot.database import Database
+from solbot.dexscreener import DexScreenerClient
 from solbot.filters import TokenFilter
 from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
+from solbot.market_intel import MarketIntelConfig, MarketIntelEngine, MarketSignal
 from solbot.models import PositionSnapshot, TokenEvent, TradeResult
 from solbot.positions import PositionManager, SellReason, TradingConfig
 from solbot.pumpfun import PumpFunMonitor
@@ -71,6 +74,9 @@ class Solbot:
         self._blacklist: Optional[CreatorBlacklist] = None
         self._positions: Optional[PositionManager] = None
         self._commands: Optional[CommandHandler] = None
+        self._market_intel: Optional[MarketIntelEngine] = None
+        self._dex_client: Optional[DexScreenerClient] = None
+        self._birdeye_client: Optional[BirdeyeClient] = None
         self._running = False
         self._paused = False   # Pause state (stops new buys, monitoring continues)
         self._killed = False   # Kill switch state
@@ -145,6 +151,38 @@ class Solbot:
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
 
+        # Initialize market intelligence engine
+        self._dex_client = DexScreenerClient()
+        await self._dex_client.start()
+        self._birdeye_client = BirdeyeClient(
+            api_key=self._config.market_intel.birdeye_api_key
+        )
+        await self._birdeye_client.start()
+
+        mi_cfg = MarketIntelConfig(
+            poll_interval_seconds=self._config.market_intel.dex_poll_interval_seconds,
+            birdeye_poll_interval_seconds=self._config.market_intel.birdeye_poll_interval_seconds,
+            liquidity_drain_warning_pct=self._config.market_intel.liquidity_drain_warning_pct,
+            liquidity_drain_critical_pct=self._config.market_intel.liquidity_drain_critical_pct,
+            volume_collapse_threshold=self._config.market_intel.volume_collapse_threshold_pct,
+            sell_imbalance_warning=self._config.market_intel.sell_imbalance_warning,
+            sell_imbalance_critical=self._config.market_intel.sell_imbalance_critical,
+            mcap_spike_threshold_pct=self._config.market_intel.mcap_spike_threshold_pct,
+            volume_surge_threshold_pct=self._config.market_intel.volume_surge_threshold_pct,
+            holder_growth_surge_pct=self._config.market_intel.holder_growth_surge_pct,
+            dynamic_trailing_enabled=self._config.market_intel.dynamic_trailing_enabled,
+            volatility_trailing_multiplier=self._config.market_intel.volatility_trailing_multiplier,
+            min_trailing_stop_pct=self._config.market_intel.min_trailing_stop_pct,
+            max_trailing_stop_pct=self._config.market_intel.max_trailing_stop_pct,
+        )
+        self._market_intel = MarketIntelEngine(
+            config=mi_cfg,
+            dex_client=self._dex_client,
+            birdeye_client=self._birdeye_client,
+        )
+        self._market_intel.add_signal_callback(self._handle_market_signal)
+        await self._market_intel.start()
+
         # Start Pump.fun monitor
         loop = asyncio.get_running_loop()
         self._monitor = PumpFunMonitor(self._config.pumpfun, loop)
@@ -196,6 +234,9 @@ class Solbot:
         if self._commands:
             await self._commands.stop()
 
+        if self._market_intel:
+            await self._market_intel.stop()
+
         if self._positions:
             await self._positions.stop_monitoring()
 
@@ -204,6 +245,12 @@ class Solbot:
 
         if self._jupiter:
             await self._jupiter.stop()
+
+        if self._dex_client:
+            await self._dex_client.stop()
+
+        if self._birdeye_client:
+            await self._birdeye_client.stop()
 
         if self._telegram:
             await self._telegram.stop()
@@ -313,6 +360,10 @@ class Solbot:
                 latency_ms=result.latency_ms,
             )
 
+            # Start market intelligence tracking for this token
+            if self._market_intel:
+                await self._market_intel.track_token(token.mint, token.symbol)
+
             logger.info(
                 f"{mode} BUY OK: {token.symbol} | tx={result.tx_signature[:20]}... | "
                 f"{result.latency_ms:.0f}ms | positions={self._positions.open_count}"
@@ -413,6 +464,9 @@ class Solbot:
                     exit_tx=result.tx_signature or "",
                     reason=SellReason(reason),
                 )
+                # Stop market intel tracking
+                if self._market_intel:
+                    await self._market_intel.untrack_token(mint)
             else:
                 # Partial sell - reduce remaining tokens
                 pos.remaining_tokens *= (1.0 - sell_pct)
@@ -494,6 +548,95 @@ class Solbot:
                 f"{mode} SELL FAIL: {pos.symbol} | reason={reason} | "
                 f"err={result.error}"
             )
+
+    # ── Market Intelligence Signal Handler ──────────────────────────────
+
+    async def _handle_market_signal(self, signal: MarketSignal):
+        """Handle signals from the market intelligence engine.
+
+        Actions based on signal type and severity:
+        - critical rug signals -> immediate position exit + blacklist
+        - warning signals -> Telegram alert
+        - info/momentum signals -> Telegram alert (if enabled)
+        - dynamic trailing stop adjustments
+        """
+        mint = signal.mint
+        pos = self._positions.positions.get(mint) if self._positions else None
+
+        # Log all signals
+        logger.info(f"MARKET SIGNAL [{signal.severity.upper()}]: {signal.message}")
+
+        # ── Critical: Exit position immediately ─────────────────────────
+        if signal.severity == "critical" and pos:
+            should_exit = False
+
+            if signal.signal_type == "rug_liquidity_critical" and self._config.market_intel.exit_on_liq_critical:
+                should_exit = True
+            elif signal.signal_type == "rug_sell_dump" and self._config.market_intel.exit_on_sell_dump:
+                should_exit = True
+
+            if should_exit:
+                logger.critical(
+                    f"MARKET INTEL EXIT: {pos.symbol} | {signal.signal_type} | "
+                    f"Selling 100% immediately"
+                )
+                # Execute emergency sell
+                await self._execute_sell(mint, 1.0, SellReason.RUG_DETECTED.value)
+
+                # Send rug alert via Telegram
+                if self._config.market_intel.alert_on_rug_warning:
+                    await self._send_market_signal_alert(signal)
+                return
+
+        # ── Warning: Alert + dynamic trailing tighten ───────────────────
+        if signal.severity == "warning":
+            if self._config.market_intel.alert_on_rug_warning:
+                await self._send_market_signal_alert(signal)
+
+            # Tighten trailing stop on warnings
+            if pos and self._market_intel and self._config.market_intel.dynamic_trailing_enabled:
+                dynamic_pct = self._market_intel.get_dynamic_trailing_stop(mint)
+                if dynamic_pct is not None:
+                    logger.info(
+                        f"Dynamic trailing stop adjusted: {pos.symbol} -> {dynamic_pct:.1f}%"
+                    )
+
+        # ── Info: Momentum alerts ───────────────────────────────────────
+        if signal.severity == "info":
+            if self._config.market_intel.alert_on_momentum:
+                await self._send_market_signal_alert(signal)
+
+    async def _send_market_signal_alert(self, signal: MarketSignal):
+        """Send a market signal alert via Telegram."""
+        if not self._telegram:
+            return
+
+        severity_emoji = {
+            "critical": "🚨",
+            "warning": "⚠️",
+            "info": "📊",
+        }
+        emoji = severity_emoji.get(signal.severity, "📊")
+
+        type_labels = {
+            "rug_liquidity_critical": "LP DRAIN (CRITICAL)",
+            "rug_liquidity_warning": "LP Drain Warning",
+            "rug_sell_dump": "DUMP DETECTED",
+            "sell_pressure_warning": "Sell Pressure",
+            "volume_collapse": "Volume Collapse",
+            "momentum_mcap_spike": "MCAP Surge",
+            "momentum_volume_surge": "Volume Surge",
+            "holder_growth_surge": "Holder Growth",
+        }
+        type_label = type_labels.get(signal.signal_type, signal.signal_type)
+
+        message = (
+            f"{emoji} <b>MARKET INTEL: {type_label}</b>\n\n"
+            f"{signal.message}\n\n"
+            f"<b>Severity:</b> {signal.severity.upper()}"
+        )
+
+        await self._telegram._send_message(message)
 
     # ── Kill Switch ─────────────────────────────────────────────────────
 

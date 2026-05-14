@@ -104,6 +104,44 @@ class TradingConfig:
 
 
 @dataclass(frozen=True)
+class MarketIntelConfig:
+    """Real-time market intelligence configuration."""
+
+    # ── API Keys ────────────────────────────────────────────────────────
+    birdeye_api_key: str = field(default_factory=lambda: os.getenv("BIRDEYE_API_KEY", ""))
+
+    # ── Polling Intervals ───────────────────────────────────────────────
+    dex_poll_interval_seconds: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_DEX_POLL_INTERVAL", "5.0")))
+    birdeye_poll_interval_seconds: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_BIRDEYE_POLL_INTERVAL", "30.0")))
+
+    # ── Rug Detection: Liquidity ────────────────────────────────────────
+    liquidity_drain_warning_pct: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_LIQ_DRAIN_WARNING", "30.0")))
+    liquidity_drain_critical_pct: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_LIQ_DRAIN_CRITICAL", "50.0")))
+    exit_on_liq_critical: bool = field(default_factory=lambda: os.getenv("MARKET_INTEL_EXIT_ON_LIQ_CRITICAL", "true").lower() in ("true", "1", "yes"))
+
+    # ── Rug Detection: Volume & Sell Pressure ───────────────────────────
+    volume_collapse_threshold_pct: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_VOL_COLLAPSE_PCT", "80.0")))
+    sell_imbalance_warning: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_SELL_IMBALANCE_WARNING", "3.0")))
+    sell_imbalance_critical: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_SELL_IMBALANCE_CRITICAL", "5.0")))
+    exit_on_sell_dump: bool = field(default_factory=lambda: os.getenv("MARKET_INTEL_EXIT_ON_SELL_DUMP", "true").lower() in ("true", "1", "yes"))
+
+    # ── Momentum Detection ──────────────────────────────────────────────
+    mcap_spike_threshold_pct: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_MCAP_SPIKE_PCT", "100.0")))
+    volume_surge_threshold_pct: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_VOL_SURGE_PCT", "200.0")))
+    holder_growth_surge_pct: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_HOLDER_SURGE_PCT", "50.0")))
+
+    # ── Dynamic Trailing Stop ───────────────────────────────────────────
+    dynamic_trailing_enabled: bool = field(default_factory=lambda: os.getenv("MARKET_INTEL_DYNAMIC_TRAILING", "true").lower() in ("true", "1", "yes"))
+    volatility_trailing_multiplier: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_VOL_TRAILING_MULT", "2.5")))
+    min_trailing_stop_pct: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_MIN_TRAILING_PCT", "10.0")))
+    max_trailing_stop_pct: float = field(default_factory=lambda: float(os.getenv("MARKET_INTEL_MAX_TRAILING_PCT", "40.0")))
+
+    # ── Alerts ──────────────────────────────────────────────────────────
+    alert_on_rug_warning: bool = field(default_factory=lambda: os.getenv("MARKET_INTEL_ALERT_RUG_WARNING", "true").lower() in ("true", "1", "yes"))
+    alert_on_momentum: bool = field(default_factory=lambda: os.getenv("MARKET_INTEL_ALERT_MOMENTUM", "true").lower() in ("true", "1", "yes"))
+
+
+@dataclass(frozen=True)
 class LogConfig:
     level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
     log_file: str = field(default_factory=lambda: os.getenv("LOG_FILE", "solbot.log"))
@@ -117,6 +155,7 @@ class BotConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)
+    market_intel: MarketIntelConfig = field(default_factory=MarketIntelConfig)
     logging: LogConfig = field(default_factory=LogConfig)
 
     def validate(self) -> list[str]:
@@ -173,5 +212,13 @@ class BotConfig:
         # Kill switch validation
         if self.trading.kill_switch_max_loss_sol <= 0:
             errors.append("KILL_SWITCH_MAX_LOSS_SOL must be positive")
+
+        # Market intel validation
+        if self.market_intel.dex_poll_interval_seconds < 1.0:
+            errors.append("MARKET_INTEL_DEX_POLL_INTERVAL must be >= 1.0")
+        if self.market_intel.liquidity_drain_warning_pct >= self.market_intel.liquidity_drain_critical_pct:
+            errors.append("Liquidity drain critical must be > warning threshold")
+        if self.market_intel.min_trailing_stop_pct >= self.market_intel.max_trailing_stop_pct:
+            errors.append("MARKET_INTEL_MIN_TRAILING_PCT must be < MAX_TRAILING_PCT")
 
         return errors
