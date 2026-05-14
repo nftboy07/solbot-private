@@ -25,6 +25,7 @@ from solbot.commands import CommandHandler, log_capture
 from solbot.config import BotConfig
 from solbot.database import Database
 from solbot.dexscreener import DexScreenerClient
+from solbot.ipc_server import IPCServer
 from solbot.filters import TokenFilter
 from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
@@ -77,6 +78,7 @@ class Solbot:
         self._market_intel: Optional[MarketIntelEngine] = None
         self._dex_client: Optional[DexScreenerClient] = None
         self._birdeye_client: Optional[BirdeyeClient] = None
+        self._ipc_server: Optional[IPCServer] = None
         self._running = False
         self._paused = False   # Pause state (stops new buys, monitoring continues)
         self._killed = False   # Kill switch state
@@ -204,6 +206,15 @@ class Solbot:
         self._commands = CommandHandler(self._config.telegram, self)
         await self._commands.start()
 
+        # Start IPC server for OpenClaw integration
+        self._ipc_server = IPCServer(
+            bot=self,
+            socket_path=self._config.ipc.socket_path,
+            auth_token=self._config.ipc.auth_token,
+            service_id=self._config.ipc.service_id,
+        )
+        await self._ipc_server.start()
+
         self._running = True
         mode = "PAPER" if self._config.jupiter.paper_trade else "LIVE"
         logger.info(
@@ -233,6 +244,9 @@ class Solbot:
 
         if self._commands:
             await self._commands.stop()
+
+        if self._ipc_server:
+            await self._ipc_server.stop()
 
         if self._market_intel:
             await self._market_intel.stop()

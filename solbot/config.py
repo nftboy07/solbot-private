@@ -142,6 +142,14 @@ class MarketIntelConfig:
 
 
 @dataclass(frozen=True)
+class IPCConfig:
+    """IPC server configuration for OpenClaw integration."""
+    socket_path: str = field(default_factory=lambda: os.getenv("IPC_SOCKET_PATH", "/tmp/solbot_ipc.sock"))
+    auth_token: str = field(default_factory=lambda: os.getenv("IPC_AUTH_TOKEN", ""))
+    service_id: str = field(default_factory=lambda: os.getenv("IPC_SERVICE_ID", "solbot"))
+
+
+@dataclass(frozen=True)
 class LogConfig:
     level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
     log_file: str = field(default_factory=lambda: os.getenv("LOG_FILE", "solbot.log"))
@@ -156,6 +164,7 @@ class BotConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)
     market_intel: MarketIntelConfig = field(default_factory=MarketIntelConfig)
+    ipc: IPCConfig = field(default_factory=IPCConfig)
     logging: LogConfig = field(default_factory=LogConfig)
 
     def validate(self) -> list[str]:
