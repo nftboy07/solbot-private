@@ -1,24 +1,21 @@
-"""Telegram command handler for Solbot management via OpenClaw.
+"""Telegram command handler for Solbot with centralized command registry.
 
-Polls for incoming Telegram updates and dispatches commands to the
-running bot instance. All command handlers are async-safe and interact
-with the bot's internal state through its public interface.
-
-Supported commands:
-    /status    - Bot status overview (mode, state, positions, uptime)
-    /positions - List all open positions with P&L
-    /pnl       - Session P&L summary (realized + unrealized)
-    /pause     - Pause new buy execution (monitoring continues)
-    /resume    - Resume buy execution
-    /blacklist - Show blacklisted creators (or add with /blacklist <addr>)
-    /kill      - Emergency kill switch activation
-    /logs      - Show recent log entries
+Features:
+- Centralized command registry with categories, descriptions, aliases
+- Runtime mode switching (safe/normal/degen)
+- Trade statistics commands (/stats, /wins, /losses, /recent)
+- PM2-safe graceful restart
+- /solbot IPC routing for OpenClaw integration
+- Command aliases (/on, /off, /stopbuy, /startbuy)
 """
 
 import asyncio
 import collections
+import os
+import signal
+from dataclasses import dataclass, field
 from time import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Coroutine, Optional
 
 import aiohttp
 
@@ -41,13 +38,10 @@ class LogCapture:
         self._buffer: collections.deque[str] = collections.deque(maxlen=max_size)
 
     def add(self, message: str):
-        """Add a log entry."""
         self._buffer.append(message)
 
     def get_recent(self, count: int = 20) -> list[str]:
-        """Get the most recent N log entries."""
-        entries = list(self._buffer)
-        return entries[-count:]
+        return list(self._buffer)[-count:]
 
     def clear(self):
         self._buffer.clear()
@@ -57,15 +51,101 @@ class LogCapture:
 log_capture = LogCapture()
 
 
+# ── Command Registry ────────────────────────────────────────────────────
+
+@dataclass
+class CommandEntry:
+    """A registered command with metadata."""
+    name: str                   # Primary command name (e.g., "/status")
+    handler: str                # Method name on CommandHandler
+    description: str            # Short description for /list
+    category: str               # Category for grouping
+    aliases: list[str] = field(default_factory=list)  # Alias commands
+    usage: str = ""             # Usage example
+
+
+# Trading mode presets
+TRADING_MODES = {
+    "safe": {
+        "label": "🛡️ SAFE",
+        "min_liquidity_sol": 10.0,
+        "max_concurrent_positions": 3,
+        "buy_cooldown_seconds": 20.0,
+        "stop_loss_pct": 20.0,
+        "min_trade_confidence": "HIGH",
+    },
+    "normal": {
+        "label": "⚖️ NORMAL",
+        "min_liquidity_sol": 5.0,
+        "max_concurrent_positions": 5,
+        "buy_cooldown_seconds": 10.0,
+        "stop_loss_pct": 30.0,
+        "min_trade_confidence": "HIGH",
+    },
+    "degen": {
+        "label": "🔥 DEGEN",
+        "min_liquidity_sol": 2.0,
+        "max_concurrent_positions": 8,
+        "buy_cooldown_seconds": 5.0,
+        "stop_loss_pct": 40.0,
+        "min_trade_confidence": "MEDIUM",
+    },
+}
+
+
+# Registry definition
+COMMAND_REGISTRY: list[CommandEntry] = [
+    # ── Core Control ────────────────────────────────────────────────────
+    CommandEntry("/status", "_cmd_status", "Bot status overview", "Core Control"),
+    CommandEntry("/pause", "_cmd_pause", "Pause new buys", "Core Control", aliases=["/off", "/stopbuy", "/hold"]),
+    CommandEntry("/resume", "_cmd_resume", "Resume trading", "Core Control", aliases=["/on", "/startbuy", "/go"]),
+    CommandEntry("/restart", "_cmd_restart", "Graceful PM2-safe restart", "Core Control"),
+    # ── Emergency ───────────────────────────────────────────────────────
+    CommandEntry("/kill", "_cmd_kill", "Kill switch (requires confirm)", "Emergency", usage="/kill confirm"),
+    CommandEntry("/emergency", "_cmd_emergency", "Instant emergency shutdown", "Emergency"),
+    CommandEntry("/killall", "_cmd_emergency", "Alias for /emergency", "Emergency"),
+    # ── Analytics ───────────────────────────────────────────────────────
+    CommandEntry("/positions", "_cmd_positions", "Open positions with P&L", "Analytics"),
+    CommandEntry("/pnl", "_cmd_pnl", "Session P&L report", "Analytics"),
+    CommandEntry("/stats", "_cmd_stats", "Trade statistics summary", "Analytics"),
+    CommandEntry("/wins", "_cmd_wins", "Recent winning trades", "Analytics"),
+    CommandEntry("/losses", "_cmd_losses", "Recent losing trades", "Analytics"),
+    CommandEntry("/recent", "_cmd_recent", "Last N trades", "Analytics", usage="/recent [N]"),
+    CommandEntry("/top", "_cmd_top", "Top P&L trades all time", "Analytics"),
+    CommandEntry("/logs", "_cmd_logs", "Recent log entries", "Analytics", usage="/logs [N]"),
+    # ── Runtime Config ──────────────────────────────────────────────────
+    CommandEntry("/mode", "_cmd_mode", "Switch trading mode", "Runtime Config", usage="/mode [safe|normal|degen]"),
+    CommandEntry("/maxbuy", "_cmd_maxbuy", "Set buy amount (SOL)", "Runtime Config", usage="/maxbuy 0.05"),
+    CommandEntry("/slippage", "_cmd_slippage", "Set slippage (bps)", "Runtime Config", usage="/slippage 400"),
+    CommandEntry("/maxpositions", "_cmd_maxpositions", "Set max positions", "Runtime Config", usage="/maxpositions 5"),
+    CommandEntry("/cooldown", "_cmd_cooldown", "Set buy cooldown (sec)", "Runtime Config", usage="/cooldown 15"),
+    CommandEntry("/minliq", "_cmd_minliq", "Set min liquidity (SOL)", "Runtime Config", usage="/minliq 8"),
+    CommandEntry("/minmcap", "_cmd_minmcap", "Set min mcap (USD)", "Runtime Config", usage="/minmcap 15000"),
+    CommandEntry("/stoploss", "_cmd_stoploss", "Set stop loss (%)", "Runtime Config", usage="/stoploss 25"),
+    # ── Risk Management ─────────────────────────────────────────────────
+    CommandEntry("/blacklist", "_cmd_blacklist", "View/add blacklisted creators", "Risk Management", usage="/blacklist [addr]"),
+    CommandEntry("/rugs", "_cmd_rugs", "Recent detected rugs", "Risk Management"),
+    # ── Wallet Intelligence ─────────────────────────────────────────────
+    CommandEntry("/creator", "_cmd_creator", "Look up creator stats", "Wallet Intelligence", usage="/creator <addr>"),
+    CommandEntry("/wallet", "_cmd_wallet", "Look up wallet stats", "Wallet Intelligence", usage="/wallet <addr>"),
+    CommandEntry("/smartmoney", "_cmd_smartmoney", "Smart money signals", "Wallet Intelligence"),
+    # ── Info ────────────────────────────────────────────────────────────
+    CommandEntry("/list", "_cmd_list", "Full command registry", "Info"),
+    CommandEntry("/help", "_cmd_help", "Quick help reference", "Info"),
+]
+
+
+
+
 class CommandHandler:
-    """Async Telegram command handler using long-polling.
+    """Async Telegram command handler with centralized registry.
 
-    Integrates with the running Solbot instance to provide real-time
-    management via Telegram commands. Only responds to authorized
-    admin chat IDs.
-
-    Also routes /solbot-prefixed commands through IPC to maintain
-    PM2-separated process architecture with OpenClaw.
+    Features:
+    - Command registry with categories, descriptions, aliases
+    - Runtime mode switching (safe/normal/degen)
+    - /solbot IPC routing for OpenClaw
+    - Trade stats commands
+    - PM2-safe restart
     """
 
     def __init__(self, config: TelegramConfig, bot: "Solbot"):
@@ -77,14 +157,19 @@ class CommandHandler:
         self._poll_task: Optional[asyncio.Task] = None
         self._last_update_id: int = 0
         self._start_time: float = time()
+        self._current_mode: str = "normal"
 
         # Admin authorization
         self._admin_ids: set[str] = set()
-        admin_str = config.chat_id  # Primary chat is always admin
-        if admin_str:
-            self._admin_ids.add(admin_str)
+        if config.chat_id:
+            self._admin_ids.add(config.chat_id)
 
-        # IPC router for /solbot commands (OpenClaw integration)
+        # Build handler dispatch table from registry
+        self._handlers: dict[str, Callable] = {}
+        self._alias_map: dict[str, str] = {}
+        self._build_dispatch_table()
+
+        # IPC router for /solbot commands
         from solbot.ipc_client import OpenClawSolbotRouter
         ipc_config = bot._config.ipc if hasattr(bot._config, 'ipc') else None
         if ipc_config and ipc_config.auth_token:
@@ -96,23 +181,34 @@ class CommandHandler:
         else:
             self._solbot_router = None
 
+    def _build_dispatch_table(self):
+        """Build handler lookup from the command registry."""
+        for entry in COMMAND_REGISTRY:
+            handler = getattr(self, entry.handler, None)
+            if handler:
+                self._handlers[entry.name] = handler
+                for alias in entry.aliases:
+                    self._handlers[alias] = handler
+                    self._alias_map[alias] = entry.name
+        # Special: /start -> /status
+        self._handlers["/start"] = getattr(self, "_cmd_status")
+
     async def start(self):
         """Start the command polling loop."""
         if not self._config.enabled or not self._config.bot_token:
-            logger.info("Telegram commands DISABLED (bot not configured)")
+            logger.info("Telegram commands DISABLED")
             return
 
         timeout = aiohttp.ClientTimeout(total=35, connect=10)
         self._session = aiohttp.ClientSession(timeout=timeout)
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
-        logger.info("Telegram command handler started")
+        logger.info(f"Telegram command handler started | {len(self._handlers)} commands registered")
 
-        # Log IPC router status
         if self._solbot_router and self._solbot_router.is_configured:
-            logger.info("OpenClaw /solbot IPC router: REGISTERED (routing /solbot commands via IPC)")
+            logger.info("OpenClaw /solbot IPC router: REGISTERED")
         else:
-            logger.info("OpenClaw /solbot IPC router: DISABLED (direct command handling only)")
+            logger.info("OpenClaw /solbot IPC router: DISABLED (direct mode)")
 
     async def stop(self):
         """Stop the command polling loop."""
@@ -129,13 +225,11 @@ class CommandHandler:
         logger.info("Telegram command handler stopped")
 
     def add_admin(self, chat_id: str):
-        """Add an additional admin chat ID."""
         self._admin_ids.add(chat_id)
 
     # ── Polling Loop ────────────────────────────────────────────────────
 
     async def _poll_loop(self):
-        """Long-poll Telegram for updates and dispatch commands."""
         while self._running:
             try:
                 updates = await self._get_updates()
@@ -144,26 +238,17 @@ class CommandHandler:
             except asyncio.CancelledError:
                 break
             except asyncio.TimeoutError:
-                continue  # Normal for long-polling
+                continue
             except Exception as e:
                 logger.error(f"Command poll error: {e}")
                 await asyncio.sleep(2.0)
 
     async def _get_updates(self) -> list[dict]:
-        """Fetch new updates from Telegram via long polling."""
         if not self._session:
             return []
-
-        params = {
-            "offset": self._last_update_id + 1,
-            "timeout": 30,
-            "allowed_updates": '["message"]',
-        }
-
+        params = {"offset": self._last_update_id + 1, "timeout": 30, "allowed_updates": '["message"]'}
         try:
-            async with self._session.get(
-                f"{self._base_url}/getUpdates", params=params
-            ) as resp:
+            async with self._session.get(f"{self._base_url}/getUpdates", params=params) as resp:
                 if resp.status != 200:
                     return []
                 data = await resp.json()
@@ -180,150 +265,332 @@ class CommandHandler:
             return []
 
     async def _handle_update(self, update: dict):
-        """Parse and dispatch a single update."""
         message = update.get("message", {})
         text = message.get("text", "").strip()
         chat_id = str(message.get("chat", {}).get("id", ""))
-
         if not text or not chat_id:
             return
-
-        # Authorization check
         if chat_id not in self._admin_ids:
-            logger.warning(f"Unauthorized command from chat_id={chat_id}: {text}")
-            await self._reply(chat_id, "⛔ Unauthorized. Access denied.")
+            await self._reply(chat_id, "⛔ Unauthorized.")
             return
-
-        # Parse command
         if not text.startswith("/"):
             return
 
-        # ── /solbot prefix: route through IPC to Solbot ─────────────────
-        # Intercepts: /solbot status, /solbot positions, /solbot kill confirm, etc.
-        lower_text = text.lower()
-        if lower_text.startswith("/solbot"):
+        # /solbot prefix -> IPC routing
+        if text.lower().startswith("/solbot"):
             await self._route_solbot_command(chat_id, text)
             return
 
         parts = text.split(maxsplit=1)
-        command = parts[0].lower().split("@")[0]  # Handle /command@botname
+        command = parts[0].lower().split("@")[0]
         args = parts[1] if len(parts) > 1 else ""
 
-        # Dispatch
-        handler = self._get_handler(command)
+        handler = self._handlers.get(command)
         if handler:
             try:
                 await handler(chat_id, args)
             except Exception as e:
-                logger.error(f"Command handler error ({command}): {e}")
-                await self._reply(chat_id, f"❌ Error executing {command}: {e}")
+                logger.error(f"Command error ({command}): {e}")
+                await self._reply(chat_id, f"❌ Error: {e}")
         else:
-            await self._reply(
-                chat_id,
-                "❓ Unknown command. Available:\n"
-                "/status /positions /pnl /pause /resume /blacklist /kill /logs\n"
-                "/solbot <cmd> - Route to Solbot via IPC"
-            )
-
-    def _get_handler(self, command: str):
-        """Map command string to handler method."""
-        handlers = {
-            "/status": self._cmd_status,
-            "/positions": self._cmd_positions,
-            "/pnl": self._cmd_pnl,
-            "/pause": self._cmd_pause,
-            "/resume": self._cmd_resume,
-            "/blacklist": self._cmd_blacklist,
-            "/kill": self._cmd_kill,
-            "/logs": self._cmd_logs,
-            "/start": self._cmd_status,  # Default for Telegram /start
-            "/help": self._cmd_help,
-        }
-        return handlers.get(command)
+            await self._reply(chat_id, "❓ Unknown command. Use /list to see all commands.")
 
     # ── /solbot IPC Routing ─────────────────────────────────────────────
 
     async def _route_solbot_command(self, chat_id: str, text: str):
-        """Route /solbot-prefixed commands through the IPC bridge.
-
-        If IPC router is configured, sends the command to Solbot via
-        Unix socket and returns the response. If not configured, falls
-        back to direct command execution (same process).
-
-        Args:
-            chat_id: Telegram chat ID.
-            text: Full message text (e.g., "/solbot status")
-        """
-        # If IPC router is available (separate process mode)
         if self._solbot_router and self._solbot_router.is_configured:
             logger.debug(f"IPC routing: {text}")
-
             response = await self._solbot_router.handle_command(chat_id, text)
             await self._reply(chat_id, response)
-            logger.debug(f"IPC response delivered for: {text}")
             return
 
-        # Fallback: handle directly in same process (no IPC needed)
-        # Parse "/solbot <command> [args]" -> route to local handler
+        # Direct fallback
         parts = text.strip().split(maxsplit=2)
         if len(parts) < 2:
+            await self._cmd_list(chat_id, "")
+            return
+        subcommand = f"/{parts[1].lower().strip()}"
+        args = parts[2] if len(parts) > 2 else ""
+        handler = self._handlers.get(subcommand)
+        if handler:
+            await handler(chat_id, args)
+        else:
+            await self._reply(chat_id, f"❓ Unknown: {parts[1]}. Use /list for commands.")
+
+
+
+    # ── /list - Command Registry Display ────────────────────────────────
+
+    async def _cmd_list(self, chat_id: str, args: str):
+        """Show all available commands grouped by category."""
+        categories: dict[str, list[CommandEntry]] = {}
+        for entry in COMMAND_REGISTRY:
+            categories.setdefault(entry.category, []).append(entry)
+
+        lines = ["🤖 <b>SOLBOT COMMAND REGISTRY</b>\n"]
+        for cat, entries in categories.items():
+            lines.append(f"\n<b>{'─' * 3} {cat} {'─' * 3}</b>")
+            for entry in entries:
+                alias_str = ""
+                if entry.aliases:
+                    alias_str = f"  <i>(alias: {', '.join(entry.aliases)})</i>"
+                usage = entry.usage or entry.name
+                lines.append(f"  <code>{usage}</code> - {entry.description}{alias_str}")
+
+        lines.append(f"\n<b>Current mode:</b> {TRADING_MODES[self._current_mode]['label']}")
+        lines.append(f"<b>Total commands:</b> {len(COMMAND_REGISTRY)}")
+        await self._reply(chat_id, "\n".join(lines))
+
+    # ── /help ───────────────────────────────────────────────────────────
+
+    async def _cmd_help(self, chat_id: str, args: str):
+        await self._reply(
+            chat_id,
+            "🤖 <b>QUICK HELP</b>\n\n"
+            "/list - Full command registry\n"
+            "/status - Bot state\n"
+            "/pnl - P&L report\n"
+            "/positions - Open positions\n"
+            "/on or /resume - Start buying\n"
+            "/off or /pause - Stop buying\n"
+            "/mode [safe|normal|degen] - Switch mode\n"
+            "/stats - Trade statistics\n"
+            "/kill confirm - Emergency stop\n"
+            "/restart - PM2-safe restart"
+        )
+
+    # ── /mode - Runtime Mode Switching ──────────────────────────────────
+
+    async def _cmd_mode(self, chat_id: str, args: str):
+        """Switch trading mode dynamically."""
+        mode_name = args.strip().lower()
+
+        # Show current mode if no arg
+        if not mode_name:
+            current = TRADING_MODES[self._current_mode]
             await self._reply(
                 chat_id,
-                "🤖 <b>SOLBOT COMMANDS</b>\n\n"
-                "<b>Usage:</b> /solbot &lt;command&gt; [args]\n\n"
-                "<b>Available:</b>\n"
-                "  /solbot status\n"
-                "  /solbot positions\n"
-                "  /solbot pnl\n"
-                "  /solbot pause\n"
-                "  /solbot resume\n"
-                "  /solbot blacklist [addr]\n"
-                "  /solbot kill confirm\n"
-                "  /solbot logs [N]"
+                f"⚙️ <b>CURRENT MODE: {current['label']}</b>\n\n"
+                f"  Min liquidity: {current['min_liquidity_sol']} SOL\n"
+                f"  Max positions: {current['max_concurrent_positions']}\n"
+                f"  Buy cooldown: {current['buy_cooldown_seconds']}s\n"
+                f"  Stop loss: {current['stop_loss_pct']}%\n"
+                f"  Confidence: {current['min_trade_confidence']}\n\n"
+                f"<b>Available:</b> /mode safe | /mode normal | /mode degen"
             )
             return
 
-        subcommand = parts[1].lower().strip()
-        args = parts[2] if len(parts) > 2 else ""
+        if mode_name not in TRADING_MODES:
+            await self._reply(chat_id, f"❌ Unknown mode: {mode_name}\nAvailable: safe, normal, degen")
+            return
 
-        # Map subcommand to existing handler
-        handler_map = {
-            "status": self._cmd_status,
-            "positions": self._cmd_positions,
-            "pnl": self._cmd_pnl,
-            "pause": self._cmd_pause,
-            "resume": self._cmd_resume,
-            "blacklist": self._cmd_blacklist,
-            "kill": self._cmd_kill,
-            "logs": self._cmd_logs,
-            "help": self._cmd_help,
-        }
+        preset = TRADING_MODES[mode_name]
+        bot = self._bot
 
-        handler = handler_map.get(subcommand)
-        if handler:
-            logger.debug(f"Direct routing /solbot {subcommand} (no IPC)")
-            try:
-                await handler(chat_id, args)
-            except Exception as e:
-                logger.error(f"/solbot {subcommand} error: {e}")
-                await self._reply(chat_id, f"❌ Error: {e}")
-        else:
-            await self._reply(
-                chat_id,
-                f"❓ Unknown subcommand: {subcommand}\n\n"
-                "Available: status, positions, pnl, pause, resume, blacklist, kill, logs"
+        # Apply runtime config changes
+        # Note: these modify the mutable TradingConfig-derived objects on positions manager
+        if bot._positions:
+            bot._positions._config.max_concurrent_positions = preset["max_concurrent_positions"]
+            bot._positions._config.buy_cooldown_seconds = preset["buy_cooldown_seconds"]
+            bot._positions._config.stop_loss_pct = preset["stop_loss_pct"]
+
+        # Update filter min_liquidity (mutable override)
+        if bot._filter:
+            bot._filter._config_min_liquidity_sol = preset["min_liquidity_sol"]
+
+        self._current_mode = mode_name
+        logger.info(f"Trading mode switched to: {mode_name}")
+
+        await self._reply(
+            chat_id,
+            f"✅ <b>MODE SWITCHED: {preset['label']}</b>\n\n"
+            f"  Min liquidity: {preset['min_liquidity_sol']} SOL\n"
+            f"  Max positions: {preset['max_concurrent_positions']}\n"
+            f"  Buy cooldown: {preset['buy_cooldown_seconds']}s\n"
+            f"  Stop loss: {preset['stop_loss_pct']}%\n"
+            f"  Confidence: {preset['min_trade_confidence']}\n\n"
+            f"⚠️ Changes applied immediately."
+        )
+
+    # ── /stats - Trade Statistics ───────────────────────────────────────
+
+    async def _cmd_stats(self, chat_id: str, args: str):
+        """Show comprehensive trade statistics."""
+        bot = self._bot
+        stats = {}
+        if bot._db:
+            stats = await bot._db.get_session_stats()
+
+        buys = stats.get("buys", 0) or 0
+        sells = stats.get("sells", 0) or 0
+        total_bought = stats.get("total_bought_sol", 0) or 0
+        total_sold = stats.get("total_sold_sol", 0) or 0
+        net = total_sold - total_bought
+
+        uptime = time() - self._start_time
+        positions = bot._positions.open_count if bot._positions else 0
+        tokens_seen = bot._filter.seen_count if bot._filter else 0
+
+        win_rate = "N/A"
+        if sells > 0:
+            # Approximate: positive realized = win
+            wins_approx = sells - bot._consecutive_losses if bot._consecutive_losses < sells else sells // 2
+            win_rate = f"{(wins_approx / sells) * 100:.0f}%"
+
+        await self._reply(
+            chat_id,
+            f"📊 <b>TRADE STATISTICS</b>\n\n"
+            f"<b>Trades:</b>\n"
+            f"  Buys: {buys}\n"
+            f"  Sells: {sells}\n"
+            f"  Open: {positions}\n\n"
+            f"<b>Volume:</b>\n"
+            f"  SOL bought: {total_bought:.4f}\n"
+            f"  SOL sold: {total_sold:.4f}\n"
+            f"  Net: {net:+.4f} SOL\n\n"
+            f"<b>Performance:</b>\n"
+            f"  Realized P&L: {bot._total_realized_pnl_sol:+.4f} SOL\n"
+            f"  Consecutive losses: {bot._consecutive_losses}\n"
+            f"  Approx win rate: {win_rate}\n\n"
+            f"<b>Session:</b>\n"
+            f"  Uptime: {self._format_duration(uptime)}\n"
+            f"  Tokens seen: {tokens_seen}\n"
+            f"  Mode: {TRADING_MODES[self._current_mode]['label']}"
+        )
+
+    # ── /wins - Recent Winning Trades ───────────────────────────────────
+
+    async def _cmd_wins(self, chat_id: str, args: str):
+        """Show recent winning trades from DB."""
+        bot = self._bot
+        if not bot._db:
+            await self._reply(chat_id, "❌ Database not available.")
+            return
+
+        # Query closed positions with positive P&L
+        rows = await bot._db._fetch_all_async(
+            "SELECT symbol, pnl_pct, pnl_sol, sell_reason, closed_at "
+            "FROM positions WHERE status='closed' AND pnl_sol > 0 "
+            "ORDER BY closed_at DESC LIMIT 10"
+        )
+
+        if not rows:
+            await self._reply(chat_id, "📭 No winning trades recorded yet.")
+            return
+
+        lines = ["🏆 <b>RECENT WINS</b>\n"]
+        for i, row in enumerate(rows, 1):
+            lines.append(
+                f"  {i}. <b>{row['symbol']}</b> | "
+                f"+{row['pnl_pct']:.1f}% | "
+                f"+{row['pnl_sol']:.4f} SOL | "
+                f"{row['sell_reason']}"
             )
 
-    # ── Command Handlers ────────────────────────────────────────────────
+        await self._reply(chat_id, "\n".join(lines))
+
+    # ── /losses - Recent Losing Trades ──────────────────────────────────
+
+    async def _cmd_losses(self, chat_id: str, args: str):
+        """Show recent losing trades from DB."""
+        bot = self._bot
+        if not bot._db:
+            await self._reply(chat_id, "❌ Database not available.")
+            return
+
+        rows = await bot._db._fetch_all_async(
+            "SELECT symbol, pnl_pct, pnl_sol, sell_reason, closed_at "
+            "FROM positions WHERE status='closed' AND pnl_sol < 0 "
+            "ORDER BY closed_at DESC LIMIT 10"
+        )
+
+        if not rows:
+            await self._reply(chat_id, "📭 No losing trades recorded yet.")
+            return
+
+        lines = ["💀 <b>RECENT LOSSES</b>\n"]
+        for i, row in enumerate(rows, 1):
+            lines.append(
+                f"  {i}. <b>{row['symbol']}</b> | "
+                f"{row['pnl_pct']:.1f}% | "
+                f"{row['pnl_sol']:.4f} SOL | "
+                f"{row['sell_reason']}"
+            )
+
+        await self._reply(chat_id, "\n".join(lines))
+
+    # ── /recent - Recent Trades ─────────────────────────────────────────
+
+    async def _cmd_recent(self, chat_id: str, args: str):
+        """Show last N trades (buys and sells)."""
+        count = 10
+        if args.strip().isdigit():
+            count = min(int(args.strip()), 20)
+
+        bot = self._bot
+        if not bot._db:
+            await self._reply(chat_id, "❌ Database not available.")
+            return
+
+        rows = await bot._db._fetch_all_async(
+            "SELECT symbol, side, amount_sol, tx_signature, executed_at "
+            "FROM trade_history ORDER BY executed_at DESC LIMIT ?",
+            (count,),
+        )
+
+        if not rows:
+            await self._reply(chat_id, "📭 No trades recorded yet.")
+            return
+
+        lines = [f"📋 <b>LAST {len(rows)} TRADES</b>\n"]
+        for row in rows:
+            side_emoji = "🟢 BUY" if row["side"] == "buy" else "🔴 SELL"
+            tx_short = row["tx_signature"][:12] + "..." if row["tx_signature"] else "—"
+            lines.append(
+                f"  {side_emoji} <b>{row['symbol']}</b> | "
+                f"{row['amount_sol']:.4f} SOL | "
+                f"<code>{tx_short}</code>"
+            )
+
+        await self._reply(chat_id, "\n".join(lines))
+
+
+
+    # ── /restart - PM2-safe Graceful Restart ────────────────────────────
+
+    async def _cmd_restart(self, chat_id: str, args: str):
+        """Gracefully restart the bot process (PM2-safe)."""
+        bot = self._bot
+
+        await self._reply(
+            chat_id,
+            "🔄 <b>RESTARTING...</b>\n\n"
+            "Graceful shutdown initiated.\n"
+            "PM2 will auto-restart the process.\n"
+            "Please wait 5-10 seconds."
+        )
+
+        logger.info("RESTART requested via Telegram command")
+
+        # Schedule shutdown after reply is sent
+        async def _do_restart():
+            await asyncio.sleep(1.0)  # Let the reply send
+            logger.info("Initiating PM2-safe shutdown for restart...")
+            # Stop the bot gracefully
+            await bot.stop()
+            # Send SIGTERM to self (PM2 will restart)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        asyncio.create_task(_do_restart())
+
+    # ── Core Commands (status, positions, pnl, pause, resume, etc.) ────
 
     async def _cmd_status(self, chat_id: str, args: str):
-        """Handle /status - Bot status overview."""
         bot = self._bot
-        mode = "PAPER" if bot._config.jupiter.paper_trade else "LIVE"
+        mode_label = TRADING_MODES[self._current_mode]["label"]
+        trade_mode = "PAPER" if bot._config.jupiter.paper_trade else "LIVE"
         uptime = time() - self._start_time
-        uptime_str = self._format_duration(uptime)
 
-        # Determine state
         if bot._killed:
             state = "🚨 KILLED"
         elif bot._paused:
@@ -338,11 +605,13 @@ class CommandHandler:
         blacklist_count = bot._blacklist.count if bot._blacklist else 0
         tokens_seen = bot._filter.seen_count if bot._filter else 0
 
-        message = (
+        await self._reply(
+            chat_id,
             f"📊 <b>SOLBOT STATUS</b>\n\n"
             f"<b>State:</b> {state}\n"
-            f"<b>Mode:</b> {mode}\n"
-            f"<b>Uptime:</b> {uptime_str}\n\n"
+            f"<b>Trade mode:</b> {trade_mode}\n"
+            f"<b>Strategy:</b> {mode_label}\n"
+            f"<b>Uptime:</b> {self._format_duration(uptime)}\n\n"
             f"📈 <b>Activity:</b>\n"
             f"  Positions: {positions_count}/{max_positions}\n"
             f"  Blacklisted: {blacklist_count}\n"
@@ -355,331 +624,364 @@ class CommandHandler:
             f"  Cooldown: {bot._config.trading.buy_cooldown_seconds}s\n"
             f"  Kill switch: {'ON' if bot._config.trading.kill_switch_enabled else 'OFF'}"
         )
-        await self._reply(chat_id, message)
 
     async def _cmd_positions(self, chat_id: str, args: str):
-        """Handle /positions - List all open positions."""
         bot = self._bot
         if not bot._positions or bot._positions.open_count == 0:
             await self._reply(chat_id, "📭 No open positions.")
             return
-
         lines = ["📋 <b>OPEN POSITIONS</b>\n"]
-
         for i, (mint, pos) in enumerate(bot._positions.positions.items(), 1):
             pnl_emoji = "🟢" if pos.pnl_pct >= 0 else "🔴"
-            age_str = self._format_duration(pos.age_seconds)
-
             lines.append(
                 f"\n<b>{i}. {pos.symbol}</b> ({pos.name})\n"
                 f"  Mint: <code>{mint[:20]}...</code>\n"
                 f"  Entry: {pos.entry_price_sol:.4f} SOL\n"
-                f"  Current: {pos.current_price_sol:.4f} SOL\n"
-                f"  Peak: {pos.highest_price_sol:.4f} SOL\n"
                 f"  {pnl_emoji} P&L: {pos.pnl_pct:+.1f}% ({pos.pnl_sol:+.4f} SOL)\n"
-                f"  Tokens left: {pos.remaining_tokens:.0f}\n"
-                f"  Held: {age_str}\n"
-                f"  Confidence: {pos.confidence}"
+                f"  Held: {self._format_duration(pos.age_seconds)} | {pos.confidence}"
             )
-
-        # Summary line
-        total_invested = sum(p.entry_price_sol for p in bot._positions.positions.values())
         total_pnl = sum(p.pnl_sol for p in bot._positions.positions.values())
-        lines.append(
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Total invested:</b> {total_invested:.4f} SOL\n"
-            f"<b>Unrealized P&L:</b> {total_pnl:+.4f} SOL"
-        )
-
+        lines.append(f"\n━━━━━━━━━━━━━━━━━━━━\n<b>Unrealized P&L:</b> {total_pnl:+.4f} SOL")
         await self._reply(chat_id, "\n".join(lines))
 
     async def _cmd_pnl(self, chat_id: str, args: str):
-        """Handle /pnl - Session P&L summary."""
         bot = self._bot
-        uptime = time() - self._start_time
-
-        # Unrealized P&L from open positions
-        unrealized = 0.0
-        if bot._positions:
-            unrealized = sum(p.pnl_sol for p in bot._positions.positions.values())
-
+        unrealized = sum(p.pnl_sol for p in bot._positions.positions.values()) if bot._positions else 0.0
         realized = bot._total_realized_pnl_sol
         total = realized + unrealized
+        emoji = "📈" if total > 0 else ("📉" if total < 0 else "➖")
 
-        # Emoji
-        if total > 0:
-            emoji = "📈"
-        elif total < 0:
-            emoji = "📉"
-        else:
-            emoji = "➖"
-
-        # Get trade stats from DB
-        stats = {}
-        if bot._db:
-            stats = await bot._db.get_session_stats()
-
+        stats = await bot._db.get_session_stats() if bot._db else {}
         buys = stats.get("buys", 0) or 0
         sells = stats.get("sells", 0) or 0
         total_bought = stats.get("total_bought_sol", 0) or 0
         total_sold = stats.get("total_sold_sol", 0) or 0
 
-        message = (
+        await self._reply(
+            chat_id,
             f"{emoji} <b>P&L REPORT</b>\n\n"
             f"<b>Realized:</b> {realized:+.4f} SOL\n"
             f"<b>Unrealized:</b> {unrealized:+.4f} SOL\n"
             f"<b>Total:</b> {total:+.4f} SOL\n\n"
-            f"📊 <b>Trade Stats:</b>\n"
-            f"  Buys: {buys} ({total_bought:.4f} SOL)\n"
-            f"  Sells: {sells} ({total_sold:.4f} SOL)\n"
-            f"  Open positions: {bot._positions.open_count if bot._positions else 0}\n"
-            f"  Consecutive losses: {bot._consecutive_losses}\n\n"
-            f"⏱️ Session duration: {self._format_duration(uptime)}"
+            f"📊 <b>Trades:</b> {buys} buys / {sells} sells\n"
+            f"💰 <b>Volume:</b> {total_bought:.4f} in / {total_sold:.4f} out\n"
+            f"⏱️ Session: {self._format_duration(time() - self._start_time)}"
         )
-        await self._reply(chat_id, message)
 
     async def _cmd_pause(self, chat_id: str, args: str):
-        """Handle /pause - Pause new buy execution."""
         bot = self._bot
-
         if bot._killed:
-            await self._reply(chat_id, "🚨 Bot is KILLED. Use /resume after clearing kill state.")
+            await self._reply(chat_id, "🚨 Bot is KILLED. Use /resume to reset.")
             return
-
         if bot._paused:
             await self._reply(chat_id, "⏸️ Already paused.")
             return
-
         bot._paused = True
-        logger.info("Bot PAUSED via Telegram command")
-        await self._reply(
-            chat_id,
-            "⏸️ <b>BOT PAUSED</b>\n\n"
-            "New buys are halted.\n"
-            "Position monitoring and auto-sells continue.\n"
-            "Use /resume to restart buying."
-        )
+        logger.info("Bot PAUSED via command")
+        await self._reply(chat_id, "⏸️ <b>PAUSED</b> - New buys halted. Auto-sells continue.\nUse /on or /resume to restart.")
 
     async def _cmd_resume(self, chat_id: str, args: str):
-        """Handle /resume - Resume buy execution."""
         bot = self._bot
-
         if bot._killed:
-            # Allow resuming from kill state
             bot._killed = False
             bot._paused = False
             bot._running = True
-            logger.info("Bot RESUMED from KILL state via Telegram command")
-            await self._reply(
-                chat_id,
-                "🟢 <b>BOT RESUMED FROM KILL</b>\n\n"
-                "Kill switch reset. Trading reactivated.\n"
-                "⚠️ Monitor carefully."
-            )
+            logger.info("Bot RESUMED from KILL via command")
+            await self._reply(chat_id, "🟢 <b>RESUMED FROM KILL</b> - Trading reactivated.")
             return
-
         if not bot._paused:
-            await self._reply(chat_id, "🟢 Bot is already running.")
+            await self._reply(chat_id, "🟢 Already running.")
             return
-
         bot._paused = False
-        logger.info("Bot RESUMED via Telegram command")
-        await self._reply(
-            chat_id,
-            "🟢 <b>BOT RESUMED</b>\n\n"
-            "Buy execution reactivated.\n"
-            "All systems operational."
-        )
+        logger.info("Bot RESUMED via command")
+        await self._reply(chat_id, "🟢 <b>RESUMED</b> - Buy execution reactivated.")
 
     async def _cmd_blacklist(self, chat_id: str, args: str):
-        """Handle /blacklist - Show or add to blacklist.
-
-        Usage:
-            /blacklist          - Show all blacklisted creators
-            /blacklist <addr>   - Manually blacklist a creator address
-        """
         bot = self._bot
-
         if not bot._blacklist:
             await self._reply(chat_id, "❌ Blacklist not initialized.")
             return
-
-        # If args provided, add to blacklist
         if args.strip():
             address = args.strip()
             if len(address) < 32 or len(address) > 44:
-                await self._reply(chat_id, "❌ Invalid address. Must be a Solana public key (32-44 chars).")
+                await self._reply(chat_id, "❌ Invalid address (32-44 chars).")
                 return
-
-            newly_added = await bot._blacklist.add(
-                creator_address=address,
-                reason="manual",
-                related_mint="",
-                related_symbol="(manual via Telegram)",
-            )
-
-            if newly_added:
-                await self._reply(
-                    chat_id,
-                    f"🚫 <b>BLACKLISTED</b>\n\n"
-                    f"<code>{address}</code>\n\n"
-                    f"Reason: Manual (Telegram command)\n"
-                    f"Total blacklisted: {bot._blacklist.count}"
-                )
+            added = await bot._blacklist.add(creator_address=address, reason="manual", related_symbol="(Telegram)")
+            if added:
+                await self._reply(chat_id, f"🚫 <b>BLACKLISTED:</b> <code>{address}</code>\nTotal: {bot._blacklist.count}")
             else:
-                await self._reply(chat_id, f"ℹ️ Address already blacklisted: <code>{address[:20]}...</code>")
+                await self._reply(chat_id, "ℹ️ Already blacklisted.")
             return
 
-        # Show blacklist
         entries = await bot._blacklist.get_all()
         if not entries:
-            await self._reply(chat_id, "📭 Blacklist is empty.")
+            await self._reply(chat_id, "📭 Blacklist empty.")
             return
-
-        lines = [f"🚫 <b>BLACKLIST</b> ({len(entries)} creators)\n"]
-
-        for i, entry in enumerate(entries[:20], 1):  # Cap at 20
-            addr = entry["creator_address"]
-            reason = entry.get("reason", "unknown")
-            symbol = entry.get("related_symbol", "")
-
-            reason_display = {
-                "manual": "👤 Manual",
-                "rug_liquidity_pull": "💀 Liquidity pull",
-                "rug_stop_loss_hit": "🛑 Stop loss",
-                "repeated_rugs": "🔁 Repeated rugs",
-                "suspicious_pattern": "⚠️ Suspicious",
-            }.get(reason, reason)
-
-            token_str = f" [{symbol}]" if symbol else ""
-            lines.append(f"{i}. <code>{addr[:16]}...</code>{token_str}\n   {reason_display}")
-
-        if len(entries) > 20:
-            lines.append(f"\n... and {len(entries) - 20} more")
-
-        lines.append(f"\nℹ️ Add: /blacklist <address>")
+        lines = [f"🚫 <b>BLACKLIST</b> ({len(entries)})\n"]
+        for i, e in enumerate(entries[:15], 1):
+            lines.append(f"  {i}. <code>{e['creator_address'][:16]}...</code> | {e.get('reason', '?')}")
+        if len(entries) > 15:
+            lines.append(f"  ... +{len(entries)-15} more")
         await self._reply(chat_id, "\n".join(lines))
 
     async def _cmd_kill(self, chat_id: str, args: str):
-        """Handle /kill - Emergency kill switch activation."""
         bot = self._bot
-
         if bot._killed:
-            await self._reply(chat_id, "🚨 Kill switch already active. Use /resume to reset.")
+            await self._reply(chat_id, "🚨 Already killed. /resume to reset.")
             return
-
-        # Require confirmation
         if args.strip().lower() != "confirm":
-            await self._reply(
-                chat_id,
-                "⚠️ <b>KILL SWITCH</b>\n\n"
-                "This will:\n"
-                "• Close ALL open positions immediately\n"
-                "• Halt all trading\n"
-                "• Require /resume to restart\n\n"
-                "To confirm, send: /kill confirm"
-            )
+            await self._reply(chat_id, "⚠️ <b>KILL SWITCH</b>\n\nSend /kill confirm to activate.")
             return
-
-        # Execute kill
         bot._killed = True
         bot._running = False
-        logger.critical("KILL SWITCH triggered via Telegram command")
-
-        positions_closed = 0
-        if bot._positions:
-            closed = await bot._positions.emergency_close_all()
-            positions_closed = len(closed)
-
-        await self._reply(
-            chat_id,
-            f"🚨🚨🚨 <b>KILL SWITCH ACTIVATED</b> 🚨🚨🚨\n\n"
-            f"<b>Positions closed:</b> {positions_closed}\n"
-            f"<b>Trading:</b> HALTED\n\n"
-            f"Use /resume to restart trading."
-        )
+        logger.critical("KILL SWITCH via Telegram")
+        closed = await bot._positions.emergency_close_all() if bot._positions else []
+        await self._reply(chat_id, f"🚨🚨🚨 <b>KILLED</b>\nPositions closed: {len(closed)}\n/resume to restart.")
 
     async def _cmd_logs(self, chat_id: str, args: str):
-        """Handle /logs - Show recent log entries."""
-        # Parse optional count
-        count = 15
-        if args.strip().isdigit():
-            count = min(int(args.strip()), 40)  # Cap at 40
-
+        count = min(int(args.strip()), 40) if args.strip().isdigit() else 15
         entries = log_capture.get_recent(count)
-
         if not entries:
-            await self._reply(chat_id, "📝 No recent log entries captured.")
+            await self._reply(chat_id, "📝 No logs.")
             return
-
-        lines = [f"📝 <b>RECENT LOGS</b> (last {len(entries)})\n"]
-        lines.append("<pre>")
-        for entry in entries:
-            # Truncate long lines
-            truncated = entry[:80] + "..." if len(entry) > 80 else entry
-            lines.append(truncated)
+        lines = [f"📝 <b>LOGS</b> ({len(entries)})\n<pre>"]
+        for e in entries:
+            lines.append(e[:80] + "..." if len(e) > 80 else e)
         lines.append("</pre>")
-
-        message = "\n".join(lines)
-        # Telegram message limit is 4096 chars
-        if len(message) > 4000:
-            message = message[:4000] + "\n...</pre>"
-
-        await self._reply(chat_id, message)
-
-    async def _cmd_help(self, chat_id: str, args: str):
-        """Handle /help - Show available commands."""
-        message = (
-            "🤖 <b>SOLBOT COMMANDS</b>\n\n"
-            "<b>Monitoring:</b>\n"
-            "  /status - Bot status overview\n"
-            "  /positions - Open positions with P&L\n"
-            "  /pnl - Session P&L report\n"
-            "  /logs [N] - Recent log entries\n\n"
-            "<b>Control:</b>\n"
-            "  /pause - Pause new buys\n"
-            "  /resume - Resume trading\n"
-            "  /kill confirm - Emergency shutdown\n\n"
-            "<b>Management:</b>\n"
-            "  /blacklist - View blacklisted creators\n"
-            "  /blacklist <addr> - Add to blacklist\n"
-        )
-        await self._reply(chat_id, message)
+        msg = "\n".join(lines)
+        await self._reply(chat_id, msg[:4000])
 
     # ── Internal Helpers ────────────────────────────────────────────────
 
     async def _reply(self, chat_id: str, text: str):
-        """Send a reply message to a chat."""
         if not self._session:
             return
-
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         try:
-            async with self._session.post(
-                f"{self._base_url}/sendMessage", json=payload
-            ) as resp:
+            async with self._session.post(f"{self._base_url}/sendMessage", json=payload) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error(f"Command reply failed ({resp.status}): {body[:200]}")
+                    logger.error(f"Reply failed ({resp.status}): {body[:200]}")
         except Exception as e:
-            logger.error(f"Command reply error: {e}")
+            logger.error(f"Reply error: {e}")
 
     @staticmethod
     def _format_duration(seconds: float) -> str:
-        """Format seconds into human-readable duration."""
         if seconds < 60:
             return f"{seconds:.0f}s"
         elif seconds < 3600:
-            m = int(seconds // 60)
-            s = int(seconds % 60)
-            return f"{m}m {s}s"
+            return f"{int(seconds // 60)}m {int(seconds % 60)}s"
         else:
-            h = int(seconds // 3600)
-            m = int((seconds % 3600) // 60)
-            return f"{h}h {m}m"
+            return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
+
+
+
+    # ── /emergency & /killall - Emergency Shutdown ──────────────────────
+
+    async def _cmd_emergency(self, chat_id: str, args: str):
+        """Emergency: close all + kill + disable buying immediately."""
+        bot = self._bot
+        bot._killed = True
+        bot._paused = True
+        bot._running = False
+        logger.critical("EMERGENCY triggered via Telegram")
+
+        closed = await bot._positions.emergency_close_all() if bot._positions else []
+
+        await self._reply(
+            chat_id,
+            f"🚨🚨🚨 <b>EMERGENCY ACTIVATED</b> 🚨🚨🚨\n\n"
+            f"• Positions closed: {len(closed)}\n"
+            f"• Buying: DISABLED\n"
+            f"• Kill switch: ACTIVE\n\n"
+            f"Use /resume to restore."
+        )
+
+    # ── Live Config Commands ────────────────────────────────────────────
+
+    async def _cmd_maxbuy(self, chat_id: str, args: str):
+        """Set buy amount per trade (SOL)."""
+        if not args.strip():
+            await self._reply(chat_id, f"💰 Current buy amount: {self._bot._config.jupiter.buy_amount_sol} SOL\nUsage: /maxbuy 0.05")
+            return
+        try:
+            val = float(args.strip())
+            if val <= 0 or val > 10:
+                await self._reply(chat_id, "❌ Must be between 0 and 10 SOL.")
+                return
+            # Runtime override via mutable object hack
+            object.__setattr__(self._bot._config.jupiter, 'buy_amount_sol', val)
+            logger.info(f"Buy amount set to {val} SOL via command")
+            await self._reply(chat_id, f"✅ Buy amount → <b>{val} SOL</b>")
+        except ValueError:
+            await self._reply(chat_id, "❌ Invalid number.")
+
+    async def _cmd_slippage(self, chat_id: str, args: str):
+        """Set slippage in basis points."""
+        if not args.strip():
+            await self._reply(chat_id, f"📊 Current slippage: {self._bot._config.jupiter.slippage_bps} bps\nUsage: /slippage 400")
+            return
+        try:
+            val = int(args.strip())
+            if val < 50 or val > 5000:
+                await self._reply(chat_id, "❌ Must be 50-5000 bps.")
+                return
+            object.__setattr__(self._bot._config.jupiter, 'slippage_bps', val)
+            logger.info(f"Slippage set to {val} bps via command")
+            await self._reply(chat_id, f"✅ Slippage → <b>{val} bps</b>")
+        except ValueError:
+            await self._reply(chat_id, "❌ Invalid number.")
+
+    async def _cmd_maxpositions(self, chat_id: str, args: str):
+        """Set max concurrent positions."""
+        if not args.strip():
+            cur = self._bot._positions._config.max_concurrent_positions if self._bot._positions else "?"
+            await self._reply(chat_id, f"📊 Max positions: {cur}\nUsage: /maxpositions 5")
+            return
+        try:
+            val = int(args.strip())
+            if val < 1 or val > 20:
+                await self._reply(chat_id, "❌ Must be 1-20.")
+                return
+            if self._bot._positions:
+                self._bot._positions._config.max_concurrent_positions = val
+            logger.info(f"Max positions set to {val} via command")
+            await self._reply(chat_id, f"✅ Max positions → <b>{val}</b>")
+        except ValueError:
+            await self._reply(chat_id, "❌ Invalid number.")
+
+    async def _cmd_cooldown(self, chat_id: str, args: str):
+        """Set buy cooldown in seconds."""
+        if not args.strip():
+            cur = self._bot._positions._config.buy_cooldown_seconds if self._bot._positions else "?"
+            await self._reply(chat_id, f"⏱️ Cooldown: {cur}s\nUsage: /cooldown 15")
+            return
+        try:
+            val = float(args.strip())
+            if val < 0 or val > 300:
+                await self._reply(chat_id, "❌ Must be 0-300s.")
+                return
+            if self._bot._positions:
+                self._bot._positions._config.buy_cooldown_seconds = val
+            logger.info(f"Cooldown set to {val}s via command")
+            await self._reply(chat_id, f"✅ Cooldown → <b>{val}s</b>")
+        except ValueError:
+            await self._reply(chat_id, "❌ Invalid number.")
+
+    async def _cmd_minliq(self, chat_id: str, args: str):
+        """Set minimum liquidity filter (SOL)."""
+        if not args.strip():
+            cur = self._bot._config.pumpfun.min_liquidity_sol
+            await self._reply(chat_id, f"💧 Min liquidity: {cur} SOL\nUsage: /minliq 8")
+            return
+        try:
+            val = float(args.strip())
+            if val < 0 or val > 1000:
+                await self._reply(chat_id, "❌ Must be 0-1000.")
+                return
+            if self._bot._filter:
+                self._bot._filter._config_min_liquidity_sol = val
+            logger.info(f"Min liquidity set to {val} SOL via command")
+            await self._reply(chat_id, f"✅ Min liquidity → <b>{val} SOL</b>")
+        except ValueError:
+            await self._reply(chat_id, "❌ Invalid number.")
+
+    async def _cmd_minmcap(self, chat_id: str, args: str):
+        """Set minimum market cap filter (USD)."""
+        if not args.strip():
+            cur = self._bot._config.pumpfun.min_market_cap_usd
+            await self._reply(chat_id, f"💰 Min mcap: ${cur:,.0f}\nUsage: /minmcap 15000")
+            return
+        try:
+            val = float(args.strip())
+            if val < 0:
+                await self._reply(chat_id, "❌ Must be positive.")
+                return
+            if self._bot._filter:
+                self._bot._filter._config_min_market_cap_usd = val
+            logger.info(f"Min mcap set to ${val:.0f} via command")
+            await self._reply(chat_id, f"✅ Min mcap → <b>${val:,.0f}</b>")
+        except ValueError:
+            await self._reply(chat_id, "❌ Invalid number.")
+
+    async def _cmd_stoploss(self, chat_id: str, args: str):
+        """Set stop loss percentage."""
+        if not args.strip():
+            cur = self._bot._positions._config.stop_loss_pct if self._bot._positions else "?"
+            await self._reply(chat_id, f"🛑 Stop loss: {cur}%\nUsage: /stoploss 25")
+            return
+        try:
+            val = float(args.strip())
+            if val <= 0 or val > 100:
+                await self._reply(chat_id, "❌ Must be 1-100%.")
+                return
+            if self._bot._positions:
+                self._bot._positions._config.stop_loss_pct = val
+            logger.info(f"Stop loss set to {val}% via command")
+            await self._reply(chat_id, f"✅ Stop loss → <b>{val}%</b>")
+        except ValueError:
+            await self._reply(chat_id, "❌ Invalid number.")
+
+    # ── /top - Top PnL Trades ───────────────────────────────────────────
+
+    async def _cmd_top(self, chat_id: str, args: str):
+        """Show top P&L trades of all time."""
+        bot = self._bot
+        if not bot._db:
+            await self._reply(chat_id, "❌ Database not available.")
+            return
+        rows = await bot._db._fetch_all_async(
+            "SELECT symbol, pnl_pct, pnl_sol, sell_reason "
+            "FROM positions WHERE status='closed' "
+            "ORDER BY pnl_sol DESC LIMIT 10"
+        )
+        if not rows:
+            await self._reply(chat_id, "📭 No closed trades yet.")
+            return
+        lines = ["🏅 <b>TOP TRADES (by SOL P&L)</b>\n"]
+        for i, row in enumerate(rows, 1):
+            emoji = "🟢" if row["pnl_sol"] >= 0 else "🔴"
+            lines.append(f"  {i}. {emoji} <b>{row['symbol']}</b> | {row['pnl_pct']:+.1f}% | {row['pnl_sol']:+.4f} SOL")
+        await self._reply(chat_id, "\n".join(lines))
+
+    # ── Wallet Intelligence Stubs ───────────────────────────────────────
+
+    async def _cmd_creator(self, chat_id: str, args: str):
+        """Look up creator/deployer stats (stub for future ML layer)."""
+        if not args.strip():
+            await self._reply(chat_id, "Usage: /creator <wallet_address>")
+            return
+        await self._reply(
+            chat_id,
+            f"🔍 <b>Creator Intel</b>\n\n"
+            f"<code>{args.strip()[:44]}</code>\n\n"
+            f"⚠️ Creator intelligence layer not yet active.\n"
+            f"Coming: winrate, rug frequency, avg ATH, launch patterns."
+        )
+
+    async def _cmd_wallet(self, chat_id: str, args: str):
+        """Look up wallet stats (stub)."""
+        if not args.strip():
+            await self._reply(chat_id, "Usage: /wallet <address>")
+            return
+        await self._reply(chat_id, "⚠️ Wallet intelligence coming soon.")
+
+    async def _cmd_smartmoney(self, chat_id: str, args: str):
+        """Show smart money signals (stub)."""
+        await self._reply(chat_id, "⚠️ Smart money tracking coming soon.\nWill show: sniper wallets, whale entries, copy targets.")
+
+    async def _cmd_rugs(self, chat_id: str, args: str):
+        """Show recent detected rugs (stub)."""
+        bot = self._bot
+        if not bot._blacklist:
+            await self._reply(chat_id, "📭 No rug data.")
+            return
+        entries = await bot._blacklist.get_all()
+        rug_entries = [e for e in entries if "rug" in e.get("reason", "")][:10]
+        if not rug_entries:
+            await self._reply(chat_id, "📭 No rugs detected yet.")
+            return
+        lines = ["💀 <b>RECENT RUGS</b>\n"]
+        for i, e in enumerate(rug_entries, 1):
+            lines.append(f"  {i}. <code>{e['creator_address'][:16]}...</code> | {e.get('related_symbol', '?')} | {e['reason']}")
+        await self._reply(chat_id, "\n".join(lines))

@@ -326,3 +326,11 @@ class Database:
     def _fetch_one(self, sql: str, params: tuple = ()):
         """Fetch one row."""
         return self._conn.execute(sql, params).fetchone()
+
+    # ── Public Async Query Helper ───────────────────────────────────────
+
+    async def _fetch_all_async(self, sql: str, params: tuple = ()) -> list[dict]:
+        """Async-safe fetch all rows as dicts. Used by command handlers."""
+        async with self._lock:
+            rows = await asyncio.to_thread(self._fetch_all, sql, params)
+        return [dict(r) for r in rows] if rows else []

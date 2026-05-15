@@ -8,11 +8,18 @@ logger = get_logger("filters")
 
 
 class TokenFilter:
-    """Applies configurable filters to incoming token events."""
+    """Applies configurable filters to incoming token events.
+
+    Supports runtime overrides via _config_min_liquidity_sol and
+    _config_min_market_cap_usd attributes (set by /minliq, /minmcap commands).
+    """
 
     def __init__(self, config: PumpFunConfig):
         self._config = config
         self._seen_mints: set[str] = set()
+        # Runtime-overridable thresholds (commands can modify these)
+        self._config_min_liquidity_sol: float = config.min_liquidity_sol
+        self._config_min_market_cap_usd: float = config.min_market_cap_usd
 
     def is_qualified(self, token: TokenEvent) -> bool:
         """Check if a token passes all filters."""
@@ -27,13 +34,13 @@ class TokenFilter:
             logger.debug(f"SKIP too old ({token.age_seconds:.1f}s): {token.symbol}")
             return False
 
-        # Liquidity filter
-        if token.liquidity_sol < self._config.min_liquidity_sol:
+        # Liquidity filter (uses runtime-overridable value)
+        if token.liquidity_sol < self._config_min_liquidity_sol:
             logger.debug(f"SKIP low liquidity ({token.liquidity_sol:.2f} SOL): {token.symbol}")
             return False
 
-        # Market cap filter
-        if token.market_cap_usd < self._config.min_market_cap_usd:
+        # Market cap filter (uses runtime-overridable value)
+        if token.market_cap_usd < self._config_min_market_cap_usd:
             logger.debug(f"SKIP low mcap (${token.market_cap_usd:.0f}): {token.symbol}")
             return False
 
