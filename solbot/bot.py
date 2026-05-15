@@ -34,6 +34,7 @@ from solbot.models import PositionSnapshot, TokenEvent, TradeResult
 from solbot.positions import PositionManager, SellReason, TradingConfig
 from solbot.pumpfun import PumpFunMonitor
 from solbot.scoring import Confidence, ScoringEngine, TokenScore
+from solbot.smart_money import SmartMoneyEngine
 from solbot.telegram import TelegramAlert
 from solbot.wallet import Wallet
 
@@ -79,6 +80,7 @@ class Solbot:
         self._dex_client: Optional[DexScreenerClient] = None
         self._birdeye_client: Optional[BirdeyeClient] = None
         self._ipc_server: Optional[IPCServer] = None
+        self._smart_money: Optional[SmartMoneyEngine] = None
         self._running = False
         self._paused = False   # Pause state (stops new buys, monitoring continues)
         self._killed = False   # Kill switch state
@@ -215,6 +217,10 @@ class Solbot:
         )
         await self._ipc_server.start()
 
+        # Start Smart Money Intelligence engine
+        self._smart_money = SmartMoneyEngine(db=self._db)
+        await self._smart_money.start()
+
         self._running = True
         mode = "PAPER" if self._config.jupiter.paper_trade else "LIVE"
         logger.info(
@@ -247,6 +253,9 @@ class Solbot:
 
         if self._ipc_server:
             await self._ipc_server.stop()
+
+        if self._smart_money:
+            await self._smart_money.stop()
 
         if self._market_intel:
             await self._market_intel.stop()
@@ -302,6 +311,33 @@ class Solbot:
 
         # Step 3: Score the token
         score = await self._scorer.score_token(token)
+
+        # Step 3b: Smart Money evaluation (adjusts confidence)
+        if self._smart_money:
+            sm_signal = await self._smart_money.evaluate_token(
+                mint=token.mint,
+                creator=token.creator or "",
+            )
+            if sm_signal.confidence_modifier != 0:
+                score.composite_score += sm_signal.confidence_modifier
+                score.composite_score = max(0.0, min(100.0, score.composite_score))
+                if sm_signal.confidence_modifier > 0:
+                    score.flags.append("SMART_MONEY_BOOST")
+                elif sm_signal.confidence_modifier < 0:
+                    score.flags.append("TOXIC_WALLET_OVERLAP")
+                logger.info(
+                    f"Smart Money: {token.symbol} | modifier={sm_signal.confidence_modifier:+.1f} | "
+                    f"{sm_signal.message}"
+                )
+
+            # Record token launch for creator tracking
+            asyncio.create_task(
+                self._smart_money.record_token_launch(
+                    mint=token.mint,
+                    creator=token.creator or "",
+                    liquidity_sol=token.liquidity_sol,
+                )
+            )
 
         # Step 4: Send Telegram alert for all qualified tokens
         asyncio.create_task(self._telegram.send_token_alert(score))
@@ -377,6 +413,16 @@ class Solbot:
             # Start market intelligence tracking for this token
             if self._market_intel:
                 await self._market_intel.track_token(token.mint, token.symbol)
+
+            # Record buy in Smart Money engine (tracks our wallet activity)
+            if self._smart_money and self._wallet:
+                asyncio.create_task(
+                    self._smart_money.record_wallet_buy(
+                        wallet=self._wallet.pubkey_str,
+                        mint=token.mint,
+                        amount_sol=result.amount_in,
+                    )
+                )
 
             logger.info(
                 f"{mode} BUY OK: {token.symbol} | tx={result.tx_signature[:20]}... | "
@@ -497,6 +543,18 @@ class Solbot:
                 latency_ms=result.latency_ms,
             )
 
+            # Record sell in Smart Money engine
+            if self._smart_money and self._wallet:
+                asyncio.create_task(
+                    self._smart_money.record_wallet_sell(
+                        wallet=self._wallet.pubkey_str,
+                        mint=mint,
+                        amount_sol=result.amount_out,
+                        pnl_sol=pnl_sol,
+                        hold_seconds=pos.age_seconds,
+                    )
+                )
+
             # Update kill switch tracking
             self._total_realized_pnl_sol += pnl_sol
             if pnl_sol < 0:
@@ -544,6 +602,15 @@ class Solbot:
                                 related_mint=pos.mint,
                             )
                         )
+
+                # Record rug in Smart Money engine
+                if self._smart_money:
+                    asyncio.create_task(
+                        self._smart_money.record_rug(
+                            mint=pos.mint,
+                            creator=pos.creator,
+                        )
+                    )
 
             # Telegram sell alert
             asyncio.create_task(

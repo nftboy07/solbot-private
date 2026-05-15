@@ -128,7 +128,8 @@ COMMAND_REGISTRY: list[CommandEntry] = [
     # ── Wallet Intelligence ─────────────────────────────────────────────
     CommandEntry("/creator", "_cmd_creator", "Look up creator stats", "Wallet Intelligence", usage="/creator <addr>"),
     CommandEntry("/wallet", "_cmd_wallet", "Look up wallet stats", "Wallet Intelligence", usage="/wallet <addr>"),
-    CommandEntry("/smartmoney", "_cmd_smartmoney", "Smart money signals", "Wallet Intelligence"),
+    CommandEntry("/smartmoney", "_cmd_smartmoney", "Top smart money wallets", "Wallet Intelligence"),
+    CommandEntry("/copywallet", "_cmd_copywallet", "Manage copy-wallet list", "Wallet Intelligence", usage="/copywallet [add|remove|list] [addr]"),
     # ── Info ────────────────────────────────────────────────────────────
     CommandEntry("/list", "_cmd_list", "Full command registry", "Info"),
     CommandEntry("/help", "_cmd_help", "Quick help reference", "Info"),
@@ -947,32 +948,214 @@ class CommandHandler:
     # ── Wallet Intelligence Stubs ───────────────────────────────────────
 
     async def _cmd_creator(self, chat_id: str, args: str):
-        """Look up creator/deployer stats (stub for future ML layer)."""
+        """Look up creator/deployer stats from Smart Money engine."""
         if not args.strip():
             await self._reply(chat_id, "Usage: /creator <wallet_address>")
             return
+
+        address = args.strip()[:44]
+        bot = self._bot
+        sm = getattr(bot, '_smart_money', None)
+
+        if not sm:
+            await self._reply(chat_id, "⚠️ Smart Money engine not active.")
+            return
+
+        stats = await sm.get_creator_stats(address)
+        if not stats:
+            await self._reply(
+                chat_id,
+                f"🔍 <b>Creator Intel</b>\n\n"
+                f"<code>{address}</code>\n\n"
+                f"📭 No data found for this creator.\n"
+                f"They may not have launched any tracked tokens yet."
+            )
+            return
+
+        # Format output
+        rep_emoji = "🟢" if stats.reputation_score >= 60 else ("🟡" if stats.reputation_score >= 40 else "🔴")
         await self._reply(
             chat_id,
-            f"🔍 <b>Creator Intel</b>\n\n"
-            f"<code>{args.strip()[:44]}</code>\n\n"
-            f"⚠️ Creator intelligence layer not yet active.\n"
-            f"Coming: winrate, rug frequency, avg ATH, launch patterns."
+            f"🔍 <b>CREATOR INTELLIGENCE</b>\n\n"
+            f"<b>Address:</b> <code>{address[:20]}...</code>\n\n"
+            f"📊 <b>Launch History:</b>\n"
+            f"  Total launches: {stats.total_launches}\n"
+            f"  Successful: {stats.successful_launches}\n"
+            f"  Rugged: {stats.rugged_launches}\n"
+            f"  Success rate: {stats.success_rate:.0f}%\n"
+            f"  Rug rate: {stats.rug_rate:.0f}%\n\n"
+            f"📈 <b>Performance:</b>\n"
+            f"  Avg ATH multiplier: {stats.avg_ath_multiplier:.1f}x\n"
+            f"  Avg launch liquidity: {stats.avg_liquidity_at_launch:.2f} SOL\n\n"
+            f"{rep_emoji} <b>Reputation Score:</b> {stats.reputation_score:.0f}/100"
         )
 
     async def _cmd_wallet(self, chat_id: str, args: str):
-        """Look up wallet stats (stub)."""
+        """Look up wallet stats from Smart Money engine."""
         if not args.strip():
             await self._reply(chat_id, "Usage: /wallet <address>")
             return
-        await self._reply(chat_id, "⚠️ Wallet intelligence coming soon.")
+
+        address = args.strip()[:44]
+        bot = self._bot
+        sm = getattr(bot, '_smart_money', None)
+
+        if not sm:
+            await self._reply(chat_id, "⚠️ Smart Money engine not active.")
+            return
+
+        stats = await sm.get_wallet_stats(address)
+        if not stats:
+            await self._reply(
+                chat_id,
+                f"🔍 <b>Wallet Intel</b>\n\n"
+                f"<code>{address}</code>\n\n"
+                f"📭 No data found. Wallet not yet tracked."
+            )
+            return
+
+        # Tags
+        tag_str = ""
+        if stats.is_smart_money:
+            tag_str = "🏆 SMART MONEY"
+        elif stats.is_toxic:
+            tag_str = "☠️ TOXIC WALLET"
+        else:
+            tag_str = "⚪ NEUTRAL"
+
+        conv_emoji = "🟢" if stats.conviction_score >= 70 else ("🟡" if stats.conviction_score >= 40 else "🔴")
+
+        await self._reply(
+            chat_id,
+            f"🔍 <b>WALLET INTELLIGENCE</b>\n\n"
+            f"<b>Address:</b> <code>{address[:20]}...</code>\n"
+            f"<b>Classification:</b> {tag_str}\n\n"
+            f"📊 <b>Trading Stats:</b>\n"
+            f"  Total buys: {stats.total_buys}\n"
+            f"  Total sells: {stats.total_sells}\n"
+            f"  Wins: {stats.wins} | Losses: {stats.losses}\n"
+            f"  Winrate: {stats.winrate:.0f}%\n\n"
+            f"💰 <b>Performance:</b>\n"
+            f"  Realized P&L: {stats.total_realized_pnl:+.4f} SOL\n"
+            f"  Avg ROI: {stats.avg_roi_pct:+.1f}%\n"
+            f"  Avg hold: {stats.avg_hold_seconds:.0f}s\n\n"
+            f"⚠️ <b>Risk:</b>\n"
+            f"  Rug participations: {stats.rug_participations}\n"
+            f"  Rug rate: {stats.rug_rate:.0f}%\n\n"
+            f"{conv_emoji} <b>Conviction Score:</b> {stats.conviction_score:.0f}/100"
+        )
 
     async def _cmd_smartmoney(self, chat_id: str, args: str):
-        """Show smart money signals (stub)."""
-        await self._reply(chat_id, "⚠️ Smart money tracking coming soon.\nWill show: sniper wallets, whale entries, copy targets.")
+        """Show top smart money wallets."""
+        bot = self._bot
+        sm = getattr(bot, '_smart_money', None)
+
+        if not sm:
+            await self._reply(chat_id, "⚠️ Smart Money engine not active.")
+            return
+
+        top_wallets = await sm.get_top_wallets(limit=10)
+        if not top_wallets:
+            await self._reply(chat_id, "📭 No smart money data yet.\nThe engine needs to observe wallet activity first.")
+            return
+
+        lines = ["🏆 <b>TOP SMART MONEY WALLETS</b>\n"]
+        for i, w in enumerate(top_wallets, 1):
+            total = w.get("wins", 0) + w.get("losses", 0)
+            wr = (w.get("wins", 0) / total * 100) if total > 0 else 0
+            pnl = w.get("total_realized_pnl", 0)
+            emoji = "🟢" if pnl > 0 else "🔴"
+            lines.append(
+                f"  {i}. <code>{w['address'][:12]}...</code>\n"
+                f"     {emoji} {pnl:+.4f} SOL | WR: {wr:.0f}% | "
+                f"Buys: {w.get('total_buys', 0)} | Rugs: {w.get('rug_participations', 0)}"
+            )
+
+        copy_count = len(sm.get_copy_wallets())
+        lines.append(f"\n<b>Copy wallets tracked:</b> {copy_count}")
+        lines.append("ℹ️ Use /copywallet add <addr> to track a wallet")
+        await self._reply(chat_id, "\n".join(lines))
+
+    async def _cmd_copywallet(self, chat_id: str, args: str):
+        """Manage copy-wallet list (add/remove/list)."""
+        bot = self._bot
+        sm = getattr(bot, '_smart_money', None)
+
+        if not sm:
+            await self._reply(chat_id, "⚠️ Smart Money engine not active.")
+            return
+
+        parts = args.strip().split(maxsplit=1)
+        action = parts[0].lower() if parts else ""
+
+        # /copywallet list (or no args)
+        if not action or action == "list":
+            wallets = sm.get_copy_wallets()
+            if not wallets:
+                await self._reply(chat_id, "📭 No copy wallets configured.\nUse /copywallet add <address>")
+                return
+            lines = [f"👁️ <b>COPY WALLETS</b> ({len(wallets)})\n"]
+            for i, addr in enumerate(wallets, 1):
+                lines.append(f"  {i}. <code>{addr[:20]}...</code>")
+            lines.append("\nℹ️ /copywallet remove <addr> to untrack")
+            await self._reply(chat_id, "\n".join(lines))
+            return
+
+        # /copywallet add <addr>
+        if action == "add":
+            if len(parts) < 2:
+                await self._reply(chat_id, "Usage: /copywallet add <wallet_address>")
+                return
+            address = parts[1].strip()[:44]
+            if len(address) < 32:
+                await self._reply(chat_id, "❌ Invalid address (must be 32-44 chars).")
+                return
+            added = await sm.add_copy_wallet(address)
+            if added:
+                await self._reply(chat_id, f"✅ <b>Copy wallet added:</b>\n<code>{address}</code>\n\nTokens bought by this wallet will boost confidence.")
+            else:
+                await self._reply(chat_id, "ℹ️ Already tracking this wallet.")
+            return
+
+        # /copywallet remove <addr>
+        if action == "remove":
+            if len(parts) < 2:
+                await self._reply(chat_id, "Usage: /copywallet remove <wallet_address>")
+                return
+            address = parts[1].strip()[:44]
+            removed = await sm.remove_copy_wallet(address)
+            if removed:
+                await self._reply(chat_id, f"✅ Copy wallet removed:\n<code>{address}</code>")
+            else:
+                await self._reply(chat_id, "❌ Wallet not in copy list.")
+            return
+
+        await self._reply(chat_id, "Usage: /copywallet [add|remove|list] [address]")
 
     async def _cmd_rugs(self, chat_id: str, args: str):
-        """Show recent detected rugs (stub)."""
+        """Show recent detected rugs."""
         bot = self._bot
+
+        # Try smart money engine first for creator-level rug data
+        sm = getattr(bot, '_smart_money', None)
+        if sm:
+            top_creators = await self._db._fetch_all_async(
+                "SELECT address, total_launches, rugged_launches FROM creator_stats "
+                "WHERE rugged_launches > 0 ORDER BY rugged_launches DESC LIMIT 10"
+            ) if bot._db else []
+
+            if top_creators:
+                lines = ["💀 <b>TOP RUG CREATORS</b>\n"]
+                for i, c in enumerate(top_creators, 1):
+                    rug_rate = (c["rugged_launches"] / c["total_launches"] * 100) if c["total_launches"] > 0 else 0
+                    lines.append(
+                        f"  {i}. <code>{c['address'][:16]}...</code> | "
+                        f"Rugs: {c['rugged_launches']}/{c['total_launches']} ({rug_rate:.0f}%)"
+                    )
+                await self._reply(chat_id, "\n".join(lines))
+                return
+
+        # Fallback to blacklist data
         if not bot._blacklist:
             await self._reply(chat_id, "📭 No rug data.")
             return
