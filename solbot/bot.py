@@ -324,6 +324,12 @@ class Solbot:
         # Step 2: Filters (returns tuple now)
         passed, reject_reason = self._filter.is_qualified(token)
         if not passed:
+            # If zero-liquidity, enqueue for enrichment instead of rejecting
+            if reject_reason == "LOW_LIQUIDITY" and token.liquidity_sol <= 0.01:
+                if hasattr(self, '_enrichment_queue') and self._enrichment_queue:
+                    if not getattr(token, '_enriched', False):
+                        await self._enrichment_queue.enqueue(token)
+                        return
             # Already logged inside filter with specific reason
             return
 
