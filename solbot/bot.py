@@ -300,19 +300,49 @@ class Solbot:
             asyncio.create_task(self._handle_token(token))
 
     async def _handle_token(self, token: TokenEvent):
-        """Full pipeline for a single token event."""
-        # Step 1: Blacklist check (O(1), synchronous)
+        """Full pipeline for a single token event with lifecycle tracing."""
+        from solbot.filters import rejection_counters, DEBUG_MODE
+        import time as _time
+        t_start = _time.time()
+
+        # ── TOKEN DETECTED ──────────────────────────────────────────────
+        logger.info(
+            f"TOKEN DETECTED: {token.symbol} | mint={token.mint[:16]}... | "
+            f"creator={token.creator[:12] if token.creator else '?'}... | "
+            f"liq={token.liquidity_sol:.2f} SOL | mcap=${token.market_cap_usd:.0f}"
+        )
+
+        # Step 1: Blacklist check
         if await self._blacklist.check_and_reject(token):
+            rejection_counters.rejected_blacklist += 1
+            logger.info(
+                f"REJECTED reason=BLACKLISTED token={token.symbol} "
+                f"creator={token.creator[:16] if token.creator else '?'}"
+            )
             return
 
-        # Step 2: Basic filters (dedup, age, liquidity, mcap)
-        if not self._filter.is_qualified(token):
+        # Step 2: Filters (returns tuple now)
+        passed, reject_reason = self._filter.is_qualified(token)
+        if not passed:
+            # Already logged inside filter with specific reason
             return
 
-        # Step 3: Score the token
+        t_after_filter = _time.time()
+
+        # ── TOKEN SCORED ────────────────────────────────────────────────
         score = await self._scorer.score_token(token)
 
-        # Step 3b: Smart Money evaluation (adjusts confidence)
+        if DEBUG_MODE:
+            logger.info(
+                f"TOKEN SCORED: {token.symbol} | composite={score.composite_score:.1f} | "
+                f"liq_score={score.liquidity_score:.1f} | creator={score.creator_score:.1f} | "
+                f"pressure={score.buy_pressure_score:.1f} | rug={score.anti_rug_score:.1f} | "
+                f"confidence={score.confidence.value} | flags={score.flags}"
+            )
+        else:
+            logger.info(f"TOKEN SCORED: {token.symbol} | confidence={score.confidence.value} | score={score.composite_score:.1f}")
+
+        # Step 3b: Smart Money evaluation
         if self._smart_money:
             sm_signal = await self._smart_money.evaluate_token(
                 mint=token.mint,
@@ -326,11 +356,10 @@ class Solbot:
                 elif sm_signal.confidence_modifier < 0:
                     score.flags.append("TOXIC_WALLET_OVERLAP")
                 logger.info(
-                    f"Smart Money: {token.symbol} | modifier={sm_signal.confidence_modifier:+.1f} | "
+                    f"SMART_MONEY: {token.symbol} | modifier={sm_signal.confidence_modifier:+.1f} | "
                     f"{sm_signal.message}"
                 )
 
-            # Record token launch for creator tracking
             asyncio.create_task(
                 self._smart_money.record_token_launch(
                     mint=token.mint,
@@ -339,30 +368,55 @@ class Solbot:
                 )
             )
 
-        # Step 4: Send Telegram alert for all qualified tokens
+        t_after_score = _time.time()
+
+        # Step 4: Telegram alert
         asyncio.create_task(self._telegram.send_token_alert(score))
 
-        # Step 5: Check pause state (alerts still fire, buys don't)
+        # Step 5: Pause check
         if self._paused:
-            logger.debug(f"PAUSED - skipping buy for {token.symbol}")
+            rejection_counters.rejected_paused += 1
+            logger.info(f"REJECTED reason=PAUSED token={token.symbol}")
             return
 
-        # Step 6: Only buy HIGH confidence tokens
+        # Step 6: Confidence check
         if score.confidence != Confidence.HIGH:
+            rejection_counters.rejected_low_confidence += 1
             logger.info(
-                f"SKIP TRADE: {token.symbol} | conf={score.confidence.value} (need HIGH)"
+                f"REJECTED reason=LOW_CONFIDENCE token={token.symbol} "
+                f"confidence={score.confidence.value} required=HIGH "
+                f"score={score.composite_score:.1f}"
             )
             return
 
-        # Step 7: Check position limits and cooldown
+        # Step 7: Position limits and cooldown
         if not self._positions.can_buy():
-            logger.info(f"SKIP TRADE: {token.symbol} | position limits or cooldown active")
+            # Determine specific reason
+            if self._positions.open_count >= self._positions._config.max_concurrent_positions:
+                rejection_counters.rejected_max_positions += 1
+                logger.info(
+                    f"REJECTED reason=MAX_POSITIONS token={token.symbol} "
+                    f"current={self._positions.open_count} limit={self._positions._config.max_concurrent_positions}"
+                )
+            else:
+                rejection_counters.rejected_cooldown += 1
+                logger.info(
+                    f"REJECTED reason=COOLDOWN token={token.symbol} "
+                    f"cooldown={self._positions._config.buy_cooldown_seconds}s"
+                )
             return
 
-        # Step 8: Don't double-buy
+        # Step 8: Double-buy check
         if self._positions.has_position(token.mint):
-            logger.debug(f"SKIP: already holding {token.symbol}")
+            logger.info(f"REJECTED reason=ALREADY_HOLDING token={token.symbol}")
             return
+
+        # ── TOKEN ELIGIBLE FOR BUY ──────────────────────────────────────
+        logger.info(
+            f"TOKEN ELIGIBLE_FOR_BUY: {token.symbol} | "
+            f"confidence={score.confidence.value} | score={score.composite_score:.1f} | "
+            f"pipeline_ms={(t_after_score - t_start)*1000:.0f}"
+        )
 
         # Step 9: Execute buy
         await self._execute_buy(token, score)
