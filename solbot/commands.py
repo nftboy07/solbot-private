@@ -130,6 +130,9 @@ COMMAND_REGISTRY: list[CommandEntry] = [
     CommandEntry("/wallet", "_cmd_wallet", "Look up wallet stats", "Wallet Intelligence", usage="/wallet <addr>"),
     CommandEntry("/smartmoney", "_cmd_smartmoney", "Top smart money wallets", "Wallet Intelligence"),
     CommandEntry("/copywallet", "_cmd_copywallet", "Manage copy-wallet list", "Wallet Intelligence", usage="/copywallet [add|remove|list] [addr]"),
+    # ── Debug ───────────────────────────────────────────────────────────
+    CommandEntry("/debug", "_cmd_debug", "Toggle debug mode on/off", "Debug", usage="/debug [on|off]"),
+    CommandEntry("/filters", "_cmd_filters", "Show rejection analytics", "Debug"),
     # ── Info ────────────────────────────────────────────────────────────
     CommandEntry("/list", "_cmd_list", "Full command registry", "Info"),
     CommandEntry("/help", "_cmd_help", "Quick help reference", "Info"),
@@ -1168,3 +1171,65 @@ class CommandHandler:
         for i, e in enumerate(rug_entries, 1):
             lines.append(f"  {i}. <code>{e['creator_address'][:16]}...</code> | {e.get('related_symbol', '?')} | {e['reason']}")
         await self._reply(chat_id, "\n".join(lines))
+
+
+
+    # ── /debug - Toggle Debug Mode ──────────────────────────────────────
+
+    async def _cmd_debug(self, chat_id: str, args: str):
+        """Toggle debug mode on/off."""
+        import solbot.filters as _filters
+
+        arg = args.strip().lower()
+        if arg == "on":
+            _filters.DEBUG_MODE = True
+            logger.info("DEBUG MODE: ON via Telegram")
+            await self._reply(chat_id, "🐛 <b>DEBUG MODE: ON</b>\n\nVerbose lifecycle logs enabled.")
+        elif arg == "off":
+            _filters.DEBUG_MODE = False
+            logger.info("DEBUG MODE: OFF via Telegram")
+            await self._reply(chat_id, "🔇 <b>DEBUG MODE: OFF</b>\n\nOnly production logs active.")
+        else:
+            current = "ON" if _filters.DEBUG_MODE else "OFF"
+            await self._reply(
+                chat_id,
+                f"🐛 <b>Debug Mode:</b> {current}\n\n"
+                f"Usage:\n"
+                f"  /debug on - Enable verbose logs\n"
+                f"  /debug off - Production logs only"
+            )
+
+    # ── /filters - Rejection Analytics ──────────────────────────────────
+
+    async def _cmd_filters(self, chat_id: str, args: str):
+        """Show rejection statistics and filter analytics."""
+        from solbot.filters import rejection_counters, DEBUG_MODE
+
+        s = rejection_counters.summary()
+        debug_status = "ON" if DEBUG_MODE else "OFF"
+
+        await self._reply(
+            chat_id,
+            f"📊 <b>FILTER & REJECTION ANALYTICS</b>\n\n"
+            f"<b>Pipeline:</b>\n"
+            f"  Tokens detected: {s['total_detected']}\n"
+            f"  Qualified (passed filters): {s['qualified_tokens']}\n"
+            f"  Execution attempts: {s['execution_attempts']}\n"
+            f"  Successful buys: {s['successful_buys']}\n"
+            f"  Buy success rate: {s['buy_success_rate']:.0f}%\n\n"
+            f"<b>Rejections:</b>\n"
+            f"  Total rejected: {s['total_rejected']}\n"
+            f"  ├ Low liquidity: {s['rejected_low_liquidity']}\n"
+            f"  ├ Low mcap: {s['rejected_market_cap']}\n"
+            f"  ├ Too old: {s['rejected_age']}\n"
+            f"  ├ Duplicate: {s['rejected_duplicate']}\n"
+            f"  ├ Blacklisted: {s['rejected_blacklist']}\n"
+            f"  ├ Low confidence: {s['rejected_low_confidence']}\n"
+            f"  ├ Cooldown: {s['rejected_cooldown']}\n"
+            f"  ├ Max positions: {s['rejected_max_positions']}\n"
+            f"  ├ Paused: {s['rejected_paused']}\n"
+            f"  ├ No route: {s['rejected_no_route']}\n"
+            f"  └ Execution failed: {s['rejected_execution_failed']}\n\n"
+            f"<b>Debug mode:</b> {debug_status}\n"
+            f"ℹ️ /debug on | /debug off"
+        )
