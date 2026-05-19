@@ -850,3 +850,8 @@ async def run_bot():
         loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
 
     await bot.start()
+
+
+# ── HOTFIX: Initialize enrichment queue (must be called in start()) ──
+# This is temporarily appended. The proper integration is in _handle_token.
+# Import and init should happen after self._dex_client is created.
