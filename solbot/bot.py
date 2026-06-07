@@ -1,10 +1,12 @@
-"""Main bot orchestrator - Clean DEGEN Sniper."""
+"""Main bot orchestrator and Position Manager for Solbot."""
 
 import asyncio
 import signal
+from time import time
+from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
-from solbot.config import BotConfig
+from solbot.config import BotConfig, BotMode
 from solbot.filters import TokenFilter
 from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
@@ -16,8 +18,21 @@ from solbot.wallet import Wallet
 
 logger = get_logger("bot")
 
+@dataclass
+class Position:
+    mint: str
+    symbol: str
+    entry_price: float
+    entry_liq: float
+    creator: str
+    size: float
+    peak_price: float = 0.0
+    start_time: float = field(default_factory=time)
+    tp_count: int = 0
+    active: bool = True
+
 class Solbot:
-    """Streamlined DEGEN sniper bot."""
+    """Enhanced Solbot with V28 logic and Position Management."""
 
     def __init__(self, config: BotConfig):
         self._config = config
@@ -29,15 +44,12 @@ class Solbot:
         self._filter: Optional[TokenFilter] = None
         self._running = False
         self._trades: List[TradeResult] = []
-        self._positions: Dict[str, dict] = {}
+        self._positions: Dict[str, Position] = {}
         self._paused = False
 
     async def start(self):
-        """Initialize and start the sniper."""
         setup_logger(self._config.logging)
-        logger.info("========================================")
-        logger.info("   SOLBOT DEGEN SNIPER STARTING")
-        logger.info("========================================")
+        logger.info("SOLBOT DEGEN SNIPER STARTING")
 
         errors = self._config.validate()
         if errors:
@@ -46,94 +58,91 @@ class Solbot:
         self._wallet = Wallet(self._config.solana)
         self._filter = TokenFilter(self._config)
 
-        # Start low-latency signing client
         self._pump_client = PumpFunClient(self._config, self._wallet)
         await self._pump_client.start()
 
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
 
-        # Command interface
         self._telegram = TelegramManager(self._config.telegram)
         await self._telegram.start(self)
-        await self._telegram.send_message("🚀 <b>Degen Sniper Started!</b>")
+        await self._telegram.send_message("<b>Solbot Sniper started!</b>")
 
-        # Live stream monitor
         loop = asyncio.get_running_loop()
         self._monitor = PumpFunMonitor(self._config.pumpfun, loop)
         self._monitor.start()
 
         self._running = True
         
-        # Start core event processing
+        # Start background tasks
         asyncio.create_task(self._process_events())
-        logger.info("Bot is active and monitoring stream...")
 
     async def stop(self):
-        """Graceful shutdown."""
         self._running = False
         if self._monitor: self._monitor.stop()
         if self._pump_client: await self._pump_client.stop()
         if self._jupiter: await self._jupiter.stop()
-        if self._telegram: 
-            await self._telegram.send_message("🛑 <b>Bot Stopped.</b>")
-            await self._telegram.stop()
-        logger.info("Solbot stopped.")
+        if self._telegram: await self._telegram.stop()
+        logger.info("Solbot stopped")
 
     async def _process_events(self):
-        """Main loop: Detect -> Filter -> Buy."""
         while self._running:
             if self._paused:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
                 continue
             try:
                 token = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
                 qualified, size = self._filter.is_qualified(token)
                 if qualified:
-                    # Non-blocking buy execution
                     asyncio.create_task(self._execute_trade(token, size))
             except asyncio.TimeoutError:
                 continue
 
     async def _execute_trade(self, token: TokenEvent, size: float):
-        """Build, sign, and broadcast buy transaction."""
-        fee = self._filter.get_dynamic_fee(token.mint)
-        
-        # Immediate execution via bonding curve client
-        result = await self._pump_client.execute_trade(token.mint, amount=size, fee=fee)
+        # Calculate dynamic fee from filter
+        fee_lamports = self._filter.get_dynamic_fee(token.mint)
+        # Convert lamports to SOL for PumpPortal API
+        priority_fee_sol = fee_lamports / 1_000_000_000
+
+        result = await self._pump_client.execute_trade(
+            token.mint, 
+            amount=size, 
+            priority_fee=priority_fee_sol
+        )
         self._trades.append(result)
 
         if result.success:
-            self._positions[token.mint] = {
-                "symbol": token.symbol,
-                "size": size,
-                "mint": token.mint
-            }
-            await self._telegram.send_message(
-                f"✅ <b>SNIPED: {token.symbol}</b>\n"
-                f"Size: {size} SOL\n"
-                f"<a href='https://solscan.io/tx/{result.tx_signature}'>View Transaction</a>"
+            self._positions[token.mint] = Position(
+                mint=token.mint, symbol=token.symbol,
+                entry_price=token.market_cap_usd,
+                entry_liq=token.liquidity_sol,
+                creator=token.creator or "",
+                size=size
             )
+            await self._telegram.send_message(f"✅ <b>BUY: {token.symbol}</b>\nSize: {size} SOL")
         else:
-            logger.error(f"Buy failed for {token.symbol}: {result.error}")
+            logger.error(f"Trade failed for {token.symbol}: {result.error}")
 
-    async def _exit_position(self, pos: dict, reason: str, pct: float):
-        """Emergency or manual liquidation."""
-        result = await self._pump_client.execute_trade(pos["mint"], action="sell", amount=pct)
+    async def _exit_position(self, pos: Position, reason: str, pct: float):
+        result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=pct)
         if result.success:
             if pct >= 1.0:
-                del self._positions[pos["mint"]]
-            await self._telegram.send_message(f"🚨 <b>EXIT: {pos['symbol']}</b> ({reason})")
+                pos.active = False
+                if pos.mint in self._positions:
+                    del self._positions[pos.mint]
+            await self._telegram.send_message(f"🚨 <b>SELL: {pos.symbol}</b>\nReason: {reason}\nSize: {pct*100}%")
 
 async def run_bot():
-    """Bot entry point."""
+    """Entry point: load config, wire up signal handling, and run."""
     config = BotConfig()
     bot = Solbot(config)
 
+    # Graceful shutdown on SIGINT/SIGTERM
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
 
     await bot.start()
+    # Keep the loop alive
     while bot._running:
         await asyncio.sleep(1)

@@ -48,7 +48,8 @@ class PumpFunClient:
         mint: str, 
         action: str = "buy", 
         amount: Optional[float] = None,
-        slippage: Optional[int] = None
+        slippage: Optional[int] = None,
+        priority_fee: Optional[float] = None
     ) -> TradeResult:
         """Fetch, sign, and broadcast a trade transaction.
         
@@ -58,6 +59,7 @@ class PumpFunClient:
             amount: Amount in SOL (buy) or token units (sell). 
                     Defaults to config.buy_amount_sol for buys.
             slippage: Slippage in basis points. Defaults to config.slippage_bps.
+            priority_fee: Transaction priority fee in SOL.
         """
         start_time = time.perf_counter()
         
@@ -66,6 +68,9 @@ class PumpFunClient:
         
         if slippage is None:
             slippage = self._jupiter_config.slippage_bps
+            
+        if priority_fee is None:
+            priority_fee = 0.00001 # Default baseline
 
         payload = {
             "publicKey": self._wallet.pubkey_str,
@@ -74,7 +79,7 @@ class PumpFunClient:
             "denominatedInSol": "true" if action == "buy" else "false",
             "amount": amount,
             "slippage": slippage,
-            "priorityFee": 0.00001,  # Default priority fee
+            "priorityFee": priority_fee,
             "pool": "pump"
         }
 
