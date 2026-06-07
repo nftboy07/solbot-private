@@ -105,10 +105,16 @@ class PumpFunClient:
         try:
             async with self._session.get(url) as resp:
                 if resp.status == 200:
-                    return await resp.json()
+                    data = await resp.json()
+                    # Ensure numeric fields exist
+                    if "market_cap_sol" not in data:
+                        data["market_cap_sol"] = 0
+                    if "liquidity_sol" not in data:
+                        data["liquidity_sol"] = 0
+                    return data
         except:
             pass
-        return {"symbol": "???", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
+        return {"symbol": "SYNCED", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
 
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
