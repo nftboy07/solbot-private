@@ -42,6 +42,31 @@ class PumpFunClient:
         if self._jito:
             await self._jito.stop()
 
+    async def get_token_balance(self, mint: str) -> float:
+        """Fetch the current token balance for the wallet."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                self._wallet.pubkey_str,
+                {"mint": mint},
+                {"encoding": "jsonParsed"}
+            ]
+        }
+        try:
+            async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
+                data = await resp.json()
+                accounts = data.get("result", {}).get("value", [])
+                if not accounts:
+                    return 0.0
+                
+                amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
+                return float(amount_info["amount"])
+        except Exception as e:
+            logger.error(f"Error fetching balance for {mint}: {e}")
+            return 0.0
+
     async def execute_trade(
         self, 
         mint: str, 
@@ -49,7 +74,8 @@ class PumpFunClient:
         amount: Optional[float] = None,
         slippage: Optional[int] = None,
         priority_fee: Optional[float] = None,
-        use_jito: bool = True
+        use_jito: bool = True,
+        denominated_in_sol: bool = True
     ) -> TradeResult:
         start_time = time.perf_counter()
         
@@ -61,7 +87,7 @@ class PumpFunClient:
             "publicKey": self._wallet.pubkey_str,
             "action": action,
             "mint": mint,
-            "denominatedInSol": "true" if action == "buy" else "false",
+            "denominatedInSol": "true" if denominated_in_sol else "false",
             "amount": amount,
             "slippage": slippage,
             "priorityFee": priority_fee,
