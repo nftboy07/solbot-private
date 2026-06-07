@@ -59,7 +59,7 @@ class Solbot:
         self._filter = TokenFilter(self._config.pumpfun)
 
         # Start PumpFun local signing client
-        self._pump_client = PumpFunClient(self._config.jupiter, self._wallet)
+        self._pump_client = PumpFunClient(self._config, self._wallet)
         await self._pump_client.start()
 
         # Start Jupiter client
