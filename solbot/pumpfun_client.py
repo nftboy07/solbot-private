@@ -42,6 +42,23 @@ class PumpFunClient:
         if self._jito:
             await self._jito.stop()
 
+    async def get_sol_balance(self) -> float:
+        """Fetch the current SOL balance for the wallet."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBalance",
+            "params": [self._wallet.pubkey_str]
+        }
+        try:
+            async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
+                data = await resp.json()
+                lamports = data.get("result", {}).get("value", 0)
+                return lamports / 1_000_000_000
+        except Exception as e:
+            logger.error(f"Error fetching SOL balance: {e}")
+            return 0.0
+
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
         payload = {

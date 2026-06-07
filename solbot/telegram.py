@@ -93,7 +93,7 @@ class TelegramManager:
             elif cmd == "/status":
                 await self._cmd_status(bot)
             elif cmd == "/balance":
-                await self.send_message("🔍 <b>SOL Balance:</b> Checking explorer... (Wallet balance monitoring in development)")
+                await self._cmd_balance(bot)
             elif cmd == "/portfolio" or cmd == "/positions":
                 await self._cmd_portfolio(bot)
             elif cmd == "/history":
@@ -148,6 +148,16 @@ class TelegramManager:
             f"Mode: <code>DEGEN SNIPER</code>\n"
             f"Positions: <code>{len(bot._positions)}</code>\n"
             f"Trades: <code>{len(bot._trades)}</code>"
+        )
+        await self.send_message(msg)
+
+    async def _cmd_balance(self, bot: Any):
+        """Fetch and display the actual SOL balance."""
+        balance = await bot._pump_client.get_sol_balance()
+        msg = (
+            "<b>🔍 Wallet Balance</b>\n"
+            f"Address: <code>{bot._wallet.pubkey_str}</code>\n"
+            f"Balance: <code>{balance:.4f} SOL</code>"
         )
         await self.send_message(msg)
 
