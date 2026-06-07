@@ -20,7 +20,7 @@ logger = get_logger("pumpfun")
 
 
 class PumpFunMonitor:
-    """WebSocket-based monitor for new Pump.fun token launches.
+    """WebSocket-based monitor for Pump.fun events.
 
     Runs websocket-client in a background thread and bridges events
     into the asyncio event loop via an asyncio.Queue.
@@ -29,7 +29,7 @@ class PumpFunMonitor:
     def __init__(self, config: PumpFunConfig, loop: asyncio.AbstractEventLoop):
         self._config = config
         self._loop = loop
-        self._queue: asyncio.Queue[TokenEvent] = asyncio.Queue(maxsize=500)
+        self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1000)
         self._ws: Optional[websocket.WebSocketApp] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -37,8 +37,8 @@ class PumpFunMonitor:
         self._max_reconnect_delay = 30.0
 
     @property
-    def queue(self) -> asyncio.Queue[TokenEvent]:
-        """Access the async queue of incoming token events."""
+    def queue(self) -> asyncio.Queue[dict]:
+        """Access the async queue of incoming events."""
         return self._queue
 
     def start(self):
@@ -95,12 +95,15 @@ class PumpFunMonitor:
         self._ws.run_forever(ping_interval=20, ping_timeout=10)
 
     def _on_open(self, ws):
-        """Subscribe to new token creation events."""
-        logger.info("WebSocket connected, subscribing to newTokens...")
-        subscribe_msg = {
-            "method": "subscribeNewToken",
-        }
-        ws.send(json.dumps(subscribe_msg))
+        """Subscribe to token creation and trade events."""
+        logger.info("WebSocket connected, subscribing to newTokens and trades...")
+        
+        # Subscribe to new token launches
+        ws.send(json.dumps({"method": "subscribeNewToken"}))
+        
+        # Subscribe to all trades to detect Dev Dumps and Whale activity
+        ws.send(json.dumps({"method": "subscribeAccountTrade", "keys": []}))
+        
         # Reset backoff on successful connection
         self._reconnect_delay = 1.0
 
@@ -108,55 +111,29 @@ class PumpFunMonitor:
         """Parse incoming message and push to async queue."""
         try:
             data = json.loads(message)
-            token = self._parse_token_event(data)
-            if token:
-                # Thread-safe put into asyncio queue
-                asyncio.run_coroutine_threadsafe(
-                    self._safe_put(token), self._loop
-                )
+            if not isinstance(data, dict):
+                return
+
+            # Bridge the raw message to the bot's event loop
+            asyncio.run_coroutine_threadsafe(
+                self._safe_put(data), self._loop
+            )
         except json.JSONDecodeError:
-            logger.debug(f"Non-JSON message: {message[:100]}")
+            pass
         except Exception as e:
             logger.error(f"Error processing message: {e}")
 
-    async def _safe_put(self, token: TokenEvent):
-        """Put token into queue, dropping oldest if full."""
+    async def _safe_put(self, data: dict):
+        """Put data into queue, dropping oldest if full."""
         if self._queue.full():
             try:
-                self._queue.get_nowait()  # Drop oldest
+                self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 pass
-        await self._queue.put(token)
+        await self._queue.put(data)
 
     def _on_error(self, ws, error):
-        """Handle WebSocket errors."""
         logger.error(f"WebSocket error: {error}")
 
     def _on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket disconnection."""
-        logger.warning(
-            f"WebSocket closed | code={close_status_code} msg={close_msg}"
-        )
-
-    @staticmethod
-    def _parse_token_event(data: dict) -> Optional[TokenEvent]:
-        """Parse raw WebSocket data into a TokenEvent model."""
-        # Pump.fun sends different event types; filter for token creation
-        if not isinstance(data, dict):
-            return None
-
-        mint = data.get("mint")
-        if not mint:
-            return None
-
-        return TokenEvent(
-            mint=mint,
-            name=data.get("name", "Unknown"),
-            symbol=data.get("symbol", "???"),
-            uri=data.get("uri"),
-            creator=data.get("traderPublicKey"),
-            initial_buy_sol=float(data.get("initialBuy", 0)) / 1e9,
-            market_cap_usd=float(data.get("marketCapSol", 0)) * 150,  # Approx SOL price
-            liquidity_sol=float(data.get("vSolInBondingCurve", 0)) / 1e9,
-            timestamp=time(),
-        )
+        logger.warning(f"WebSocket closed | code={close_status_code} msg={close_msg}")
