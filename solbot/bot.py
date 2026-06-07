@@ -167,3 +167,18 @@ class Solbot:
     async def _get_market_data(self, mint: str):
         # Placeholder for actual market data lookup
         return 0, 0
+
+async def run_bot():
+    """Entry point: load config, wire up signal handling, and run."""
+    config = BotConfig()
+    bot = Solbot(config)
+
+    # Graceful shutdown on SIGINT/SIGTERM
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
+
+    await bot.start()
+    # Keep the loop alive
+    while bot._running:
+        await asyncio.sleep(1)
