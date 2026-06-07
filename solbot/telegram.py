@@ -11,7 +11,7 @@ from solbot.config import TelegramConfig
 logger = logging.getLogger("bot.telegram")
 
 class TelegramManager:
-    \"\"\"Enhanced control interface with full command registry.\"\"\"
+    """Enhanced control interface with full command registry."""
 
     def __init__(self, config: TelegramConfig):
         self._config = config
@@ -153,7 +153,7 @@ class TelegramManager:
         await self.send_message(msg)
 
     async def _cmd_balance(self, bot: Any):
-        \"\"\"Fetch and display the actual SOL balance.\"\"\"
+        """Fetch and display the actual SOL balance."""
         balance = await bot._pump_client.get_sol_balance()
         msg = (
             "<b>🔍 Wallet Balance</b>\n"
@@ -167,79 +167,83 @@ class TelegramManager:
             await self.send_message("No active positions.")
             return
         
-        lines = [\"<b>📍 Current Portfolio:</b>\"]
+        lines = ["<b>📍 Current Portfolio:</b>"]
         # Process mints in a stable sorted order to prevent UI jumps
         for mint in sorted(bot._positions.keys()):
             pos = bot._positions[mint]
             
-            # 1. Refresh balance for UI accuracy
-            balance = await bot._pump_client.get_token_balance(mint)
-            
-            # 2. Refresh metadata for live price/MC
-            meta = await bot._pump_client.get_token_metadata(mint)
-            current_mc_sol = float(meta.get(\"market_cap_sol\", 0))
-            current_mc_usd = current_mc_sol * 150
-            
-            # Update symbol if it was SYNCED
-            if pos.symbol == \"SYNCED\" and meta.get(\"symbol\"):
-                pos.symbol = meta[\"symbol\"]
-            
-            # 3. Update position in-memory
-            pos.current_price = current_mc_usd
-            if current_mc_usd > pos.highest_price:
-                pos.highest_price = current_mc_usd
+            try:
+                # 1. Refresh balance for UI accuracy
+                balance = await bot._pump_client.get_token_balance(mint)
+                
+                # 2. Refresh metadata for live price/MC
+                meta = await bot._pump_client.get_token_metadata(mint)
+                current_mc_sol = float(meta.get("market_cap_sol", 0))
+                current_mc_usd = current_mc_sol * 150
+                
+                # Update symbol if it was SYNCED
+                if pos.symbol == "SYNCED" and meta.get("symbol"):
+                    pos.symbol = meta["symbol"]
+                
+                # 3. Update position in-memory
+                pos.current_price = current_mc_usd
+                if current_mc_usd > pos.highest_price:
+                    pos.highest_price = current_mc_usd
 
-            # 4. Calculate display values
-            sol_price_per_token = current_mc_sol / 1_000_000_000
-            current_sol_value = balance * sol_price_per_token
+                # 4. Calculate display values
+                sol_price_per_token = current_mc_sol / 1_000_000_000
+                current_sol_value = balance * sol_price_per_token
+                
+                token_display = f"{balance:,.0f}" if balance >= 1 else f"{balance:,.4f}"
+                
+                lines.append(f"- {pos.symbol} (<code>{mint[:4]}...{mint[-4:]}</code>)")
+                lines.append(f"  Value: <code>{current_sol_value:.4f} SOL</code> ({token_display} tokens)")
+                lines.append(f"  MC: <code>${current_mc_usd:,.0f}</code> | Entry: <code>${pos.entry_price:,.0f}</code>")
+                lines.append("") # Spacer
+            except Exception as e:
+                logger.error(f"Error processing portfolio for {mint}: {e}")
+                lines.append(f"- ⚠️ Error loading {mint[:8]}...")
             
-            token_display = f\"{balance:,.0f}\" if balance >= 1 else f\"{balance:,.4f}\"
-            
-            lines.append(f\"- {pos.symbol} (<code>{mint[:4]}...{mint[-4:]}</code>)\")
-            lines.append(f\"  Value: <code>{current_sol_value:.4f} SOL</code> ({token_display} tokens)\")
-            lines.append(f\"  MC: <code>${current_mc_usd:,.0f}</code> | Entry: <code>${pos.entry_price:,.0f}</code>\")
-            lines.append(\"\") # Spacer
-            
-        await self.send_message(\"\\n\".join(lines))
+        await self.send_message("\n".join(lines))
 
     async def _cmd_history(self, bot: Any):
         if not bot._trades:
-            await self.send_message(\"No trade history in this session.\")
+            await self.send_message("No trade history in this session.")
             return
-        lines = [\"<b>🕒 Recent History:</b>\"]
+        lines = ["<b>🕒 Recent History:</b>"]
         for trade in bot._trades[-10:]:
-            status = \"✅\" if trade.success else \"❌\"
-            lines.append(f\"{status} {trade.token_mint[:8]}... | {trade.latency_ms:.0f}ms\")
-        await self.send_message(\"\\n\".join(lines))
+            status = "✅" if trade.success else "❌"
+            lines.append(f"{status} {trade.token_mint[:8]}... | {trade.latency_ms:.0f}ms")
+        await self.send_message("\n".join(lines))
 
     async def _cmd_profit(self, bot: Any):
         # Placeholder for real P&L calculation
-        await self.send_message(\"<b>📈 Session P&L</b>\\nEstimated: Calculating tracked exits...\")
+        await self.send_message("<b>📈 Session P&L</b>\nEstimated: Calculating tracked exits...")
 
     async def _cmd_scoring(self, bot: Any):
         scores = len(getattr(bot._filter, 'wallet_metrics', {}))
         msg = (
-            \"<b>🐋 Wallet Intelligence</b>\\n\"
-            f\"Tracked Wallets: <code>{scores}</code>\\n\"
-            \"Smart Wallets: <code>0</code> (Building data...)\"
+            "<b>🐋 Wallet Intelligence</b>\n"
+            f"Tracked Wallets: <code>{scores}</code>\n"
+            "Smart Wallets: <code>0</code> (Building data...)"
         )
         await self.send_message(msg)
 
     async def _cmd_risk(self, bot: Any):
         conf = bot._config
         msg = (
-            \"<b>⚠️ Risk Settings</b>\\n\"
-            f\"Stop Loss: <code>-20%</code>\\n\"
-            f\"Slippage: <code>{conf.jupiter.slippage_bps} BPS</code>\\n\"
-            f\"Priority Fee: <code>{conf.fee.base_fee_lamports / 1e9} SOL</code>\\n\"
-            f\"Liquidity Exit: <code>30% Drop</code>\"
+            "<b>⚠️ Risk Settings</b>\n"
+            f"Stop Loss: <code>-20%</code>\n"
+            f"Slippage: <code>{conf.jupiter.slippage_bps} BPS</code>\n"
+            f"Priority Fee: <code>{conf.fee.base_fee_lamports / 1e9} SOL</code>\n"
+            f"Liquidity Exit: <code>30% Drop</code>"
         )
         await self.send_message(msg)
 
     async def _cmd_exitall(self, bot: Any):
         if not bot._positions:
-            await self.send_message(\"No positions to exit.\")
+            await self.send_message("No positions to exit.")
             return
-        await self.send_message(f\"⚠️ <b>Liquidating {len(bot._positions)} positions...</b>\")
+        await self.send_message(f"⚠️ <b>Liquidating {len(bot._positions)} positions...</b>")
         for mint in list(bot._positions.keys()):
-            asyncio.create_task(bot._exit_position(bot._positions[mint], \"Manual Exit\", 1.0))
+            asyncio.create_task(bot._exit_position(bot._positions[mint], "Manual Exit", 1.0))
