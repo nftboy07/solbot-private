@@ -1,4 +1,4 @@
-"""Main bot orchestrator and Position Manager for Solbot."""
+"""Main bot orchestrator and Sniper for Solbot with Automatic Moonbag Strategy."""
 
 import asyncio
 import signal
@@ -22,17 +22,14 @@ logger = get_logger("bot")
 class Position:
     mint: str
     symbol: str
-    entry_price: float
-    entry_liq: float
-    creator: str
-    size: float
-    peak_price: float = 0.0
-    start_time: float = field(default_factory=time)
-    tp_count: int = 0
+    entry_price: float  # Market Cap USD as price proxy
+    size: float        # Amount in SOL initially, then tokens on sell
     active: bool = True
+    tp_sold: bool = False
+    start_time: float = field(default_factory=time)
 
 class Solbot:
-    """Enhanced Solbot with V28 logic and Position Management."""
+    """High-speed DEGEN Sniper with Automatic Moonbag Management."""
 
     def __init__(self, config: BotConfig):
         self._config = config
@@ -49,7 +46,7 @@ class Solbot:
 
     async def start(self):
         setup_logger(self._config.logging)
-        logger.info("SOLBOT DEGEN SNIPER STARTING")
+        logger.info("SOLBOT DEGEN SNIPER + MOONBAG STARTING")
 
         errors = self._config.validate()
         if errors:
@@ -66,7 +63,7 @@ class Solbot:
 
         self._telegram = TelegramManager(self._config.telegram)
         await self._telegram.start(self)
-        await self._telegram.send_message("<b>Solbot Sniper started!</b>")
+        await self._telegram.send_message("<b>Solbot Sniper (Moonbag Mode) started!</b>")
 
         loop = asyncio.get_running_loop()
         self._monitor = PumpFunMonitor(self._config.pumpfun, loop)
@@ -74,7 +71,7 @@ class Solbot:
 
         self._running = True
         
-        # Start background tasks
+        # Main sniper processing loop
         asyncio.create_task(self._process_events())
 
     async def stop(self):
@@ -91,58 +88,109 @@ class Solbot:
                 await asyncio.sleep(1)
                 continue
             try:
+                # Fast queue processing for DEGEN sniper
                 token = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
                 qualified, size = self._filter.is_qualified(token)
                 if qualified:
-                    asyncio.create_task(self._execute_trade(token, size))
+                    # Non-blocking fire-and-forget sniper execution
+                    asyncio.create_task(self._execute_snipe(token, size))
             except asyncio.TimeoutError:
                 continue
 
-    async def _execute_trade(self, token: TokenEvent, size: float):
-        # Calculate dynamic fee from filter
+    async def _execute_snipe(self, token: TokenEvent, size: float):
+        # Calculate dynamic fee from filter (lamports -> SOL)
         fee_lamports = self._filter.get_dynamic_fee(token.mint)
-        # Convert lamports to SOL for PumpPortal API
         priority_fee_sol = fee_lamports / 1_000_000_000
 
+        # Execute Buy
         result = await self._pump_client.execute_trade(
             token.mint, 
+            action="buy",
             amount=size, 
             priority_fee=priority_fee_sol
         )
         self._trades.append(result)
 
         if result.success:
-            self._positions[token.mint] = Position(
-                mint=token.mint, symbol=token.symbol,
+            pos = Position(
+                mint=token.mint, 
+                symbol=token.symbol,
                 entry_price=token.market_cap_usd,
-                entry_liq=token.liquidity_sol,
-                creator=token.creator or "",
                 size=size
             )
+            self._positions[token.mint] = pos
             await self._telegram.send_message(f"✅ <b>BUY: {token.symbol}</b>\nSize: {size} SOL")
+            
+            # Spawn lightweight background position manager for this token
+            asyncio.create_task(self._manage_moonbag(pos))
         else:
-            logger.error(f"Trade failed for {token.symbol}: {result.error}")
+            logger.error(f"Snipe failed for {token.symbol}: {result.error}")
+
+    async def _manage_moonbag(self, pos: Position):
+        """Zero-bloat background task to handle TP and Moonbag protection."""
+        logger.info(f"Monitoring moonbag for {pos.symbol}...")
+        
+        while self._running and pos.active:
+            try:
+                # 1. Fetch current price/market cap proxy
+                current_price = await self._get_fast_price(pos.mint)
+                
+                if current_price <= 0:
+                    await asyncio.sleep(5)
+                    continue
+
+                # 2. Risk Management: Breakeven Stop Loss
+                if pos.tp_sold and current_price <= pos.entry_price:
+                    await self._exit_position(pos, "Breakeven Protect", 1.0)
+                    break
+
+                # 3. Take Profit: Initial 2x (+100%) -> Sell 50%
+                if not pos.tp_sold and current_price >= (pos.entry_price * 2.0):
+                    await self._exit_position(pos, "2x Moonbag Trigger", 0.5)
+                    pos.tp_sold = True
+
+                # 4. Secondary TP (Optional): 10x Moonshot -> Exit all
+                if pos.tp_sold and current_price >= (pos.entry_price * 10.0):
+                    await self._exit_position(pos, "10x Moonshot Exit", 1.0)
+                    break
+
+                await asyncio.sleep(5)
+
+            except Exception as e:
+                logger.error(f"Error in moonbag manager for {pos.symbol}: {e}")
+                await asyncio.sleep(10)
 
     async def _exit_position(self, pos: Position, reason: str, pct: float):
-        result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=pct)
+        """Execute a sell transaction via the client."""
+        result = await self._pump_client.execute_trade(
+            pos.mint, 
+            action="sell", 
+            amount=pct 
+        )
+        
         if result.success:
             if pct >= 1.0:
                 pos.active = False
                 if pos.mint in self._positions:
                     del self._positions[pos.mint]
-            await self._telegram.send_message(f"🚨 <b>SELL: {pos.symbol}</b>\nReason: {reason}\nSize: {pct*100}%")
+            
+            msg = f"🚨 <b>SELL: {pos.symbol}</b>\nReason: {reason}\nSize: {pct*100}%"
+            await self._telegram.send_message(msg)
+            logger.info(f"Sold {pct*100}% of {pos.symbol} due to {reason}")
+
+    async def _get_fast_price(self, mint: str) -> float:
+        """Placeholder for fast market cap/price updates."""
+        return 0.0
 
 async def run_bot():
     """Entry point: load config, wire up signal handling, and run."""
     config = BotConfig()
     bot = Solbot(config)
 
-    # Graceful shutdown on SIGINT/SIGTERM
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
 
     await bot.start()
-    # Keep the loop alive
     while bot._running:
         await asyncio.sleep(1)
