@@ -1,28 +1,25 @@
-"""PumpPortal Local Transaction Signing Client.
-
-Provides asynchronous methods to fetch transactions from PumpPortal
-and sign them locally before sending to the Solana network.
-"""
+"""PumpPortal Local Transaction Signing Client with Jito Support."""
 
 import asyncio
 import time
 import base58
-from typing import Optional
+import logging
+from typing import Optional, List
 
 import aiohttp
 from solders.transaction import VersionedTransaction
-from solders.keypair import Keypair
+from solders.system_program import transfer, TransferParams
+from solders.pubkey import Pubkey
 
-from solbot.config import JupiterConfig, SolanaConfig, BotConfig
-from solbot.logger import get_logger
+from solbot.config import BotConfig
 from solbot.models import TradeResult
 from solbot.wallet import Wallet
+from solbot.jito import JitoClient
 
-logger = get_logger("pumpfun_client")
-
+logger = logging.getLogger("bot.pumpfun_client")
 
 class PumpFunClient:
-    """Async client for PumpPortal local transaction signing."""
+    """Async client for PumpPortal local transaction signing with Jito bundling."""
 
     def __init__(self, config: BotConfig, wallet: Wallet):
         self._bot_config = config
@@ -30,18 +27,20 @@ class PumpFunClient:
         self._solana_config = config.solana
         self._wallet = wallet
         self._session: Optional[aiohttp.ClientSession] = None
+        self._jito: Optional[JitoClient] = None
         self._base_url = "https://pumpportal.fun/api/trade-local"
 
     async def start(self):
-        """Initialize the aiohttp session."""
         if not self._session:
             self._session = aiohttp.ClientSession()
+        self._jito = JitoClient(self._bot_config, self._wallet)
+        await self._jito.start()
 
     async def stop(self):
-        """Close the aiohttp session."""
         if self._session:
             await self._session.close()
-            self._session = None
+        if self._jito:
+            await self._jito.stop()
 
     async def execute_trade(
         self, 
@@ -49,28 +48,14 @@ class PumpFunClient:
         action: str = "buy", 
         amount: Optional[float] = None,
         slippage: Optional[int] = None,
-        priority_fee: Optional[float] = None
+        priority_fee: Optional[float] = None,
+        use_jito: bool = True
     ) -> TradeResult:
-        """Fetch, sign, and broadcast a trade transaction.
-        
-        Args:
-            mint: The token mint address.
-            action: "buy" or "sell".
-            amount: Amount in SOL (buy) or token units (sell). 
-                    Defaults to config.buy_amount_sol for buys.
-            slippage: Slippage in basis points. Defaults to config.slippage_bps.
-            priority_fee: Transaction priority fee in SOL.
-        """
         start_time = time.perf_counter()
         
-        if amount is None and action == "buy":
-            amount = self._jupiter_config.buy_amount_sol
-        
-        if slippage is None:
-            slippage = self._jupiter_config.slippage_bps
-            
-        if priority_fee is None:
-            priority_fee = 0.00001 # Default baseline
+        amount = amount or self._jupiter_config.buy_amount_sol
+        slippage = slippage or self._jupiter_config.slippage_bps
+        priority_fee = priority_fee or 0.00001
 
         payload = {
             "publicKey": self._wallet.pubkey_str,
@@ -86,65 +71,30 @@ class PumpFunClient:
         try:
             async with self._session.post(self._base_url, json=payload) as resp:
                 if resp.status != 200:
-                    error_text = await resp.text()
-                    return TradeResult(
-                        success=False,
-                        token_mint=mint,
-                        error=f"PumpPortal API error: {resp.status} - {error_text}",
-                        latency_ms=(time.perf_counter() - start_time) * 1000
-                    )
-                
-                # The local API returns the raw transaction bytes
+                    return TradeResult(success=False, token_mint=mint, error=f"API Error: {resp.status}")
                 tx_data = await resp.read()
                 
-            # 1. Deserialize the transaction
             tx = VersionedTransaction.from_bytes(tx_data)
-            
-            # 2. Sign locally
             signed_tx = VersionedTransaction(tx.message, [self._wallet.keypair])
-            raw_tx = bytes(signed_tx)
 
-            # 3. Broadcast to the Solana RPC
-            rpc_payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "sendTransaction",
-                "params": [
-                    base58.b58encode(raw_tx).decode("utf-8"),
-                    {
-                        "skipPreflight": True,
-                        "preflightCommitment": "processed",
-                        "encoding": "base58",
-                        "maxRetries": 2,
-                    },
-                ],
-            }
-
-            async with self._session.post(self._solana_config.rpc_url, json=rpc_payload) as r_resp:
-                r_data = await r_resp.json()
+            if use_jito:
+                # Execute via Jito Bundle
+                bundle_id = await self._jito.send_bundle([signed_tx], tip_amount_sol=0.001)
                 latency = (time.perf_counter() - start_time) * 1000
-                
-                if "result" in r_data:
-                    return TradeResult(
-                        success=True,
-                        token_mint=mint,
-                        tx_signature=r_data["result"],
-                        latency_ms=latency
-                    )
+                if bundle_id:
+                    return TradeResult(success=True, token_mint=mint, tx_signature=bundle_id, latency_ms=latency)
                 else:
-                    error_msg = r_data.get("error", "Unknown RPC error")
-                    return TradeResult(
-                        success=False,
-                        token_mint=mint,
-                        error=f"RPC Broadcast failed: {error_msg}",
-                        latency_ms=latency
-                    )
+                    return TradeResult(success=False, token_mint=mint, error="Jito Bundle Failed", latency_ms=latency)
+            else:
+                # Direct RPC Broadcast
+                rpc_payload = {
+                    "jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
+                    "params": [base58.b58encode(bytes(signed_tx)).decode("utf-8"), {"skipPreflight": True}]
+                }
+                async with self._session.post(self._solana_config.rpc_url, json=rpc_payload) as r_resp:
+                    r_data = await r_resp.json()
+                    latency = (time.perf_counter() - start_time) * 1000
+                    return TradeResult(success=True, token_mint=mint, tx_signature=r_data.get("result"), latency_ms=latency)
 
         except Exception as e:
-            logger.error(f"PumpFun trade execution failed: {e}")
-            return TradeResult(
-                success=False,
-                token_mint=mint,
-                error=str(e),
-                latency_ms=(time.perf_counter() - start_time) * 1000
-            )
+            return TradeResult(success=False, token_mint=mint, error=str(e))
