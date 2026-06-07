@@ -4,7 +4,7 @@ import asyncio
 import time
 import base58
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 import aiohttp
 from solders.transaction import VersionedTransaction
@@ -59,6 +59,34 @@ class PumpFunClient:
             logger.error(f"Error fetching SOL balance: {e}")
             return 0.0
 
+    async def get_all_token_balances(self) -> Dict[str, float]:
+        """Fetch all SPL token balances for the wallet."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                self._wallet.pubkey_str,
+                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+                {"encoding": "jsonParsed"}
+            ]
+        }
+        balances = {}
+        try:
+            async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
+                data = await resp.json()
+                accounts = data.get("result", {}).get("value", [])
+                for acc in accounts:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    mint = info["mint"]
+                    amount = float(info["tokenAmount"]["uiAmount"] or 0)
+                    if amount > 0:
+                        balances[mint] = amount
+            return balances
+        except Exception as e:
+            logger.error(f"Error fetching all token balances: {e}")
+            return {}
+
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
         payload = {
@@ -79,7 +107,7 @@ class PumpFunClient:
                     return 0.0
                 
                 amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
-                return float(amount_info["amount"])
+                return float(amount_info["uiAmount"] or 0)
         except Exception as e:
             logger.error(f"Error fetching balance for {mint}: {e}")
             return 0.0

@@ -92,6 +92,31 @@ class Solbot:
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
 
+    async def _sync_existing_holdings(self):
+        """Detect SPL tokens in wallet and add to positions if not present."""
+        logger.info("Scanning wallet for existing SPL tokens...")
+        try:
+            tokens = await self._pump_client.get_all_token_balances()
+            for mint, balance in tokens.items():
+                if mint not in self._positions and balance > 0:
+                    # Fetch basic metadata from PumpPortal or RPC if possible
+                    # For now, add with placeholder metadata
+                    logger.info(f"Detected existing holding: {mint} (Balance: {balance})")
+                    pos = Position(
+                        mint=mint,
+                        symbol="SYNCED",
+                        entry_price=0.0, # Unknown
+                        entry_liq=0.0,   # Unknown
+                        creator="unknown",
+                        size=0.0,        # Unknown entry size
+                        active=True
+                    )
+                    self._positions[mint] = pos
+                    # Note: These synced positions will need price updates to trigger exits
+            self._save_state()
+        except Exception as e:
+            logger.error(f"Failed to sync holdings: {e}")
+
     async def start(self):
         setup_logger(self._config.logging)
         logger.info("SOLBOT DEGEN SNIPER + DEV PROTECTION STARTING")
@@ -111,6 +136,9 @@ class Solbot:
         # Load persisted state before starting monitors
         self._load_state()
         
+        # Sync manual holdings
+        await self._sync_existing_holdings()
+        
         await self._telegram.send_message("<b>Solbot Sniper (Dev Protection) started!</b>")
 
         loop = asyncio.get_running_loop()
@@ -120,7 +148,7 @@ class Solbot:
         self._running = True
         asyncio.create_task(self._process_events())
         
-        # Resume position managers for loaded active positions
+        # Resume position managers for loaded/synced active positions
         for pos in self._positions.values():
             if pos.active:
                 asyncio.create_task(self._position_manager(pos))
@@ -169,11 +197,16 @@ class Solbot:
         if not trader or not mint:
             return
 
-        # Update price feed for positions
+        # Update price feed for positions (including synced ones)
         if mint in self._positions and mcap_sol:
             price_usd = float(mcap_sol) * 150 
             pos = self._positions[mint]
             pos.current_price = price_usd
+            
+            # For synced positions, we might not have entry_price
+            if pos.entry_price == 0:
+                pos.entry_price = price_usd # Set first seen price as "entry" for strategy tracking
+            
             if price_usd > pos.highest_price:
                 pos.highest_price = price_usd
                 self._save_state() # Save peaks
