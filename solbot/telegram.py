@@ -174,13 +174,13 @@ class TelegramManager:
             
             # Recalculate SOL value
             # price_usd is really market_cap_sol if we use mc * 150 logic
-            # Let's use pos.current_price (USD) / 150 to get SOL price per token
-            # Actually, current_price is MC_SOL * 150.
-            # So price_per_token = current_price / 150 / 1_000_000_000 (total supply)
             sol_price_per_token = (pos.current_price / 150) / 1_000_000_000
             current_sol_value = balance * sol_price_per_token
             
-            lines.append(f"- {pos.symbol}: <code>{current_sol_value:.4f} SOL</code> ({balance:,.0f} tokens)")
+            # Use fixed decimal precision for tokens display if it's very small
+            token_display = f"{balance:,.0f}" if balance >= 1 else f"{balance:,.4f}"
+            
+            lines.append(f"- {pos.symbol}: <code>{current_sol_value:.4f} SOL</code> ({token_display} tokens)")
             lines.append(f"  MC: <code>${pos.current_price:,.0f}</code> | Entry: <code>${pos.entry_price:,.0f}</code>")
             
         await self.send_message("\n".join(lines))

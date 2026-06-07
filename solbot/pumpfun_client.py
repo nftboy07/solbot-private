@@ -140,28 +140,32 @@ class PumpFunClient:
 
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
-        # Try both programs or use a more generic approach if needed
-        for program_id in ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EP2H6V3MG69L7AHXTo"]:
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getTokenAccountsByOwner",
-                "params": [
-                    self._wallet.pubkey_str,
-                    {"mint": mint, "programId": program_id},
-                    {"encoding": "jsonParsed"}
-                ]
-            }
-            try:
-                async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
-                    data = await resp.json()
-                    accounts = data.get("result", {}).get("value", [])
-                    if accounts:
-                        amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
-                        return float(amount_info["uiAmount"] or 0)
-            except:
-                continue
-        return 0.0
+        # Note: getTokenAccountsByOwner with "mint" param is the standard way to check a specific token
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenAccountsByOwner",
+            "params": [
+                self._wallet.pubkey_str,
+                {"mint": mint},
+                {"encoding": "jsonParsed"}
+            ]
+        }
+        try:
+            async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
+                data = await resp.json()
+                accounts = data.get("result", {}).get("value", [])
+                if not accounts:
+                    # If mint not found, it might be in the other program (Token-2022)
+                    # The RPC usually finds it if you don't specify programId, 
+                    # but some RPCs require it. Let's return 0 for now as a safe default.
+                    return 0.0
+                
+                amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
+                return float(amount_info["uiAmount"] or 0)
+        except Exception as e:
+            logger.error(f"Error fetching balance for {mint}: {e}")
+            return 0.0
 
     async def execute_trade(
         self, 
