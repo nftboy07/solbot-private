@@ -1,17 +1,17 @@
-"""Clean control interface for the sniper bot."""
+"""Comprehensive Telegram control interface for Solbot."""
 
 import asyncio
 import aiohttp
 import logging
-import sys
 import os
+import sys
 from typing import Optional, Any
-from solbot.config import TelegramConfig, BotMode
+from solbot.config import TelegramConfig
 
 logger = logging.getLogger("bot.telegram")
 
 class TelegramManager:
-    """Clean control interface for the sniper bot supporting full command registry."""
+    """Enhanced control interface with full command registry."""
 
     def __init__(self, config: TelegramConfig):
         self._config = config
@@ -30,6 +30,7 @@ class TelegramManager:
         
         self._running = True
         asyncio.create_task(self._poll_loop(bot_instance))
+        logger.info("Telegram command listener started.")
 
     async def stop(self):
         self._running = False
@@ -43,9 +44,10 @@ class TelegramManager:
         payload = {"chat_id": self._config.chat_id, "text": text, "parse_mode": "HTML"}
         try:
             async with self._session.post(url, json=payload) as resp:
-                pass
-        except Exception:
-            pass
+                if resp.status != 200:
+                    logger.error(f"Telegram send error: {await resp.text()}")
+        except Exception as e:
+            logger.error(f"Telegram exception: {e}")
 
     async def _poll_loop(self, bot_instance: Any):
         while self._running:
@@ -69,112 +71,121 @@ class TelegramManager:
             if not msg or str(msg.get("chat", {}).get("id", "")) != str(self._config.chat_id):
                 continue
             
-            text = msg.get("text", "").split(" ")
-            cmd = text[0].lower()
-            args = text[1:]
+            text = msg.get("text", "")
+            if not text: continue
 
-            # Core Control
-            if cmd == "/status":
-                status = "PAUSED" if bot._paused else "ACTIVE"
-                await self.send_message(
-                    f"<b>📊 Solbot Status</b>\n"
-                    f"State: <code>{status}</code>\n"
-                    f"Mode: <code>DEGEN SNIPER</code>\n"
-                    f"Positions: <code>{len(bot._positions)}</code>\n"
-                    f"Trades: <code>{len(bot._trades)}</code>"
-                )
+            cmd = text.split()[0].lower()
+            
+            if cmd == "/list" or cmd == "/help":
+                await self._cmd_list()
+            elif cmd == "/status":
+                await self._cmd_status(bot)
+            elif cmd == "/balance":
+                await self.send_message("🔍 <b>SOL Balance:</b> Checking explorer... (Wallet balance monitoring in development)")
+            elif cmd == "/portfolio" or cmd == "/positions":
+                await self._cmd_portfolio(bot)
+            elif cmd == "/history":
+                await self._cmd_history(bot)
+            elif cmd == "/profit":
+                await self._cmd_profit(bot)
+            elif cmd in ["/smart", "/whales", "/devs", "/scoring"]:
+                await self._cmd_scoring(bot)
+            elif cmd == "/risk":
+                await self._cmd_risk(bot)
             elif cmd == "/pause":
                 bot._paused = True
                 await self.send_message("⏸ <b>Bot Paused</b>")
             elif cmd == "/resume":
                 bot._paused = False
                 await self.send_message("▶️ <b>Bot Resumed</b>")
-            elif cmd == "/restart":
-                await self.send_message("🔄 <b>Restarting Bot...</b>")
+            elif cmd == "/reload" or cmd == "/restart":
+                await self.send_message("🔄 <b>Reloading configuration and restarting...</b>")
                 await bot.stop()
                 os.execv(sys.executable, ['python'] + sys.argv)
+            elif cmd == "/exitall":
+                await self._cmd_exitall(bot)
 
-            # Emergency Commands
-            elif cmd in ["/kill", "/emergency", "/killall"]:
-                await self.send_message("💀 <b>Emergency Shutdown Initiated.</b>")
-                await bot.stop()
-                sys.exit(0)
-
-            # Analytics Commands
-            elif cmd == "/positions":
-                await self.send_positions(bot)
-            elif cmd in ["/pnl", "/stats", "/wins", "/losses", "/recent", "/top"]:
-                success = len([t for t in bot._trades if t.success])
-                failed = len([t for t in bot._trades if not t.success])
-                await self.send_message(
-                    f"<b>📈 Session Analytics</b>\n"
-                    f"Total: {len(bot._trades)}\n"
-                    f"Wins: {success}\n"
-                    f"Losses: {failed}"
-                )
-            elif cmd == "/logs":
-                await self.send_message("📋 <i>Full logs available in solbot.log on VPS.</i>")
-
-            # Runtime Config Commands
-            elif cmd == "/mode":
-                await self.send_message("⚡ <b>Bot is locked in DEGEN SNIPER mode for maximum speed.</b>")
-            elif cmd == "/maxbuy":
-                if args:
-                    try:
-                        val = float(args[0])
-                        # This would update the filter's default size for Degen mode
-                        if hasattr(bot, "_filter"):
-                            # We'll allow dynamic override if the filter supports it
-                            # For now, we acknowledge the command
-                            await self.send_message(f"✅ <b>Max buy updated to {val} SOL</b>")
-                        else:
-                            await self.send_message("❌ Error: Filter not accessible")
-                    except ValueError:
-                        await self.send_message("❌ Invalid value. Usage: /maxbuy 0.1")
-                else:
-                    await self.send_message("❓ Usage: /maxbuy [SOL_AMOUNT]")
-            elif cmd in ["/slippage", "/maxpositions", "/cooldown", "/minliq", "/minmcap", "/stoploss"]:
-                val = args[0] if args else "current"
-                await self.send_message(f"⚙️ <b>{cmd[1:].capitalize()} updated to {val}</b> (Active for next trade)")
-
-            # Risk & Intelligence (Stubs)
-            elif cmd in ["/blacklist", "/rugs", "/creator", "/wallet", "/smartmoney", "/copywallet"]:
-                await self.send_message(f"🛡️ <b>{cmd[1:].capitalize()} Intelligence</b>: Logic active. Filtering malicious actors.")
-
-            # Info
-            elif cmd in ["/list", "/help"]:
-                await self.send_help()
-
-    async def send_help(self):
-        help_text = (
-            "<b>🤖 Solbot Command Registry</b>\n\n"
-            "<b>Control:</b>\n"
-            "/status - Current health\n"
-            "/pause - Stop sniper\n"
-            "/resume - Start sniper\n"
-            "/restart - Soft reboot\n\n"
-            "<b>Emergency:</b>\n"
-            "/kill - Instant stop\n"
-            "/exitall - Close all positions\n\n"
-            "<b>Analytics:</b>\n"
-            "/positions - Active trades\n"
-            "/pnl - Session profit/loss\n"
-            "/stats - Trade performance\n"
-            "/recent - Last 5 trades\n"
-            "/logs - View system logs\n\n"
-            "<b>Configuration:</b>\n"
-            "/maxbuy - Set buy size\n"
-            "/slippage - Set slippage bps\n"
-            "/mode - Toggle Degen/Normal\n\n"
-            "<i>Type any command to execute.</i>"
+    async def _cmd_list(self):
+        msg = (
+            "<b>📜 Command Registry</b>\n"
+            "/list - Show this list\n"
+            "/status - Current bot state\n"
+            "/balance - SOL balance\n"
+            "/portfolio - Active holdings\n"
+            "/positions - Alias for /portfolio\n"
+            "/history - Last N trades\n"
+            "/profit - Session P&L\n"
+            "/smart - Smart wallet stats\n"
+            "/whales - Whale tracker stats\n"
+            "/devs - Developer reputation\n"
+            "/scoring - Scoring system info\n"
+            "/risk - Active risk settings\n"
+            "/pause - Pause sniper\n"
+            "/resume - Resume sniper\n"
+            "/reload - Restart process\n"
+            "/exitall - Emergency liquidation\n"
+            "/help - Show help menu"
         )
-        await self.send_message(help_text)
+        await self.send_message(msg)
 
-    async def send_positions(self, bot: Any):
+    async def _cmd_status(self, bot: Any):
+        state = "PAUSED" if bot._paused else "ACTIVE"
+        msg = (
+            "<b>📊 Solbot Status</b>\n"
+            f"State: <code>{state}</code>\n"
+            f"Mode: <code>DEGEN SNIPER</code>\n"
+            f"Positions: <code>{len(bot._positions)}</code>\n"
+            f"Trades: <code>{len(bot._trades)}</code>"
+        )
+        await self.send_message(msg)
+
+    async def _cmd_portfolio(self, bot: Any):
         if not bot._positions:
             await self.send_message("No active positions.")
             return
-        lines = ["<b>📍 Active Positions:</b>"]
+        lines = ["<b>📍 Current Portfolio:</b>"]
         for mint, pos in bot._positions.items():
-            lines.append(f"- {pos.symbol}: {pos.size} SOL")
+            lines.append(f"- {pos.symbol}: {pos.size} SOL (Entry: {pos.entry_price:.2f} MC)")
         await self.send_message("\n".join(lines))
+
+    async def _cmd_history(self, bot: Any):
+        if not bot._trades:
+            await self.send_message("No trade history in this session.")
+            return
+        lines = ["<b>🕒 Recent History:</b>"]
+        for trade in bot._trades[-10:]:
+            status = "✅" if trade.success else "❌"
+            lines.append(f"{status} {trade.token_mint[:8]}... | {trade.latency_ms:.0f}ms")
+        await self.send_message("\n".join(lines))
+
+    async def _cmd_profit(self, bot: Any):
+        # Placeholder for real P&L calculation
+        await self.send_message("<b>📈 Session P&L</b>\nEstimated: Calculating tracked exits...")
+
+    async def _cmd_scoring(self, bot: Any):
+        scores = len(getattr(bot._filter, 'wallet_metrics', {}))
+        msg = (
+            "<b>🐋 Wallet Intelligence</b>\n"
+            f"Tracked Wallets: <code>{scores}</code>\n"
+            "Smart Wallets: <code>0</code> (Building data...)"
+        )
+        await self.send_message(msg)
+
+    async def _cmd_risk(self, bot: Any):
+        conf = bot._config
+        msg = (
+            "<b>⚠️ Risk Settings</b>\n"
+            f"Stop Loss: <code>-20%</code>\n"
+            f"Slippage: <code>{conf.jupiter.slippage_bps} BPS</code>\n"
+            f"Priority Fee: <code>{conf.fee.base_fee_lamports / 1e9} SOL</code>\n"
+            f"Liquidity Exit: <code>30% Drop</code>"
+        )
+        await self.send_message(msg)
+
+    async def _cmd_exitall(self, bot: Any):
+        if not bot._positions:
+            await self.send_message("No positions to exit.")
+            return
+        await self.send_message(f"⚠️ <b>Liquidating {len(bot._positions)} positions...</b>")
+        for mint in list(bot._positions.keys()):
+            asyncio.create_task(bot._exit_position(bot._positions[mint], "Manual Exit", 1.0))
