@@ -10,7 +10,6 @@ from typing import Optional
 
 import aiohttp
 from solders.transaction import VersionedTransaction
-from solders.message import MessageV0
 from solders.keypair import Keypair
 
 from solbot.config import JupiterConfig  # Using JupiterConfig for buy_amount/slippage defaults
@@ -82,6 +81,7 @@ class PumpFunClient:
                     error_text = await resp.text()
                     return TradeResult(
                         success=False,
+                        token_mint=mint,
                         error=f"PumpPortal API error: {resp.status} - {error_text}",
                         latency_ms=(time.perf_counter() - start_time) * 1000
                     )
@@ -93,17 +93,13 @@ class PumpFunClient:
             tx = VersionedTransaction.from_bytes(tx_data)
             
             # 2. Sign locally
-            # Note: VersionedTransaction.sign takes a list of keypairs
-            tx.sign([self._wallet.keypair])
+            # Working pattern from jupiter.py: signed_tx = VersionedTransaction(tx.message, [self._wallet.keypair])
+            signed_tx = VersionedTransaction(tx.message, [self._wallet.keypair])
             
             # 3. Broadcast to the network via PumpPortal's lightning endpoint 
-            # (or use custom RPC if available). PumpPortal docs suggest sending 
-            # the signed tx back to their broadcast endpoint or using your own.
-            # Here we follow the local signing logic: fetch -> sign -> broadcast.
-            
             broadcast_url = "https://pumpportal.fun/api/broadcast"
             broadcast_payload = {
-                "signedTransaction": bytes(tx).hex()
+                "signedTransaction": bytes(signed_tx).hex()
             }
             
             async with self._session.post(broadcast_url, json=broadcast_payload) as b_resp:
@@ -113,12 +109,14 @@ class PumpFunClient:
                 if b_resp.status == 200 and "signature" in b_data:
                     return TradeResult(
                         success=True,
+                        token_mint=mint,
                         tx_signature=b_data["signature"],
                         latency_ms=latency
                     )
                 else:
                     return TradeResult(
                         success=False,
+                        token_mint=mint,
                         error=f"Broadcast failed: {b_data.get('errors', 'Unknown error')}",
                         latency_ms=latency
                     )
@@ -127,6 +125,7 @@ class PumpFunClient:
             logger.error(f"PumpFun trade execution failed: {e}")
             return TradeResult(
                 success=False,
+                token_mint=mint,
                 error=str(e),
                 latency_ms=(time.perf_counter() - start_time) * 1000
             )
