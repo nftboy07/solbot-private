@@ -49,8 +49,20 @@ class JitoClient:
             return None
 
         try:
-            # 1. Add Tip Instruction to the last transaction or as a new one
-            # For simplicity and to ensure block 0 landing, we often append a tip to the end of the bundle
+            # 1. Fetch recent blockhash for the tip transaction
+            rpc_url = self._config.solana.rpc_url
+            blockhash = None
+            async with self._session.post(rpc_url, json={
+                "jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"
+            }) as bh_resp:
+                bh_data = await bh_resp.json()
+                blockhash = bh_data.get("result", {}).get("value", {}).get("blockhash")
+
+            if not blockhash:
+                logger.error("Failed to get blockhash for Jito tip")
+                return None
+
+            # 2. Create and sign Tip Transaction
             tip_lamports = int(tip_amount_sol * 1_000_000_000)
             tip_account = Pubkey.from_string(self.TIP_ACCOUNTS[0])
             
@@ -60,16 +72,18 @@ class JitoClient:
                 lamports=tip_lamports
             ))
 
-            # Create a separate tip transaction for the bundle
-            # Note: In a real sniper, you might merge this into the main TX to save space/fees
-            # but bundles allow up to 5 transactions.
-            
-            # For this implementation, we assume the provided transactions are already signed or ready.
-            # We will send them as provided and add the tip as a signed message if needed, 
-            # or rely on the caller providing a bundle.
-            
-            # Bundle Payload
-            encoded_bundle = [base58.b58encode(bytes(tx)).decode("utf-8") for tx in transactions]
+            from solders.message import MessageV0
+            tip_msg = MessageV0.try_compile(
+                payer=self._wallet.pubkey,
+                instructions=[tip_ix],
+                address_lookup_table_accounts=[],
+                recent_blockhash=Pubkey.from_string(blockhash)
+            )
+            tip_tx = VersionedTransaction(tip_msg, [self._wallet.keypair])
+
+            # 3. Assemble Bundle
+            full_bundle = list(transactions) + [tip_tx]
+            encoded_bundle = [base58.b58encode(bytes(tx)).decode("utf-8") for tx in full_bundle]
             
             payload = {
                 "jsonrpc": "2.0",

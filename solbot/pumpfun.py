@@ -101,8 +101,8 @@ class PumpFunMonitor:
         # Subscribe to new token launches
         ws.send(json.dumps({"method": "subscribeNewToken"}))
         
-        # Subscribe to all trades to detect Dev Dumps and Whale activity
-        ws.send(json.dumps({"method": "subscribeAccountTrade", "keys": []}))
+        # Correct subscription for all trades on PumpPortal
+        ws.send(json.dumps({"method": "subscribeTrade", "keys": []}))
         
         # Reset backoff on successful connection
         self._reconnect_delay = 1.0
