@@ -93,26 +93,35 @@ class Solbot:
             logger.error(f"Failed to load state: {e}")
 
     async def _sync_existing_holdings(self):
-        """Detect SPL tokens in wallet and add to positions if not present."""
-        logger.info("Scanning wallet for existing SPL tokens...")
+        """Detect SPL and Token-2022 tokens in wallet with metadata enrichment."""
+        logger.info("Scanning wallet for existing holdings (SPL & Token-2022)...")
         try:
             tokens = await self._pump_client.get_all_token_balances()
-            for mint, balance in tokens.items():
-                if mint not in self._positions and balance > 0:
-                    # Fetch basic metadata from PumpPortal or RPC if possible
-                    # For now, add with placeholder metadata
-                    logger.info(f"Detected existing holding: {mint} (Balance: {balance})")
+            for mint, data in tokens.items():
+                if mint not in self._positions and data["balance"] > 0:
+                    # Enrich with real metadata
+                    meta = await self._pump_client.get_token_metadata(mint)
+                    symbol = meta.get("symbol", "SYNCED")
+                    mcap_sol = float(meta.get("market_cap_sol", 0))
+                    price_usd = mcap_sol * 150 # Est price
+                    
+                    # Estimate "size" in SOL based on current balance and price
+                    # This is a rough estimation for UI purposes
+                    size_sol = (data["balance"] / 1e9) * price_usd / 150 if price_usd > 0 else 0.0
+
+                    logger.info(f"Detected holding: {symbol} ({mint}) | Balance: {data['balance']}")
                     pos = Position(
                         mint=mint,
-                        symbol="SYNCED",
-                        entry_price=0.0, # Unknown
-                        entry_liq=0.0,   # Unknown
-                        creator="unknown",
-                        size=0.0,        # Unknown entry size
+                        symbol=symbol,
+                        entry_price=price_usd, 
+                        entry_liq=float(meta.get("liquidity_sol", 0)),
+                        creator=meta.get("creator", "unknown"),
+                        size=size_sol,
                         active=True
                     )
+                    pos.current_price = price_usd
+                    pos.highest_price = price_usd
                     self._positions[mint] = pos
-                    # Note: These synced positions will need price updates to trigger exits
             self._save_state()
         except Exception as e:
             logger.error(f"Failed to sync holdings: {e}")

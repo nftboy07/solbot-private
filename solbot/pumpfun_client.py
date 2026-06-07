@@ -60,58 +60,80 @@ class PumpFunClient:
             logger.error(f"Error fetching SOL balance: {e}")
             return 0.0
 
-    async def get_all_token_balances(self) -> Dict[str, float]:
-        """Fetch all SPL token balances for the wallet."""
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                self._wallet.pubkey_str,
-                {"programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
-                {"encoding": "jsonParsed"}
-            ]
-        }
+    async def get_all_token_balances(self) -> Dict[str, Dict]:
+        """Fetch all SPL and Token-2022 balances with metadata."""
+        programs = [
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", # SPL Token
+            "TokenzQdBNbLqP5VEhdkAS6EP2H6V3MG69L7AHXTo"  # Token-2022
+        ]
         balances = {}
+        
+        for program_id in programs:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    self._wallet.pubkey_str,
+                    {"programId": program_id},
+                    {"encoding": "jsonParsed"}
+                ]
+            }
+            try:
+                async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
+                    data = await resp.json()
+                    accounts = data.get("result", {}).get("value", [])
+                    for acc in accounts:
+                        info = acc["account"]["data"]["parsed"]["info"]
+                        mint = info["mint"]
+                        amount = float(info["tokenAmount"]["uiAmount"] or 0)
+                        if amount > 0:
+                            balances[mint] = {
+                                "balance": amount,
+                                "program": "Token-2022" if program_id.endswith("To") else "SPL"
+                            }
+            except Exception as e:
+                logger.error(f"Error fetching balances for {program_id}: {e}")
+        
+        return balances
+
+    async def get_token_metadata(self, mint: str) -> Dict:
+        """Fetch basic token metadata (symbol)."""
+        # Note: In a production sniper, we'd use a metadata provider or Metaplex.
+        # For now, we query PumpPortal's public info or return placeholders.
+        url = f"https://frontend-api.pump.fun/coins/{mint}"
         try:
-            async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
-                data = await resp.json()
-                accounts = data.get("result", {}).get("value", [])
-                for acc in accounts:
-                    info = acc["account"]["data"]["parsed"]["info"]
-                    mint = info["mint"]
-                    amount = float(info["tokenAmount"]["uiAmount"] or 0)
-                    if amount > 0:
-                        balances[mint] = amount
-            return balances
-        except Exception as e:
-            logger.error(f"Error fetching all token balances: {e}")
-            return {}
+            async with self._session.get(url) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+        except:
+            pass
+        return {"symbol": "???", "name": "Unknown", "creator": "unknown"}
 
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                self._wallet.pubkey_str,
-                {"mint": mint},
-                {"encoding": "jsonParsed"}
-            ]
-        }
-        try:
-            async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
-                data = await resp.json()
-                accounts = data.get("result", {}).get("value", [])
-                if not accounts:
-                    return 0.0
-                
-                amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
-                return float(amount_info["uiAmount"] or 0)
-        except Exception as e:
-            logger.error(f"Error fetching balance for {mint}: {e}")
-            return 0.0
+        # Try both programs or use a more generic approach if needed
+        for program_id in ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EP2H6V3MG69L7AHXTo"]:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    self._wallet.pubkey_str,
+                    {"mint": mint, "programId": program_id},
+                    {"encoding": "jsonParsed"}
+                ]
+            }
+            try:
+                async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
+                    data = await resp.json()
+                    accounts = data.get("result", {}).get("value", [])
+                    if accounts:
+                        amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
+                        return float(amount_info["uiAmount"] or 0)
+            except:
+                continue
+        return 0.0
 
     async def execute_trade(
         self, 
