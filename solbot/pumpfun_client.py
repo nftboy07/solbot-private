@@ -6,13 +6,14 @@ and sign them locally before sending to the Solana network.
 
 import asyncio
 import time
+import base58
 from typing import Optional
 
 import aiohttp
 from solders.transaction import VersionedTransaction
 from solders.keypair import Keypair
 
-from solbot.config import JupiterConfig  # Using JupiterConfig for buy_amount/slippage defaults
+from solbot.config import JupiterConfig, SolanaConfig, BotConfig
 from solbot.logger import get_logger
 from solbot.models import TradeResult
 from solbot.wallet import Wallet
@@ -23,8 +24,10 @@ logger = get_logger("pumpfun_client")
 class PumpFunClient:
     """Async client for PumpPortal local transaction signing."""
 
-    def __init__(self, config: JupiterConfig, wallet: Wallet):
-        self._config = config
+    def __init__(self, config: BotConfig, wallet: Wallet):
+        self._bot_config = config
+        self._jupiter_config = config.jupiter
+        self._solana_config = config.solana
         self._wallet = wallet
         self._session: Optional[aiohttp.ClientSession] = None
         self._base_url = "https://pumpportal.fun/api/trade-local"
@@ -47,7 +50,7 @@ class PumpFunClient:
         amount: Optional[float] = None,
         slippage: Optional[int] = None
     ) -> TradeResult:
-        """Fetch, sign, and broadcast a trade transaction via PumpPortal.
+        """Fetch, sign, and broadcast a trade transaction.
         
         Args:
             mint: The token mint address.
@@ -59,10 +62,10 @@ class PumpFunClient:
         start_time = time.perf_counter()
         
         if amount is None and action == "buy":
-            amount = self._config.buy_amount_sol
+            amount = self._jupiter_config.buy_amount_sol
         
         if slippage is None:
-            slippage = self._config.slippage_bps
+            slippage = self._jupiter_config.slippage_bps
 
         payload = {
             "publicKey": self._wallet.pubkey_str,
@@ -93,31 +96,42 @@ class PumpFunClient:
             tx = VersionedTransaction.from_bytes(tx_data)
             
             # 2. Sign locally
-            # Working pattern from jupiter.py: signed_tx = VersionedTransaction(tx.message, [self._wallet.keypair])
             signed_tx = VersionedTransaction(tx.message, [self._wallet.keypair])
-            
-            # 3. Broadcast to the network via PumpPortal's lightning endpoint 
-            broadcast_url = "https://pumpportal.fun/api/broadcast"
-            broadcast_payload = {
-                "signedTransaction": bytes(signed_tx).hex()
+            raw_tx = bytes(signed_tx)
+
+            # 3. Broadcast to the Solana RPC
+            rpc_payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sendTransaction",
+                "params": [
+                    base58.b58encode(raw_tx).decode("utf-8"),
+                    {
+                        "skipPreflight": True,
+                        "preflightCommitment": "processed",
+                        "encoding": "base58",
+                        "maxRetries": 2,
+                    },
+                ],
             }
-            
-            async with self._session.post(broadcast_url, json=broadcast_payload) as b_resp:
-                b_data = await b_resp.json()
+
+            async with self._session.post(self._solana_config.rpc_url, json=rpc_payload) as r_resp:
+                r_data = await r_resp.json()
                 latency = (time.perf_counter() - start_time) * 1000
                 
-                if b_resp.status == 200 and "signature" in b_data:
+                if "result" in r_data:
                     return TradeResult(
                         success=True,
                         token_mint=mint,
-                        tx_signature=b_data["signature"],
+                        tx_signature=r_data["result"],
                         latency_ms=latency
                     )
                 else:
+                    error_msg = r_data.get("error", "Unknown RPC error")
                     return TradeResult(
                         success=False,
                         token_mint=mint,
-                        error=f"Broadcast failed: {b_data.get('errors', 'Unknown error')}",
+                        error=f"RPC Broadcast failed: {error_msg}",
                         latency_ms=latency
                     )
 
