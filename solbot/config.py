@@ -34,6 +34,12 @@ class JupiterConfig:
 
 
 @dataclass(frozen=True)
+class TelegramConfig:
+    token: str = field(default_factory=lambda: os.getenv("TG_TOKEN", ""))
+    chat_id: str = field(default_factory=lambda: os.getenv("TG_CHAT_ID", ""))
+
+
+@dataclass(frozen=True)
 class LogConfig:
     level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
     log_file: str = field(default_factory=lambda: os.getenv("LOG_FILE", "solbot.log"))
@@ -44,6 +50,7 @@ class BotConfig:
     solana: SolanaConfig = field(default_factory=SolanaConfig)
     pumpfun: PumpFunConfig = field(default_factory=PumpFunConfig)
     jupiter: JupiterConfig = field(default_factory=JupiterConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
     logging: LogConfig = field(default_factory=LogConfig)
 
     def validate(self) -> list[str]:
