@@ -107,7 +107,7 @@ class Solbot:
                     
                     # Estimate "size" in SOL based on current balance and price
                     # This is a rough estimation for UI purposes
-                    size_sol = (data["balance"] / 1e9) * price_usd / 150 if price_usd > 0 else 0.0
+                    size_sol = data["balance"] * price_usd / 150 if price_usd > 0 else 0.0
 
                     logger.info(f"Detected holding: {symbol} ({mint}) | Balance: {data['balance']}")
                     pos = Position(
@@ -231,7 +231,7 @@ class Solbot:
         # 2. Copytrade Logic (Priority 2)
         if tx_type == "buy" and self._filter.is_copy_target(trader):
             token = self._parse_token_event(data)
-            asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, "Copytrade"))
+            asyncio.create_task(self._execute_sninipe(token, self._config.jupiter.buy_amount_sol, "Copytrade"))
 
     def _parse_token_event(self, data: dict) -> TokenEvent:
         return TokenEvent(

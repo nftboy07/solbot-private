@@ -108,7 +108,7 @@ class PumpFunClient:
                     return await resp.json()
         except:
             pass
-        return {"symbol": "???", "name": "Unknown", "creator": "unknown"}
+        return {"symbol": "???", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
 
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
