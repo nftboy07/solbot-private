@@ -98,7 +98,7 @@ class PumpFunClient:
         return balances
 
     async def get_token_metadata(self, mint: str) -> Dict:
-        \"\"\"Fetch token metadata with Pump.fun and Jupiter v2 fallback.\"\"\"
+        """Fetch token metadata with Pump.fun and Jupiter v2 fallback."""
         # 1. Try Pump.fun Frontend API
         url = f"https://frontend-api.pump.fun/coins/{mint}"
         try:
