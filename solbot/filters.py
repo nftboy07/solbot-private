@@ -21,6 +21,7 @@ class TokenFilter:
 
     def __init__(self, config: BotConfig):
         self._config = config
+        self._mode = config.strategy.mode  # Internal state for dynamic switching
         self._seen_mints: Set[str] = set()
         self.wallet_metrics: Dict[str, WalletMetrics] = {}
         self.smart_wallets: Set[str] = set()
@@ -49,6 +50,8 @@ class TokenFilter:
         # Whale Buy (Placeholder) +25
         # Volume Spike (Placeholder) +20
         # Holder Dist (Placeholder) +15
+        
+        # Ensure we return a baseline if DEGEN mode is checking score
         return score
 
     def get_dynamic_fee(self, mint: str) -> int:
@@ -60,7 +63,8 @@ class TokenFilter:
 
     def is_qualified(self, token: TokenEvent) -> Tuple[bool, float]:
         """Check if a token passes V28 filters and return size."""
-        if self._config.strategy.mode == BotMode.DEGEN:
+        if self._mode == BotMode.DEGEN:
+            # Degen mode bypasses filters, zero thresholds, fast execution
             return True, 0.05
 
         # Dedup
