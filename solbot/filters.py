@@ -31,6 +31,10 @@ class TokenFilter:
         if token.mint in self._seen_mints:
             return False, 0
             
+        if token.market_cap_usd < self._config.pumpfun.min_market_cap_usd:
+            logger.info(f"SKIPPING {token.symbol}: MCAP {token.market_cap_usd:.0f} below minimum")
+            return False, 0
+
         self._seen_mints.add(token.mint)
         
         # Base sniper size

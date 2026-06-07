@@ -54,6 +54,7 @@ class StrategyConfig:
     liquidity_drop_threshold: float = 0.30
     dev_dump_score_threshold: float = -0.2
     momentum_timeout_minutes: int = 30
+    mcap_tp_target_usd: float = field(default_factory=lambda: float(os.getenv("MCAP_TP_TARGET_USD", "200000")))
 
 
 @dataclass(frozen=True)

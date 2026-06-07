@@ -26,7 +26,8 @@ class TelegramManager:
             return
         
         if not self._session:
-            self._session = aiohttp.ClientSession()
+            timeout = aiohttp.ClientTimeout(total=10)
+            self._session = aiohttp.ClientSession(timeout=timeout)
         
         # Flush old updates to prevent restart loops
         try:

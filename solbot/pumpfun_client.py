@@ -32,7 +32,8 @@ class PumpFunClient:
 
     async def start(self):
         if not self._session:
-            self._session = aiohttp.ClientSession()
+            timeout = aiohttp.ClientTimeout(total=10)
+            self._session = aiohttp.ClientSession(timeout=timeout)
         self._jito = JitoClient(self._bot_config, self._wallet)
         await self._jito.start()
 

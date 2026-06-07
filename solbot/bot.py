@@ -267,6 +267,11 @@ class Solbot:
                 await asyncio.sleep(1)
                 continue
 
+            # Absolute Market Cap Take Profit
+            if pos.current_price >= self._config.strategy.mcap_tp_target_usd:
+                await self._exit_position(pos, f"MCAP TP @ {pos.current_price:.0f}", 1.0)
+                return
+
             # Calculate multipliers
             gain = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
             drawdown = (pos.highest_price - pos.current_price) / pos.highest_price if pos.highest_price > 0 else 0.0
