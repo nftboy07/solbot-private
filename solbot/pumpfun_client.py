@@ -98,9 +98,8 @@ class PumpFunClient:
         return balances
 
     async def get_token_metadata(self, mint: str) -> Dict:
-        """Fetch basic token metadata (symbol)."""
-        # Note: In a production sniper, we'd use a metadata provider or Metaplex.
-        # For now, we query PumpPortal's public info or return placeholders.
+        \"\"\"Fetch token metadata with Pump.fun and Jupiter v2 fallback.\"\"\"
+        # 1. Try Pump.fun Frontend API
         url = f"https://frontend-api.pump.fun/coins/{mint}"
         try:
             async with self._session.get(url) as resp:
@@ -112,8 +111,31 @@ class PumpFunClient:
                     if "liquidity_sol" not in data:
                         data["liquidity_sol"] = 0
                     return data
-        except:
-            pass
+                elif resp.status == 404:
+                    logger.debug(f"Token {mint} not found on Pump.fun, trying Jupiter v2 fallback...")
+        except Exception as e:
+            logger.debug(f"Pump.fun API error for {mint}: {e}")
+
+        # 2. Fallback: Jupiter Price API v2 (for graduated tokens)
+        jup_url = f"https://api.jup.ag/price/v2?ids={mint}"
+        try:
+            async with self._session.get(jup_url) as resp:
+                if resp.status == 200:
+                    jup_data = await resp.json()
+                    token_info = jup_data.get("data", {}).get(mint)
+                    if token_info:
+                        price_usd = float(token_info.get("price", 0))
+                        # Convert USD price to market_cap_sol (Est. 1B supply, 150 SOL price)
+                        mc_sol = (price_usd * 1_000_000_000) / 150
+                        return {
+                            "symbol": "SYNCED",
+                            "name": "Graduated Token",
+                            "market_cap_sol": mc_sol,
+                            "is_graduated": True
+                        }
+        except Exception as e:
+            logger.error(f"Jupiter v2 fallback error for {mint}: {e}")
+
         return {"symbol": "SYNCED", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
 
     async def get_token_balance(self, mint: str) -> float:
