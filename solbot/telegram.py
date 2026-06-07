@@ -28,6 +28,18 @@ class TelegramManager:
         if not self._session:
             self._session = aiohttp.ClientSession()
         
+        # Flush old updates to prevent restart loops
+        try:
+            async with self._session.get(f"{self._base_url}/getUpdates", params={"offset": -1, "limit": 1}) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    results = data.get("result", [])
+                    if results:
+                        self._offset = results[0]["update_id"] + 1
+                        logger.info(f"Skipped old Telegram updates. New offset: {self._offset}")
+        except Exception as e:
+            logger.error(f"Failed to flush Telegram updates: {e}")
+
         self._running = True
         asyncio.create_task(self._poll_loop(bot_instance))
         logger.info("Telegram command listener started.")
