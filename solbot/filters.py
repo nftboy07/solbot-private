@@ -1,7 +1,7 @@
-"""Advanced Token Filter with Smart Wallet Scoring for Solbot."""
+"""Advanced Token Filter with Smart Wallet Scoring and Copytrade Tracking."""
 
-from typing import Set, Tuple, Dict
-from dataclasses import dataclass
+from typing import Set, Tuple, Dict, List
+from dataclasses import dataclass, field
 from solbot.config import BotConfig
 from solbot.logger import get_logger
 from solbot.models import TokenEvent
@@ -16,13 +16,15 @@ class WalletScore:
     score: int = 0
 
 class TokenFilter:
-    """Fast sniper filter with dynamic smart wallet prioritization."""
+    """Fast sniper filter with dynamic smart wallet prioritization and copytrade support."""
 
     def __init__(self, config: BotConfig):
         self._config = config
         self._seen_mints: Set[str] = set()
         # address -> WalletScore
         self._wallet_scores: Dict[str, WalletScore] = {}
+        # List of addresses to explicitly follow for copytrading
+        self._copy_targets: Set[str] = set()
 
     def is_qualified(self, token: TokenEvent) -> Tuple[bool, float]:
         """Bypasses all safety checks for maximum speed, but allows for smart wallet prioritization."""
@@ -34,14 +36,22 @@ class TokenFilter:
         # Base sniper size
         size = self._config.jupiter.buy_amount_sol
         
-        # Optional: Boost size for high-score smart wallets
-        creator_score = self._wallet_scores.get(token.creator, WalletScore(token.creator))
-        if creator_score.score > 10:
-            logger.info(f"SMART WALLET DETECTED: {token.creator} (Score: {creator_score.score})")
-            size *= 1.5 # Boost buy for trusted devs/whales
+        # Boost size for high-score smart wallets (Trusted Devs/Whales)
+        score_obj = self._wallet_scores.get(token.creator, WalletScore(token.creator))
+        if score_obj.score > 10:
+            logger.info(f"SMART WALLET DETECTED: {token.creator} (Score: {score_obj.score})")
+            size *= 1.5 
         
         logger.info(f"SNIPING {token.symbol} | creator={token.creator} | size={size:.2f} SOL")
         return True, size
+
+    def is_copy_target(self, address: str) -> bool:
+        """Check if a wallet address is in our follow list."""
+        return address in self._copy_targets
+
+    def add_copy_target(self, address: str):
+        self._copy_targets.add(address)
+        logger.info(f"Added copytrade target: {address}")
 
     def update_score(self, address: str, is_win: bool):
         """Update wallet score based on trade outcome (WIN/LOSS)."""
@@ -60,7 +70,6 @@ class TokenFilter:
         logger.info(f"Wallet {address} updated: Score={score_obj.score} (W:{score_obj.wins} L:{score_obj.losses})")
 
     def get_dynamic_fee(self, mint: str) -> int:
-        """Simple fixed priority fee for speed."""
         return self._config.fee.base_fee_lamports
 
     def reset(self):
