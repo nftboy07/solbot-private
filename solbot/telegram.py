@@ -168,7 +168,7 @@ class TelegramManager:
             return
         lines = ["<b>📍 Current Portfolio:</b>"]
         for mint, pos in bot._positions.items():
-            lines.append(f"- {pos.symbol}: {pos.size} SOL (Entry: {pos.entry_price:.2f} MC)")
+            lines.append(f"- {pos.symbol}: {pos.size:.4f} SOL (Entry: {pos.entry_price:.2f} MC)")
         await self.send_message("\n".join(lines))
 
     async def _cmd_history(self, bot: Any):
