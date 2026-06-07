@@ -23,7 +23,7 @@ class Solbot:
         1. PumpFunMonitor (thread) -> asyncio.Queue -> token events
         2. Event processor (async) -> TokenFilter -> qualified tokens
         3. JupiterClient (async/aiohttp) -> swap execution
-        4. TelegramManager (async/aiohttp) -> notifications
+        4. TelegramManager (async/aiohttp) -> notifications & commands
     """
 
     def __init__(self, config: BotConfig):
@@ -59,9 +59,9 @@ class Solbot:
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
 
-        # Start Telegram manager
+        # Start Telegram manager and listener
         self._telegram = TelegramManager(self._config.telegram)
-        await self._telegram.start()
+        await self._telegram.start(self)
         await self._telegram.send_message("<b>Solbot started and monitoring Pump.fun!</b>")
 
         # Start Pump.fun monitor
