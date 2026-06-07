@@ -10,6 +10,7 @@ from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
 from solbot.models import TokenEvent, TradeResult
 from solbot.pumpfun import PumpFunMonitor
+from solbot.pumpfun_client import PumpFunClient
 from solbot.telegram import TelegramManager
 from solbot.wallet import Wallet
 
@@ -17,19 +18,21 @@ logger = get_logger("bot")
 
 
 class Solbot:
-    """Main bot class orchestrating Pump.fun monitoring and Jupiter execution.
+    """Main bot class orchestrating Pump.fun monitoring and trade execution.
 
     Architecture:
         1. PumpFunMonitor (thread) -> asyncio.Queue -> token events
         2. Event processor (async) -> TokenFilter -> qualified tokens
-        3. JupiterClient (async/aiohttp) -> swap execution
-        4. TelegramManager (async/aiohttp) -> notifications & commands
+        3. PumpFunClient (async/aiohttp) -> bonding curve trade execution
+        4. JupiterClient (async/aiohttp) -> Raydium/DEX swap execution
+        5. TelegramManager (async/aiohttp) -> notifications & commands
     """
 
     def __init__(self, config: BotConfig):
         self._config = config
         self._wallet: Optional[Wallet] = None
         self._monitor: Optional[PumpFunMonitor] = None
+        self._pump_client: Optional[PumpFunClient] = None
         self._jupiter: Optional[JupiterClient] = None
         self._telegram: Optional[TelegramManager] = None
         self._filter: Optional[TokenFilter] = None
@@ -54,6 +57,10 @@ class Solbot:
         # Initialize components
         self._wallet = Wallet(self._config.solana)
         self._filter = TokenFilter(self._config.pumpfun)
+
+        # Start PumpFun local signing client
+        self._pump_client = PumpFunClient(self._config.jupiter, self._wallet)
+        await self._pump_client.start()
 
         # Start Jupiter client
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
@@ -86,6 +93,9 @@ class Solbot:
 
         if self._monitor:
             self._monitor.stop()
+
+        if self._pump_client:
+            await self._pump_client.stop()
 
         if self._jupiter:
             await self._jupiter.stop()
@@ -120,7 +130,9 @@ class Solbot:
         """Execute a trade for a qualified token."""
         logger.info(f"BUYING: {token.symbol} ({token.mint[:12]}...)")
 
-        result = await self._jupiter.execute_swap(token.mint)
+        # Use PumpFunClient for bonding curve trades
+        # (Assuming all events from PumpFunMonitor are initially on the bonding curve)
+        result = await self._pump_client.execute_trade(token.mint, action="buy")
         self._trades.append(result)
 
         if result.success:
@@ -136,16 +148,11 @@ class Solbot:
             )
             await self._telegram.send_message(msg)
         else:
-            msg = (
-                f"❌ <b>BUY FAIL: {token.symbol}</b>\n"
-                f"Error: <code>{result.error}</code>\n"
-                f"Latency: {result.latency_ms:.0f}ms"
-            )
             logger.error(
                 f"BUY FAIL: {token.symbol} | err={result.error} | "
                 f"{result.latency_ms:.0f}ms"
             )
-            await self._telegram.send_message(msg)
+            # Only notify Telegram on success as requested
 
     def _print_summary(self):
         """Print trading session summary."""
