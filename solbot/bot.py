@@ -10,6 +10,7 @@ from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
 from solbot.models import TokenEvent, TradeResult
 from solbot.pumpfun import PumpFunMonitor
+from solbot.telegram import TelegramManager
 from solbot.wallet import Wallet
 
 logger = get_logger("bot")
@@ -22,6 +23,7 @@ class Solbot:
         1. PumpFunMonitor (thread) -> asyncio.Queue -> token events
         2. Event processor (async) -> TokenFilter -> qualified tokens
         3. JupiterClient (async/aiohttp) -> swap execution
+        4. TelegramManager (async/aiohttp) -> notifications
     """
 
     def __init__(self, config: BotConfig):
@@ -29,6 +31,7 @@ class Solbot:
         self._wallet: Optional[Wallet] = None
         self._monitor: Optional[PumpFunMonitor] = None
         self._jupiter: Optional[JupiterClient] = None
+        self._telegram: Optional[TelegramManager] = None
         self._filter: Optional[TokenFilter] = None
         self._running = False
         self._trades: list[TradeResult] = []
@@ -56,6 +59,11 @@ class Solbot:
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
 
+        # Start Telegram manager
+        self._telegram = TelegramManager(self._config.telegram)
+        await self._telegram.start()
+        await self._telegram.send_message("<b>Solbot started and monitoring Pump.fun!</b>")
+
         # Start Pump.fun monitor
         loop = asyncio.get_running_loop()
         self._monitor = PumpFunMonitor(self._config.pumpfun, loop)
@@ -81,6 +89,10 @@ class Solbot:
 
         if self._jupiter:
             await self._jupiter.stop()
+
+        if self._telegram:
+            await self._telegram.send_message("<b>Solbot shutting down...</b>")
+            await self._telegram.stop()
 
         # Print trade summary
         self._print_summary()
@@ -112,15 +124,28 @@ class Solbot:
         self._trades.append(result)
 
         if result.success:
+            msg = (
+                f"✅ <b>BUY OK: {token.symbol}</b>\n"
+                f"Mint: <code>{token.mint}</code>\n"
+                f"Latency: {result.latency_ms:.0f}ms\n"
+                f"<a href='https://solscan.io/tx/{result.tx_signature}'>View Transaction</a>"
+            )
             logger.info(
                 f"BUY OK: {token.symbol} | tx={result.tx_signature[:16]}... | "
                 f"{result.latency_ms:.0f}ms"
             )
+            await self._telegram.send_message(msg)
         else:
+            msg = (
+                f"❌ <b>BUY FAIL: {token.symbol}</b>\n"
+                f"Error: <code>{result.error}</code>\n"
+                f"Latency: {result.latency_ms:.0f}ms"
+            )
             logger.error(
                 f"BUY FAIL: {token.symbol} | err={result.error} | "
                 f"{result.latency_ms:.0f}ms"
             )
+            await self._telegram.send_message(msg)
 
     def _print_summary(self):
         """Print trading session summary."""
