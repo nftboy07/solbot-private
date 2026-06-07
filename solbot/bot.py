@@ -10,6 +10,7 @@ from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
 from solbot.models import TokenEvent, TradeResult
 from solbot.pumpfun import PumpFunMonitor
+from solbot.telegram import TelegramClient
 from solbot.wallet import Wallet
 
 logger = get_logger("bot")
@@ -22,6 +23,7 @@ class Solbot:
         1. PumpFunMonitor (thread) -> asyncio.Queue -> token events
         2. Event processor (async) -> TokenFilter -> qualified tokens
         3. JupiterClient (async/aiohttp) -> swap execution
+        4. TelegramClient (async) -> notifications
     """
 
     def __init__(self, config: BotConfig):
@@ -29,6 +31,7 @@ class Solbot:
         self._wallet: Optional[Wallet] = None
         self._monitor: Optional[PumpFunMonitor] = None
         self._jupiter: Optional[JupiterClient] = None
+        self._telegram: Optional[TelegramClient] = None
         self._filter: Optional[TokenFilter] = None
         self._running = False
         self._trades: list[TradeResult] = []
@@ -51,6 +54,11 @@ class Solbot:
         # Initialize components
         self._wallet = Wallet(self._config.solana)
         self._filter = TokenFilter(self._config.pumpfun)
+
+        # Start Telegram client
+        self._telegram = TelegramClient(self._config.telegram)
+        await self._telegram.start()
+        await self._telegram.send_message("<b>Solbot</b> is starting up...")
 
         # Start Jupiter client
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
@@ -82,6 +90,10 @@ class Solbot:
         if self._jupiter:
             await self._jupiter.stop()
 
+        if self._telegram:
+            await self._telegram.send_message("<b>Solbot</b> is shutting down.")
+            await self._telegram.stop()
+
         # Print trade summary
         self._print_summary()
         logger.info("Solbot stopped")
@@ -101,6 +113,16 @@ class Solbot:
             if not self._filter.is_qualified(token):
                 continue
 
+            # Notify via Telegram
+            if self._telegram:
+                msg = (
+                    f"🎯 <b>Qualified Token Detected</b>\n"
+                    f"Symbol: {token.symbol}\n"
+                    f"Mint: <code>{token.mint}</code>\n"
+                    f"Price: {token.price:.10f} SOL"
+                )
+                asyncio.create_task(self._telegram.send_message(msg))
+
             # Execute swap in background task (non-blocking)
             asyncio.create_task(self._execute_trade(token))
 
@@ -116,11 +138,26 @@ class Solbot:
                 f"BUY OK: {token.symbol} | tx={result.tx_signature[:16]}... | "
                 f"{result.latency_ms:.0f}ms"
             )
+            if self._telegram:
+                msg = (
+                    f"✅ <b>BUY SUCCESS</b>\n"
+                    f"Token: {token.symbol}\n"
+                    f"TX: <a href='https://solscan.io/tx/{result.tx_signature}'>{result.tx_signature[:8]}...</a>\n"
+                    f"Latency: {result.latency_ms:.0f}ms"
+                )
+                await self._telegram.send_message(msg)
         else:
             logger.error(
                 f"BUY FAIL: {token.symbol} | err={result.error} | "
                 f"{result.latency_ms:.0f}ms"
             )
+            if self._telegram:
+                msg = (
+                    f"❌ <b>BUY FAILED</b>\n"
+                    f"Token: {token.symbol}\n"
+                    f"Error: <code>{result.error}</code>"
+                )
+                await self._telegram.send_message(msg)
 
     def _print_summary(self):
         """Print trading session summary."""
