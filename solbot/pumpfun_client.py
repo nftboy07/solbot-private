@@ -140,7 +140,7 @@ class PumpFunClient:
 
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
-        # The RPC usually finds it if you don't specify programId
+        # FIX: Explicitly include the mint in the params to avoid full account list fetch
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -155,11 +155,16 @@ class PumpFunClient:
             async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
                 data = await resp.json()
                 accounts = data.get("result", {}).get("value", [])
-                if not accounts:
-                    return 0.0
                 
-                amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
-                return float(amount_info["uiAmount"] or 0)
+                # Check ALL accounts returned for the correct mint
+                # RPC usually filters correctly but some public nodes are buggy
+                for acc in accounts:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    if info.get("mint") == mint:
+                        amount_info = info["tokenAmount"]
+                        return float(amount_info["uiAmount"] or 0)
+                
+                return 0.0
         except Exception as e:
             logger.error(f"Error fetching balance for {mint}: {e}")
             return 0.0
