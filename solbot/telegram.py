@@ -166,9 +166,23 @@ class TelegramManager:
         if not bot._positions:
             await self.send_message("No active positions.")
             return
+        
         lines = ["<b>📍 Current Portfolio:</b>"]
         for mint, pos in bot._positions.items():
-            lines.append(f"- {pos.symbol}: {pos.size:.4f} SOL (Entry: {pos.entry_price:.2f} MC)")
+            # Refresh balance for UI accuracy
+            balance = await bot._pump_client.get_token_balance(mint)
+            
+            # Recalculate SOL value
+            # price_usd is really market_cap_sol if we use mc * 150 logic
+            # Let's use pos.current_price (USD) / 150 to get SOL price per token
+            # Actually, current_price is MC_SOL * 150.
+            # So price_per_token = current_price / 150 / 1_000_000_000 (total supply)
+            sol_price_per_token = (pos.current_price / 150) / 1_000_000_000
+            current_sol_value = balance * sol_price_per_token
+            
+            lines.append(f"- {pos.symbol}: <code>{current_sol_value:.4f} SOL</code> ({balance:,.0f} tokens)")
+            lines.append(f"  MC: <code>${pos.current_price:,.0f}</code> | Entry: <code>${pos.entry_price:,.0f}</code>")
+            
         await self.send_message("\n".join(lines))
 
     async def _cmd_history(self, bot: Any):

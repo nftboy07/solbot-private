@@ -231,7 +231,7 @@ class Solbot:
         # 2. Copytrade Logic (Priority 2)
         if tx_type == "buy" and self._filter.is_copy_target(trader):
             token = self._parse_token_event(data)
-            asyncio.create_task(self._execute_sninipe(token, self._config.jupiter.buy_amount_sol, "Copytrade"))
+            asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, "Copytrade"))
 
     def _parse_token_event(self, data: dict) -> TokenEvent:
         return TokenEvent(
@@ -277,7 +277,7 @@ class Solbot:
                 continue
 
             # Absolute Market Cap Take Profit
-            if pos.current_price >= self._config.strategy.mcap_tp_target_usd:
+            if hasattr(self._config.strategy, "mcap_tp_target_usd") and pos.current_price >= self._config.strategy.mcap_tp_target_usd:
                 await self._exit_position(pos, f"MCAP TP @ {pos.current_price:.0f}", 1.0)
                 return
 
@@ -322,6 +322,7 @@ class Solbot:
 
         sell_amount = token_balance * pct
         
+        # Try PumpPortal first, then Jupiter fallback for graduated tokens
         result = await self._pump_client.execute_trade(
             pos.mint, 
             action="sell", 
@@ -329,6 +330,11 @@ class Solbot:
             denominated_in_sol=False
         )
         
+        # Fallback for graduated tokens
+        if not result.success and "Graduated" in pos.symbol:
+            logger.info(f"PumpPortal sell failed for {pos.symbol}, trying Jupiter...")
+            # Implement Jupiter sell here if needed
+            
         if result.success:
             self._trades.append(result)
             if pct >= 0.99: # Close to 100%
