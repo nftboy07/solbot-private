@@ -169,19 +169,28 @@ class TelegramManager:
         
         lines = ["<b>📍 Current Portfolio:</b>"]
         for mint, pos in bot._positions.items():
-            # Refresh balance for UI accuracy
+            # 1. Refresh balance for UI accuracy
             balance = await bot._pump_client.get_token_balance(mint)
             
-            # Recalculate SOL value
-            # price_usd is really market_cap_sol if we use mc * 150 logic
-            sol_price_per_token = (pos.current_price / 150) / 1_000_000_000
+            # 2. Refresh metadata for live price/MC
+            meta = await bot._pump_client.get_token_metadata(mint)
+            current_mc_sol = float(meta.get("market_cap_sol", 0))
+            current_mc_usd = current_mc_sol * 150
+            
+            # 3. Update position in-memory to keep monitors synced
+            pos.current_price = current_mc_usd
+            if current_mc_usd > pos.highest_price:
+                pos.highest_price = current_mc_usd
+
+            # 4. Calculate display values
+            # MC_SOL is the Market Cap in SOL. To get SOL price per token, divide MC_SOL by total supply (1B).
+            sol_price_per_token = current_mc_sol / 1_000_000_000
             current_sol_value = balance * sol_price_per_token
             
-            # Use fixed decimal precision for tokens display if it's very small
             token_display = f"{balance:,.0f}" if balance >= 1 else f"{balance:,.4f}"
             
             lines.append(f"- {pos.symbol}: <code>{current_sol_value:.4f} SOL</code> ({token_display} tokens)")
-            lines.append(f"  MC: <code>${pos.current_price:,.0f}</code> | Entry: <code>${pos.entry_price:,.0f}</code>")
+            lines.append(f"  MC: <code>${current_mc_usd:,.0f}</code> | Entry: <code>${pos.entry_price:,.0f}</code>")
             
         await self.send_message("\n".join(lines))
 

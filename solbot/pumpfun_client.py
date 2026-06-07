@@ -128,7 +128,7 @@ class PumpFunClient:
                         # Convert USD price to market_cap_sol (Est. 1B supply, 150 SOL price)
                         mc_sol = (price_usd * 1_000_000_000) / 150
                         return {
-                            "symbol": "SYNCED",
+                            "symbol": token_info.get("symbol", "SYNCED"),
                             "name": "Graduated Token",
                             "market_cap_sol": mc_sol,
                             "is_graduated": True
@@ -140,7 +140,7 @@ class PumpFunClient:
 
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
-        # Note: getTokenAccountsByOwner with "mint" param is the standard way to check a specific token
+        # The RPC usually finds it if you don't specify programId
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -156,9 +156,6 @@ class PumpFunClient:
                 data = await resp.json()
                 accounts = data.get("result", {}).get("value", [])
                 if not accounts:
-                    # If mint not found, it might be in the other program (Token-2022)
-                    # The RPC usually finds it if you don't specify programId, 
-                    # but some RPCs require it. Let's return 0 for now as a safe default.
                     return 0.0
                 
                 amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
