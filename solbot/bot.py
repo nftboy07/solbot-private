@@ -1,11 +1,13 @@
-"""Main bot orchestrator - ties all async components together."""
+"""Main bot orchestrator and Position Manager for Solbot."""
 
 import asyncio
 import signal
-from typing import Optional
+from time import time
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List
 
-from solbot.config import BotConfig
-from solbot.filters import TokenFilter
+from solbot.config import BotConfig, BotMode
+from solbot.filters import TokenFilter, WalletMetrics
 from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
 from solbot.models import TokenEvent, TradeResult
@@ -16,17 +18,21 @@ from solbot.wallet import Wallet
 
 logger = get_logger("bot")
 
+@dataclass
+class Position:
+    mint: str
+    symbol: str
+    entry_price: float
+    entry_liq: float
+    creator: str
+    size: float
+    peak_price: float = 0.0
+    start_time: float = field(default_factory=time)
+    tp_count: int = 0
+    active: bool = True
 
 class Solbot:
-    """Main bot class orchestrating Pump.fun monitoring and trade execution.
-
-    Architecture:
-        1. PumpFunMonitor (thread) -> asyncio.Queue -> token events
-        2. Event processor (async) -> TokenFilter -> qualified tokens
-        3. PumpFunClient (async/aiohttp) -> bonding curve trade execution
-        4. JupiterClient (async/aiohttp) -> Raydium/DEX swap execution
-        5. TelegramManager (async/aiohttp) -> notifications & commands
-    """
+    """Enhanced Solbot with V28 logic and Position Management."""
 
     def __init__(self, config: BotConfig):
         self._config = config
@@ -37,153 +43,127 @@ class Solbot:
         self._telegram: Optional[TelegramManager] = None
         self._filter: Optional[TokenFilter] = None
         self._running = False
-        self._trades: list[TradeResult] = []
+        self._trades: List[TradeResult] = []
+        self._positions: Dict[str, Position] = {}
+        self._paused = False
 
     async def start(self):
-        """Initialize all components and start the bot."""
-        # Setup logging
         setup_logger(self._config.logging)
-        logger.info("=" * 60)
-        logger.info("SOLBOT STARTING")
-        logger.info("=" * 60)
+        logger.info("SOLBOT V28 STARTING")
 
-        # Validate config
         errors = self._config.validate()
         if errors:
-            for err in errors:
-                logger.error(f"Config error: {err}")
             raise RuntimeError(f"Configuration invalid: {errors}")
 
-        # Initialize components
         self._wallet = Wallet(self._config.solana)
-        self._filter = TokenFilter(self._config.pumpfun)
+        self._filter = TokenFilter(self._config)
 
-        # Start PumpFun local signing client
         self._pump_client = PumpFunClient(self._config, self._wallet)
         await self._pump_client.start()
 
-        # Start Jupiter client
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
 
-        # Start Telegram manager and listener
         self._telegram = TelegramManager(self._config.telegram)
         await self._telegram.start(self)
-        await self._telegram.send_message("<b>Solbot started and monitoring Pump.fun!</b>")
+        await self._telegram.send_message("<b>Solbot V28 started!</b>")
 
-        # Start Pump.fun monitor
         loop = asyncio.get_running_loop()
         self._monitor = PumpFunMonitor(self._config.pumpfun, loop)
         self._monitor.start()
 
         self._running = True
-        logger.info("All components initialized - entering main loop")
-
-        # Run event processing loop
-        try:
-            await self._process_events()
-        except asyncio.CancelledError:
-            logger.info("Bot cancelled")
-        finally:
-            await self.stop()
+        
+        # Start background tasks
+        asyncio.create_task(self._process_events())
+        asyncio.create_task(self._position_manager())
 
     async def stop(self):
-        """Gracefully shut down all components."""
         self._running = False
-
-        if self._monitor:
-            self._monitor.stop()
-
-        if self._pump_client:
-            await self._pump_client.stop()
-
-        if self._jupiter:
-            await self._jupiter.stop()
-
-        if self._telegram:
-            await self._telegram.send_message("<b>Solbot shutting down...</b>")
-            await self._telegram.stop()
-
-        # Print trade summary
-        self._print_summary()
+        if self._monitor: self._monitor.stop()
+        if self._pump_client: await self._pump_client.stop()
+        if self._jupiter: await self._jupiter.stop()
+        if self._telegram: await self._telegram.stop()
         logger.info("Solbot stopped")
 
     async def _process_events(self):
-        """Main event loop: consume tokens from queue, filter, and execute."""
         while self._running:
+            if self._paused:
+                await asyncio.sleep(1)
+                continue
             try:
-                # Wait for token events with timeout (allows graceful shutdown)
-                token = await asyncio.wait_for(
-                    self._monitor.queue.get(), timeout=1.0
-                )
+                token = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
+                qualified, size = self._filter.is_qualified(token)
+                if qualified:
+                    asyncio.create_task(self._execute_trade(token, size))
             except asyncio.TimeoutError:
                 continue
 
-            # Apply filters
-            if not self._filter.is_qualified(token):
-                continue
-
-            # Execute swap in background task (non-blocking)
-            asyncio.create_task(self._execute_trade(token))
-
-    async def _execute_trade(self, token: TokenEvent):
-        """Execute a trade for a qualified token."""
-        logger.info(f"BUYING: {token.symbol} ({token.mint[:12]}...)")
-
-        # Use PumpFunClient for bonding curve trades
-        # (Assuming all events from PumpFunMonitor are initially on the bonding curve)
-        result = await self._pump_client.execute_trade(token.mint, action="buy")
+    async def _execute_trade(self, token: TokenEvent, size: float):
+        fee = self._filter.get_dynamic_fee(token.mint)
+        result = await self._pump_client.execute_trade(token.mint, amount=size, fee=fee)
         self._trades.append(result)
 
         if result.success:
-            msg = (
-                f"✅ <b>BUY OK: {token.symbol}</b>\n"
-                f"Mint: <code>{token.mint}</code>\n"
-                f"Latency: {result.latency_ms:.0f}ms\n"
-                f"<a href='https://solscan.io/tx/{result.tx_signature}'>View Transaction</a>"
+            self._positions[token.mint] = Position(
+                mint=token.mint, symbol=token.symbol,
+                entry_price=token.market_cap_usd, # Using mcap as price proxy
+                entry_liq=token.liquidity_sol,
+                creator=token.creator or "",
+                size=size
             )
-            logger.info(
-                f"BUY OK: {token.symbol} | tx={result.tx_signature[:16]}... | "
-                f"{result.latency_ms:.0f}ms"
-            )
-            await self._telegram.send_message(msg)
-        else:
-            logger.error(
-                f"BUY FAIL: {token.symbol} | err={result.error} | "
-                f"{result.latency_ms:.0f}ms"
-            )
-            # Only notify Telegram on success as requested
+            self._filter.update_wallet_score(token.creator, True)
+            await self._telegram.send_message(f"✅ <b>BUY: {token.symbol}</b>\nSize: {size} SOL")
 
-    def _print_summary(self):
-        """Print trading session summary."""
-        if not self._trades:
-            logger.info("No trades executed this session")
-            return
+    async def _position_manager(self):
+        while self._running:
+            for mint in list(self._positions.keys()):
+                pos = self._positions[mint]
+                if not pos.active: continue
 
-        successful = [t for t in self._trades if t.success]
-        failed = [t for t in self._trades if not t.success]
-        avg_latency = (
-            sum(t.latency_ms for t in self._trades) / len(self._trades)
-        )
+                # Simplified: current stats from monitor or client
+                current_price, current_liq = await self._get_market_data(mint)
+                if current_price > pos.peak_price: pos.peak_price = current_price
 
-        logger.info("=" * 60)
-        logger.info("SESSION SUMMARY")
-        logger.info(f"  Total trades: {len(self._trades)}")
-        logger.info(f"  Successful:   {len(successful)}")
-        logger.info(f"  Failed:       {len(failed)}")
-        logger.info(f"  Avg latency:  {avg_latency:.0f}ms")
-        logger.info(f"  Tokens seen:  {self._filter.seen_count}")
-        logger.info("=" * 60)
+                # 1. Dev Dump
+                metrics = self._filter.wallet_metrics.get(pos.creator, WalletMetrics())
+                if metrics.score < self._config.strategy.dev_dump_score_threshold:
+                    await self._exit_position(pos, "Dev Dump", 1.0)
+                    continue
 
+                # 2. Liquidity Drain
+                if current_liq < pos.entry_liq * (1 - self._config.strategy.liquidity_drop_threshold):
+                    await self._exit_position(pos, "Liquidity Drain", 1.0)
+                    continue
 
-async def run_bot():
-    """Entry point: load config, wire up signal handling, and run."""
-    config = BotConfig()
-    bot = Solbot(config)
+                # 3. Trailing Stop
+                if current_price <= pos.peak_price * (1 - self._config.strategy.trailing_stop_pct):
+                    await self._exit_position(pos, "Trailing Stop", 1.0)
+                    continue
 
-    # Graceful shutdown on SIGINT/SIGTERM
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
+                # 4. Take Profit
+                if pos.tp_count < len(self._config.strategy.tp_targets):
+                    target = self._config.strategy.tp_targets[pos.tp_count]
+                    if current_price >= pos.entry_price * target["multiplier"]:
+                        await self._exit_position(pos, f"TP {pos.tp_count+1}", target["sell_pct"])
+                        pos.tp_count += 1
 
-    await bot.start()
+                # 5. Time Exit
+                if time() - pos.start_time > (self._config.strategy.momentum_timeout_minutes * 60):
+                    if current_price < pos.entry_price * 1.1:
+                        await self._exit_position(pos, "Time Exit", 1.0)
+
+            await asyncio.sleep(10)
+
+    async def _exit_position(self, pos: Position, reason: str, pct: float):
+        result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=pct)
+        if result.success:
+            self._filter.update_wallet_score(pos.creator, False)
+            if pct >= 1.0:
+                pos.active = False
+                del self._positions[pos.mint]
+            await self._telegram.send_message(f"🚨 <b>SELL: {pos.symbol}</b>\nReason: {reason}\nSize: {pct*100}%")
+
+    async def _get_market_data(self, mint: str):
+        # Placeholder for actual market data lookup
+        return 0, 0

@@ -3,10 +3,16 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from enum import Enum
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+class BotMode(Enum):
+    DEGEN = "degen"
+    NORMAL = "normal"
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,29 @@ class JupiterConfig:
 
 
 @dataclass(frozen=True)
+class StrategyConfig:
+    mode: BotMode = BotMode.NORMAL
+    min_confidence_score: int = 75
+    tp_targets: list[dict] = field(default_factory=lambda: [
+        {"multiplier": 1.5, "sell_pct": 0.25},
+        {"multiplier": 2.0, "sell_pct": 0.25},
+        {"multiplier": 3.0, "sell_pct": 0.25},
+    ])
+    trailing_stop_pct: float = 0.25
+    stop_loss_pct: float = 0.20
+    emergency_stop_loss_pct: float = 0.30
+    liquidity_drop_threshold: float = 0.30
+    dev_dump_score_threshold: float = -0.2
+    momentum_timeout_minutes: int = 30
+
+
+@dataclass(frozen=True)
+class DynamicFeeConfig:
+    base_fee_lamports: int = 60000
+    multiplier_per_buy: float = 0.2
+
+
+@dataclass(frozen=True)
 class TelegramConfig:
     token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
@@ -50,16 +79,15 @@ class BotConfig:
     solana: SolanaConfig = field(default_factory=SolanaConfig)
     pumpfun: PumpFunConfig = field(default_factory=PumpFunConfig)
     jupiter: JupiterConfig = field(default_factory=JupiterConfig)
+    strategy: StrategyConfig = field(default_factory=StrategyConfig)
+    fee: DynamicFeeConfig = field(default_factory=DynamicFeeConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     logging: LogConfig = field(default_factory=LogConfig)
 
     def validate(self) -> list[str]:
-        """Validate configuration and return list of errors."""
         errors = []
         if not self.solana.private_key:
             errors.append("WALLET_PRIVATE_KEY is required")
         if self.jupiter.slippage_bps < 0 or self.jupiter.slippage_bps > 10000:
             errors.append("SLIPPAGE_BPS must be between 0 and 10000")
-        if self.jupiter.buy_amount_sol <= 0:
-            errors.append("BUY_AMOUNT_SOL must be positive")
         return errors
