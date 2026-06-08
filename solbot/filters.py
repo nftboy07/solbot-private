@@ -1,6 +1,6 @@
 """Advanced Token Filter with Smart Wallet Scoring and Copytrade Tracking."""
 
-from typing import Set, Tuple, Dict, List
+from typing import Set, Tuple, Dict, List, Optional
 from dataclasses import dataclass, field
 from solbot.config import BotConfig
 from solbot.logger import get_logger
@@ -14,6 +14,7 @@ class WalletScore:
     wins: int = 0
     losses: int = 0
     score: int = 0
+    alias: Optional[str] = None
 
 class TokenFilter:
     """Fast sniper filter with dynamic smart wallet prioritization and copytrade support."""
@@ -53,9 +54,18 @@ class TokenFilter:
         """Check if a wallet address is in our follow list."""
         return address in self._copy_targets
 
-    def add_copy_target(self, address: str):
+    def add_copy_target(self, address: str, alias: Optional[str] = None):
         self._copy_targets.add(address)
-        logger.info(f"Added copytrade target: {address}")
+        if address not in self._wallet_scores:
+            self._wallet_scores[address] = WalletScore(address, alias=alias)
+        elif alias:
+            self._wallet_scores[address].alias = alias
+        logger.info(f"Added copytrade target: {address} (Alias: {alias})")
+
+    def remove_copy_target(self, address: str):
+        if address in self._copy_targets:
+            self._copy_targets.remove(address)
+            logger.info(f"Removed copytrade target: {address}")
 
     def update_score(self, address: str, is_win: bool):
         """Update wallet score based on trade outcome (WIN/LOSS)."""

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, List, Any, Set
 
 from solbot.config import BotConfig, BotMode
-from solbot.filters import TokenFilter
+from solbot.filters import TokenFilter, WalletScore
 from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
 from solbot.models import TokenEvent, TradeResult
@@ -53,12 +53,16 @@ class Solbot:
         self._state_file = "data/state.json"
 
     def _save_state(self):
-        """Persist positions and trades to a JSON file."""
+        """Persist positions, trades, and wallet intelligence to a JSON file."""
         try:
             os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
             state = {
                 "positions": {mint: asdict(pos) for mint, pos in self._positions.items()},
-                "trades": [asdict(t) for t in self._trades]
+                "trades": [asdict(t) for t in self._trades],
+                "wallet_intelligence": {
+                    "copy_targets": list(self._filter._copy_targets),
+                    "wallet_scores": {addr: asdict(score) for addr, score in self._filter._wallet_scores.items()}
+                }
             }
             with open(self._state_file, "w") as f:
                 json.dump(state, f, indent=2)
@@ -67,7 +71,7 @@ class Solbot:
             logger.error(f"Failed to save state: {e}")
 
     def _load_state(self):
-        """Load positions and trades from the JSON file."""
+        """Load positions, trades, and wallet intelligence from the JSON file."""
         if not os.path.exists(self._state_file):
             return
         try:
@@ -76,19 +80,24 @@ class Solbot:
             
             # Restore positions
             for mint, data in state.get("positions", {}).items():
-                # Check for legacy tp_sold and migrate to tp_targets_hit
                 if "tp_sold" in data:
                     tp_sold = data.pop("tp_sold")
                     if tp_sold and not data.get("tp_targets_hit"):
-                        data["tp_targets_hit"] = [0.0] # Dummy value to indicate at least one TP hit
-                
+                        data["tp_targets_hit"] = [0.0]
                 self._positions[mint] = Position(**data)
             
-            # Restore trades (limited to last 100 for memory)
+            # Restore trades
             raw_trades = state.get("trades", [])
             self._trades = [TradeResult(**t) for t in raw_trades[-100:]]
+
+            # Restore wallet intelligence
+            intel = state.get("wallet_intelligence", {})
+            for addr in intel.get("copy_targets", []):
+                self._filter._copy_targets.add(addr)
+            for addr, data in intel.get("wallet_scores", {}).items():
+                self._filter._wallet_scores[addr] = WalletScore(**data)
             
-            logger.info(f"Loaded {len(self._positions)} positions and {len(self._trades)} trades from state")
+            logger.info(f"Loaded {len(self._positions)} positions, {len(self._trades)} trades, and {len(self._filter._copy_targets)} copy targets from state")
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
 
@@ -99,15 +108,14 @@ class Solbot:
             tokens = await self._pump_client.get_all_token_balances()
             for mint, data in tokens.items():
                 if mint not in self._positions and data["balance"] > 0:
-                    # Enrich with real metadata
                     meta = await self._pump_client.get_token_metadata(mint)
                     symbol = meta.get("symbol", "SYNCED")
                     mcap_sol = float(meta.get("market_cap_sol", 0))
-                    price_usd = mcap_sol * 150 # Est price
+                    # Use telegram's cached sol price if available, else 150
+                    sol_p = self._telegram._sol_price if self._telegram else 150.0
+                    price_usd = mcap_sol * sol_p
                     
-                    # Estimate "size" in SOL based on current balance and price
-                    # This is a rough estimation for UI purposes
-                    size_sol = data["balance"] * price_usd / 150 if price_usd > 0 else 0.0
+                    size_sol = data["balance"] * mcap_sol / 1_000_000_000 if mcap_sol > 0 else 0.0
 
                     logger.info(f"Detected holding: {symbol} ({mint}) | Balance: {data['balance']}")
                     pos = Position(
@@ -142,10 +150,7 @@ class Solbot:
         self._telegram = TelegramManager(self._config.telegram)
         await self._telegram.start(self)
         
-        # Load persisted state before starting monitors
         self._load_state()
-        
-        # Sync manual holdings
         await self._sync_existing_holdings()
         
         await self._telegram.send_message("<b>Solbot Sniper (Dev Protection) started!</b>")
@@ -157,7 +162,6 @@ class Solbot:
         self._running = True
         asyncio.create_task(self._process_events())
         
-        # Resume position managers for loaded/synced active positions
         for pos in self._positions.values():
             if pos.active:
                 asyncio.create_task(self._position_manager(pos))
@@ -180,12 +184,10 @@ class Solbot:
             try:
                 data = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
                 
-                # Check for trade events (Sells/Dumps)
                 if data.get("txType") == "sell" or data.get("txType") == "buy":
                     await self._handle_trade_event(data)
                     continue
 
-                # Check for token launch events
                 mint = data.get("mint")
                 if mint and "txType" not in data:
                     token = self._parse_token_event(data)
@@ -206,21 +208,19 @@ class Solbot:
         if not trader or not mint:
             return
 
-        # Update price feed for positions (including synced ones)
         if mint in self._positions and mcap_sol:
-            price_usd = float(mcap_sol) * 150 
+            sol_p = self._telegram._sol_price if self._telegram else 150.0
+            price_usd = float(mcap_sol) * sol_p
             pos = self._positions[mint]
             pos.current_price = price_usd
             
-            # For synced positions, we might not have entry_price
             if pos.entry_price == 0:
-                pos.entry_price = price_usd # Set first seen price as "entry" for strategy tracking
+                pos.entry_price = price_usd
             
             if price_usd > pos.highest_price:
                 pos.highest_price = price_usd
-                self._save_state() # Save peaks
+                self._save_state()
 
-        # 1. Dev Dump Protection (Priority 1)
         if tx_type == "sell" and mint in self._positions:
             pos = self._positions[mint]
             if trader == pos.creator:
@@ -228,18 +228,21 @@ class Solbot:
                 asyncio.create_task(self._exit_position(pos, "DEV DUMP", 1.0))
                 return
 
-        # 2. Copytrade Logic (Priority 2)
         if tx_type == "buy" and self._filter.is_copy_target(trader):
             token = self._parse_token_event(data)
-            asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, "Copytrade"))
+            score_obj = self._filter._wallet_scores.get(trader)
+            alias = score_obj.alias if score_obj else None
+            reason = f"Copytrade [{alias or trader[:8]}]"
+            asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, reason))
 
     def _parse_token_event(self, data: dict) -> TokenEvent:
+        sol_p = self._telegram._sol_price if self._telegram else 150.0
         return TokenEvent(
             mint=data.get("mint"),
             name=data.get("name", "Unknown"),
             symbol=data.get("symbol", "???"),
             creator=data.get("traderPublicKey") or data.get("creator"),
-            market_cap_usd=float(data.get("marketCapSol", 0)) * 150,
+            market_cap_usd=float(data.get("marketCapSol", 0)) * sol_p,
             liquidity_sol=float(data.get("vSolInBondingCurve", 0)) / 1e9,
             timestamp=time(),
         )
@@ -276,16 +279,13 @@ class Solbot:
                 await asyncio.sleep(1)
                 continue
 
-            # Absolute Market Cap Take Profit
             if hasattr(self._config.strategy, "mcap_tp_target_usd") and pos.current_price >= self._config.strategy.mcap_tp_target_usd:
                 await self._exit_position(pos, f"MCAP TP @ {pos.current_price:.0f}", 1.0)
                 return
 
-            # Calculate multipliers
             gain = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
             drawdown = (pos.highest_price - pos.current_price) / pos.highest_price if pos.highest_price > 0 else 0.0
 
-            # 1. Take Profit (TP) Targets (Incremental Sells)
             for tp in strat.tp_targets:
                 mult = tp["multiplier"]
                 if gain >= mult and mult not in pos.tp_targets_hit:
@@ -293,15 +293,12 @@ class Solbot:
                     await self._exit_position(pos, f"TP {mult}x", tp["sell_pct"])
                     pos.tp_targets_hit.append(mult)
                     self._save_state()
-                    # Continue checking other targets in same loop if gain is huge
             
-            # 2. Stop Loss (SL)
             if gain <= (1.0 - strat.stop_loss_pct):
                 logger.warning(f"🛑 STOP LOSS HIT: {pos.symbol} at {gain:.2f}x")
                 await self._exit_position(pos, "STOP LOSS", 1.0)
                 break
 
-            # 3. Trailing Stop
             if drawdown >= strat.trailing_stop_pct:
                 logger.warning(f"📉 TRAILING STOP HIT: {pos.symbol} at {drawdown*100:.1f}% drawdown")
                 await self._exit_position(pos, "TRAILING STOP", 1.0)
@@ -322,7 +319,6 @@ class Solbot:
 
         sell_amount = token_balance * pct
         
-        # Try PumpPortal first, then Jupiter fallback for graduated tokens
         result = await self._pump_client.execute_trade(
             pos.mint, 
             action="sell", 
@@ -330,14 +326,9 @@ class Solbot:
             denominated_in_sol=False
         )
         
-        # Fallback for graduated tokens
-        if not result.success and "Graduated" in pos.symbol:
-            logger.info(f"PumpPortal sell failed for {pos.symbol}, trying Jupiter...")
-            # Implement Jupiter sell here if needed
-            
         if result.success:
             self._trades.append(result)
-            if pct >= 0.99: # Close to 100%
+            if pct >= 0.99:
                 pos.active = False
                 if pos.mint in self._positions: del self._positions[pos.mint]
             

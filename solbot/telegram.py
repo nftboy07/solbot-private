@@ -5,6 +5,7 @@ import aiohttp
 import logging
 import os
 import sys
+import base58
 from typing import Optional, Any
 from solbot.config import TelegramConfig
 
@@ -19,7 +20,7 @@ class TelegramManager:
         self._base_url = f"https://api.telegram.org/bot{self._config.token}"
         self._offset = 0
         self._running = False
-        self._sol_price = 150.0 # Default fallback
+        self._sol_price = 150.0
 
     async def start(self, bot_instance: Any):
         if not self._config.token or not self._config.chat_id:
@@ -30,7 +31,6 @@ class TelegramManager:
             timeout = aiohttp.ClientTimeout(total=10)
             self._session = aiohttp.ClientSession(timeout=timeout)
         
-        # Flush old updates to prevent restart loops
         try:
             async with self._session.get(f"{self._base_url}/getUpdates", params={"offset": -1, "limit": 1}) as resp:
                 if resp.status == 200:
@@ -66,10 +66,9 @@ class TelegramManager:
                             price = data.get("data", {}).get(sol_mint, {}).get("price")
                             if price:
                                 self._sol_price = float(price)
-                                logger.debug(f"Updated SOL price: ${self._sol_price:.2f}")
             except Exception as e:
                 logger.error(f"Failed to fetch SOL price: {e}")
-            await asyncio.sleep(60) # Update every minute
+            await asyncio.sleep(60)
 
     async def send_message(self, text: str):
         if not self._session: return
@@ -91,7 +90,6 @@ class TelegramManager:
                         data = await resp.json()
                         updates = data.get("result", [])
                         if updates:
-                            # Process updates but don't wait for command execution to finish
                             await self._handle_updates(updates, bot_instance)
                 await asyncio.sleep(0.5)
             except Exception as e:
@@ -107,14 +105,13 @@ class TelegramManager:
             
             text = msg.get("text", "")
             if not text: continue
-
-            # Refactor: Process command in a separate task to avoid blocking the update loop
             asyncio.create_task(self._execute_command(text, bot))
 
     async def _execute_command(self, text: str, bot: Any):
-        """Identify and execute the command in its own task."""
         try:
-            cmd = text.split()[0].lower()
+            parts = text.split()
+            if not parts: return
+            cmd = parts[0].lower()
             
             if cmd == "/list" or cmd == "/help":
                 await self._cmd_list()
@@ -128,8 +125,12 @@ class TelegramManager:
                 await self._cmd_history(bot)
             elif cmd == "/profit":
                 await self._cmd_profit(bot)
-            elif cmd in ["/smart", "/whales", "/devs", "/scoring"]:
-                await self._cmd_scoring(bot)
+            elif cmd in ["/smart", "/whales"]:
+                await self._cmd_whales(bot)
+            elif cmd == "/follow":
+                await self._cmd_follow(bot, parts[1:])
+            elif cmd == "/unfollow":
+                await self._cmd_unfollow(bot, parts[1:])
             elif cmd == "/risk":
                 await self._cmd_risk(bot)
             elif cmd == "/pause":
@@ -154,19 +155,15 @@ class TelegramManager:
             "/status - Current bot state\n"
             "/balance - SOL balance\n"
             "/portfolio - Active holdings\n"
-            "/positions - Alias for /portfolio\n"
+            "/whales - Followed wallets\n"
+            "/follow <addr> [alias] - Copytrade wallet\n"
+            "/unfollow <addr> - Stop following\n"
             "/history - Last N trades\n"
             "/profit - Session P&L\n"
-            "/smart - Smart wallet stats\n"
-            "/whales - Whale tracker stats\n"
-            "/devs - Developer reputation\n"
-            "/scoring - Scoring system info\n"
             "/risk - Active risk settings\n"
             "/pause - Pause sniper\n"
             "/resume - Resume sniper\n"
-            "/reload - Restart process\n"
-            "/exitall - Emergency liquidation\n"
-            "/help - Show help menu"
+            "/exitall - Emergency liquidation"
         )
         await self.send_message(msg)
 
@@ -175,14 +172,12 @@ class TelegramManager:
         msg = (
             "<b>📊 Solbot Status</b>\n"
             f"State: <code>{state}</code>\n"
-            f"Mode: <code>DEGEN SNIPER</code>\n"
             f"Positions: <code>{len(bot._positions)}</code>\n"
-            f"Trades: <code>{len(bot._trades)}</code>"
+            f"Followed: <code>{len(bot._filter._copy_targets)}</code>"
         )
         await self.send_message(msg)
 
     async def _cmd_balance(self, bot: Any):
-        """Fetch and display the actual SOL balance."""
         balance = await bot._pump_client.get_sol_balance()
         msg = (
             "<b>🔍 Wallet Balance</b>\n"
@@ -191,65 +186,73 @@ class TelegramManager:
         )
         await self.send_message(msg)
 
+    async def _is_valid_solana_address(self, address: str) -> bool:
+        try:
+            if len(address) < 32 or len(address) > 44: return False
+            base58.b58decode(address)
+            return True
+        except: return False
+
+    async def _cmd_follow(self, bot: Any, args: list):
+        if not args:
+            await self.send_message("Usage: <code>/follow <address> [alias]</code>")
+            return
+        addr = args[0]
+        if not await self._is_valid_solana_address(addr):
+            await self.send_message("❌ Invalid Solana address.")
+            return
+        alias = args[1] if len(args) > 1 else None
+        bot._filter.add_copy_target(addr, alias)
+        bot._save_state()
+        await self.send_message(f"✅ Following <code>{addr[:8]}...</code> as <b>{alias or 'Whale'}</b>")
+
+    async def _cmd_unfollow(self, bot: Any, args: list):
+        if not args:
+            await self.send_message("Usage: <code>/unfollow <address></code>")
+            return
+        addr = args[0]
+        bot._filter.remove_copy_target(addr)
+        bot._save_state()
+        await self.send_message(f"❌ Unfollowed <code>{addr[:8]}...</code>")
+
+    async def _cmd_whales(self, bot: Any):
+        targets = bot._filter._copy_targets
+        if not targets:
+            await self.send_message("No followed wallets.")
+            return
+        lines = ["<b>🐋 Followed Wallets:</b>"]
+        for addr in targets:
+            score_obj = bot._filter._wallet_scores.get(addr)
+            alias = score_obj.alias if score_obj else "Unknown"
+            score = score_obj.score if score_obj else 0
+            lines.append(f"- <b>{alias}</b>: <code>{addr[:8]}...</code> (Score: {score})")
+        await self.send_message("\n".join(lines))
+
     async def _cmd_portfolio(self, bot: Any):
         if not bot._positions:
             await self.send_message("No active positions.")
             return
-        
-        # 1. Fetch all balances once
-        try:
-            all_balances = await bot._pump_client.get_all_token_balances()
-        except Exception as e:
-            logger.error(f"Failed to fetch all balances: {e}")
-            all_balances = {}
-            
-        # 2. Fetch all metadata in parallel using asyncio.gather
+        all_balances = await bot._pump_client.get_all_token_balances()
         mints = sorted(bot._positions.keys())
         tasks = [bot._pump_client.get_token_metadata(mint) for mint in mints]
         metadata_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
         lines = ["<b>📍 Current Portfolio:</b>"]
-        
         for mint, meta in zip(mints, metadata_results):
-            if isinstance(meta, Exception):
-                logger.error(f"Error fetching metadata for {mint}: {meta}")
-                lines.append(f"- ⚠️ Error loading {mint[:8]}...")
-                continue
-
+            if isinstance(meta, Exception): continue
             pos = bot._positions[mint]
-            try:
-                # 1. Use fetched balance if available
-                balance = all_balances.get(mint, {}).get("balance", 0.0)
-                
-                # 2. Use fetched metadata
-                current_mc_sol = float(meta.get("market_cap_sol", 0))
-                current_mc_usd = current_mc_sol * self._sol_price
-                
-                if pos.symbol == "SYNCED" and meta.get("symbol"):
-                    pos.symbol = meta["symbol"]
-                
-                pos.current_price = current_mc_usd
-                if current_mc_usd > pos.highest_price:
-                    pos.highest_price = current_mc_usd
-
-                sol_price_per_token = current_mc_sol / 1_000_000_000
-                current_sol_value = balance * sol_price_per_token
-                
-                token_display = f"{balance:,.0f}" if balance >= 1 else f"{balance:,.4f}"
-                
-                lines.append(f"- {pos.symbol} (<code>{mint[:4]}...{mint[-4:]}</code>)")
-                lines.append(f"  Value: <code>{current_sol_value:.4f} SOL</code> ({token_display} tokens)")
-                lines.append(f"  MC: <code>${current_mc_usd:,.0f}</code> | Entry: <code>${pos.entry_price:,.0f}</code>")
-                lines.append("") # Spacer
-            except Exception as e:
-                logger.error(f"Error processing portfolio for {mint}: {e}")
-                lines.append(f"- ⚠️ Error loading {mint[:8]}...")
-            
+            balance = all_balances.get(mint, {}).get("balance", 0.0)
+            current_mc_sol = float(meta.get("market_cap_sol", 0))
+            current_mc_usd = current_mc_sol * self._sol_price
+            if pos.symbol == "SYNCED" and meta.get("symbol"): pos.symbol = meta["symbol"]
+            pos.current_price = current_mc_usd
+            if current_mc_usd > pos.highest_price: pos.highest_price = current_mc_usd
+            sol_v = balance * (current_mc_sol / 1e9)
+            lines.append(f"- {pos.symbol} (<code>{mint[:4]}...</code>)\n  Val: <code>{sol_v:.4f} SOL</code> | MC: <code>${current_mc_usd:,.0f}</code>")
         await self.send_message("\n".join(lines))
 
     async def _cmd_history(self, bot: Any):
         if not bot._trades:
-            await self.send_message("No trade history in this session.")
+            await self.send_message("No trade history.")
             return
         lines = ["<b>🕒 Recent History:</b>"]
         for trade in bot._trades[-10:]:
@@ -258,21 +261,7 @@ class TelegramManager:
         await self.send_message("\n".join(lines))
 
     async def _cmd_profit(self, bot: Any):
-        # Placeholder for real P&L calculation
-        await self.send_message("<b>📈 Session P&L</b>\nEstimated: Calculating tracked exits...")
-
-    async def _cmd_scoring(self, bot: Any):
-        # FIX: Use correct attribute name '_wallet_scores'
-        scores_dict = getattr(bot._filter, '_wallet_scores', {})
-        total_tracked = len(scores_dict)
-        smart_count = sum(1 for s in scores_dict.values() if s.score > 10)
-        
-        msg = (
-            "<b>🐋 Wallet Intelligence</b>\n"
-            f"Tracked Wallets: <code>{total_tracked}</code>\n"
-            f"Smart Wallets: <code>{smart_count}</code>"
-        )
-        await self.send_message(msg)
+        await self.send_message("<b>📈 Session P&L</b>\nCalculating tracked exits...")
 
     async def _cmd_risk(self, bot: Any):
         conf = bot._config
@@ -280,8 +269,7 @@ class TelegramManager:
             "<b>⚠️ Risk Settings</b>\n"
             f"Stop Loss: <code>-20%</code>\n"
             f"Slippage: <code>{conf.jupiter.slippage_bps} BPS</code>\n"
-            f"Priority Fee: <code>{conf.fee.base_fee_lamports / 1e9} SOL</code>\n"
-            f"Liquidity Exit: <code>30% Drop</code>"
+            f"Priority Fee: <code>{conf.fee.base_fee_lamports / 1e9} SOL</code>"
         )
         await self.send_message(msg)
 
