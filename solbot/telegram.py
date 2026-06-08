@@ -122,8 +122,13 @@ class TelegramManager:
                 await self.send_message("▶️ <b>Bot Resumed</b>")
             elif cmd == "/reload" or cmd == "/restart":
                 await self.send_message("🔄 <b>Restarting...</b>")
-                await bot.stop()
-                os.execv(sys.executable, ['python'] + sys.argv)
+                try:
+                    await asyncio.wait_for(bot.stop(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Bot stop timed out, forcing restart")
+                except Exception as e:
+                    logger.error(f"Error during bot stop: {e}")
+                os.execv(sys.executable, [sys.executable] + sys.argv)
             elif cmd == "/exitall": await self._cmd_exitall(bot)
             elif cmd == "/aitoggle": await self._cmd_aitoggle(bot)
             elif cmd == "/aiscore": await self._cmd_aiscore(args, bot)
@@ -201,7 +206,6 @@ class TelegramManager:
         count = 0
         for addr, score in bot._filter._wallet_scores.items():
             alias = score.alias if hasattr(score, 'alias') and score.alias else "Unknown"
-            # Filter for VineWallet or SmartWallet or any custom KOL label
             if any(term in alias for term in ["VineWallet", "SmartWallet", "KOL"]):
                 lines.append(f"- {alias} (<code>{addr[:6]}...{addr[-4:]}</code>)")
                 count += 1

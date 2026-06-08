@@ -29,37 +29,19 @@ class PumpFunClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self._jito: Optional[JitoClient] = None
         self._base_url = "https://pumpportal.fun/api/trade-local"
-        self._sol_price = 150.0 # Cache for fallback calculation
 
     async def start(self):
         if not self._session:
             timeout = aiohttp.ClientTimeout(total=10)
             self._session = aiohttp.ClientSession(timeout=timeout)
-        self._jito = JitoClient(self._bot_config, self._wallet)
-        await self._jito.start()
-        # Initial SOL price update
-        asyncio.create_task(self._update_sol_price())
+        # JitoClient only takes config
+        self._jito = JitoClient(self._bot_config)
+        # JitoClient has no start method
 
     async def stop(self):
         if self._session:
             await self._session.close()
-        if self._jito:
-            await self._jito.stop()
-
-    async def _update_sol_price(self):
-        """Update SOL price for USD conversions."""
-        sol_mint = "So11111111111111111111111111111111111111112"
-        url = f"https://api.jup.ag/price/v2?ids={sol_mint}"
-        try:
-            if self._session:
-                async with self._session.get(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        price = data.get("data", {}).get(sol_mint, {}).get("price")
-                        if price:
-                            self._sol_price = float(price)
-        except Exception:
-            pass
+        # JitoClient has no stop method
 
     async def get_sol_balance(self) -> float:
         """Fetch the current SOL balance for the wallet."""
@@ -116,76 +98,39 @@ class PumpFunClient:
         return balances
 
     async def get_token_metadata(self, mint: str) -> Dict:
-        """Fetch token metadata with Pump.fun and Jupiter v2 fallback."""
-        # 1. Try Pump.fun Frontend API
+        """Fetch basic token metadata (symbol)."""
         url = f"https://frontend-api.pump.fun/coins/{mint}"
         try:
             async with self._session.get(url) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    # Ensure numeric fields exist
-                    if "market_cap_sol" not in data:
-                        data["market_cap_sol"] = 0
-                    if "liquidity_sol" not in data:
-                        data["liquidity_sol"] = 0
-                    return data
-                elif resp.status == 404:
-                    logger.debug(f"Token {mint} not found on Pump.fun, trying Jupiter v2 fallback...")
-        except Exception as e:
-            logger.debug(f"Pump.fun API error for {mint}: {e}")
-
-        # 2. Fallback: Jupiter Price API v2 (for graduated tokens)
-        jup_url = f"https://api.jup.ag/price/v2?ids={mint}"
-        try:
-            async with self._session.get(jup_url) as resp:
-                if resp.status == 200:
-                    jup_data = await resp.json()
-                    token_info = jup_data.get("data", {}).get(mint)
-                    if token_info:
-                        price_usd = float(token_info.get("price", 0))
-                        # Use dynamic SOL price for MC calculation
-                        mc_sol = (price_usd * 1_000_000_000) / self._sol_price
-                        return {
-                            "symbol": token_info.get("symbol", "SYNCED"),
-                            "name": "Graduated Token",
-                            "market_cap_sol": mc_sol,
-                            "is_graduated": True
-                        }
-        except Exception as e:
-            logger.error(f"Jupiter v2 fallback error for {mint}: {e}")
-
-        return {"symbol": "SYNCED", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
+                    return await resp.json()
+        except:
+            pass
+        return {"symbol": "???", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
 
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
-        # FIX: Explicitly include the mint in the params to avoid full account list fetch
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenAccountsByOwner",
-            "params": [
-                self._wallet.pubkey_str,
-                {"mint": mint},
-                {"encoding": "jsonParsed"}
-            ]
-        }
-        try:
-            async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
-                data = await resp.json()
-                accounts = data.get("result", {}).get("value", [])
-                
-                # Check ALL accounts returned for the correct mint
-                # RPC usually filters correctly but some public nodes are buggy
-                for acc in accounts:
-                    info = acc["account"]["data"]["parsed"]["info"]
-                    if info.get("mint") == mint:
-                        amount_info = info["tokenAmount"]
+        for program_id in ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EP2H6V3MG69L7AHXTo"]:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenAccountsByOwner",
+                "params": [
+                    self._wallet.pubkey_str,
+                    {"mint": mint, "programId": program_id},
+                    {"encoding": "jsonParsed"}
+                ]
+            }
+            try:
+                async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
+                    data = await resp.json()
+                    accounts = data.get("result", {}).get("value", [])
+                    if accounts:
+                        amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
                         return float(amount_info["uiAmount"] or 0)
-                
-                return 0.0
-        except Exception as e:
-            logger.error(f"Error fetching balance for {mint}: {e}")
-            return 0.0
+            except:
+                continue
+        return 0.0
 
     async def execute_trade(
         self, 
