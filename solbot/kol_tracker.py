@@ -32,25 +32,28 @@ class KOLTracker:
             if token not in self.active_buys:
                 self.active_buys[token] = set()
             
-            if wallet not in self.active_buys[token]:
-                self.active_buys[token].add(wallet)
-                kol_count = len(self.active_buys[token])
-                
-                self.logger.info(f"KOL {kol_name} bought {token}. Total KOLs in this token: {kol_count}")
+            self.active_buys[token].add(wallet)
+            kol_count = len(self.active_buys[token])
+            
+            self.logger.info(f"KOL {kol_name} bought {token}. Total KOLs in this token: {kol_count}")
 
-                # TRIGGER: threshold unique KOLs
-                if kol_count >= self.threshold:
-                    self.logger.warning(f"COORDINATED BUY DETECTED: {kol_count} KOLs in {token}. Executing auto-buy.")
-                    # Use execute_coordinated_buy for simplicity
-                    await bot_instance.execute_coordinated_buy(token, kol_count)
+            # Trigger when threshold reached
+            if kol_count >= self.threshold:
+                self.logger.warning(f"COORDINATED KOL BUY DETECTED: {kol_count} KOLs in {token}. Executing copy-trade.")
+                await bot_instance.execute_kol_snipe(token, f"{kol_count} KOLs Coordinated Buy")
 
         elif action in ['sell', 'transfer']:
             # ULTRA-AGGRESSIVE EXIT: If ANY KOL who bought this token sells/transfers, liquidate.
             if token in self.active_buys and wallet in self.active_buys[token]:
-                self.logger.warning(f"EXIT SIGNAL: KOL {kol_name} is leaving {token}. Liquidating position immediately.")
-                await bot_instance.execute_emergency_exit(token, kol_name)
+                self.logger.warning(f"EXIT SIGNAL: KOL {kol_name} is leaving {token}. Liquidating position immediately (Frontrunning KOLs).")
+                # Trigger emergency exit in the bot
+                if token in bot_instance._positions:
+                    pos = bot_instance._positions[token]
+                    await bot_instance._exit_position(pos, f"KOL EXIT ({kol_name})", 1.0)
+                
                 # Cleanup tracking for this token after liquidation
-                if token in self.active_buys:
+                self.active_buys[token].discard(wallet)
+                if not self.active_buys[token]:
                     del self.active_buys[token]
 
     async def get_token_sentiment(self, token: str) -> float:
