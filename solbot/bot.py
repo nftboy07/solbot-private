@@ -21,6 +21,8 @@ from solbot.wallet import Wallet
 from solbot.twitter import TwitterMonitor
 from solbot.ai_filter import AIFilter
 from solbot.go_monitor import GoMonitor
+from solbot.raydium import RaydiumClient
+from solbot.dexscreener import DexScreenerClient
 
 logger = get_logger("bot")
 
@@ -59,6 +61,8 @@ class Solbot:
         self._ai_min_score = 75
         self._ai_filter = AIFilter()
         self._go_monitor = None
+        self._raydium = None
+        self._dexscreener = DexScreenerClient()
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -147,6 +151,8 @@ class Solbot:
 
         # Pump.fun GO Monitor
         self._go_monitor = GoMonitor(self)
+        self._raydium = RaydiumClient(self)
+        asyncio.create_task(self._raydium.start())
         asyncio.create_task(self._go_monitor.start_monitoring())
 
         self._running = True
@@ -165,6 +171,7 @@ class Solbot:
         if self._telegram: await self._telegram.stop()
         if self._twitter: await self._twitter.stop()
         if self._go_monitor: await self._go_monitor.stop()
+        if self._raydium: await self._raydium.stop()
         logger.info("Solbot stopped")
 
     async def _process_events(self):
@@ -245,7 +252,7 @@ class Solbot:
             pos.highest_price = token.market_cap_usd
             self._positions[token.mint] = pos
             self._save_state()
-            await self._telegram.send_message(f"✅ <b>BUY ({reason}): {token.symbol}</b>")
+            await self._telegram.send_message(f"  <b>BUY ({reason}): {token.symbol}</b>")
             asyncio.create_task(self._position_manager(pos))
 
     async def _position_manager(self, pos: Position):
@@ -289,7 +296,7 @@ class Solbot:
                 pos.active = False
                 if pos.mint in self._positions: del self._positions[pos.mint]
             self._save_state()
-            await self._telegram.send_message(f"🚨 <b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
+            await self._telegram.send_message(f"= <b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
 
     async def _sync_existing_holdings(self):
         try:
