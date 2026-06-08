@@ -153,7 +153,7 @@ class TelegramManager:
         await self.send_message(msg)
 
     async def _cmd_balance(self, bot: Any):
-        """Fetch and display the actual SOL balance."""
+        \"\"\"Fetch and display the actual SOL balance.\"\"\"
         balance = await bot._pump_client.get_sol_balance()
         msg = (
             "<b>🔍 Wallet Balance</b>\n"
@@ -211,7 +211,7 @@ class TelegramManager:
                 logger.error(f"Error processing portfolio for {mint}: {e}")
                 lines.append(f"- ⚠️ Error loading {mint[:8]}...")
             
-        await self.send_message(\"\n\".join(lines))
+        await self.send_message("\n".join(lines))
 
     async def _cmd_history(self, bot: Any):
         if not bot._trades:
@@ -221,7 +221,7 @@ class TelegramManager:
         for trade in bot._trades[-10:]:
             status = "✅" if trade.success else "❌"
             lines.append(f"{status} {trade.token_mint[:8]}... | {trade.latency_ms:.0f}ms")
-        await self.send_message(\"\n\".join(lines))
+        await self.send_message("\n".join(lines))
 
     async def _cmd_profit(self, bot: Any):
         # Placeholder for real P&L calculation
