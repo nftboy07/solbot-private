@@ -153,7 +153,7 @@ class TelegramManager:
         await self.send_message(msg)
 
     async def _cmd_balance(self, bot: Any):
-        \"\"\"Fetch and display the actual SOL balance.\"\"\"
+        """Fetch and display the actual SOL balance."""
         balance = await bot._pump_client.get_sol_balance()
         msg = (
             "<b>🔍 Wallet Balance</b>\n"
