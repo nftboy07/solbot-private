@@ -25,8 +25,9 @@ class AIFilter:
             logger.warning("MiniMax API key missing, skipping AI filter.")
             return 100
 
+        # Enhanced prompt for better "non-degen" filtering
         prompt = f"""
-        Analyze this token for safety (rugpull risk, scam potential).
+        Analyze this Solana token for safety. Look for rugpull risks or supply splits.
         - Mint: {token_data.get('mint')}
         - Symbol: {token_data.get('symbol')}
         - Name: {token_data.get('name')}
@@ -35,7 +36,10 @@ class AIFilter:
         
         {token_data.get('sentiment_text', 'No recent tweets or context provided.')}
         
-        Return ONLY a single integer score between 0 and 100.
+        Respond with ONLY a single integer score between 0 and 100.
+        0-30: High risk/Rug
+        31-70: Medium risk/Neutral
+        71-100: Safe/Low risk
         """
 
         try:
@@ -53,7 +57,10 @@ class AIFilter:
                     if resp.status == 200:
                         data = await resp.json()
                         content = data['choices'][0]['message']['content'].strip()
-                        return int(''.join(filter(str.isdigit, content)) or 0)
+                        # Extract first integer found in response
+                        import re
+                        match = re.search(r'\d+', content)
+                        return int(match.group()) if match else 50
                     else:
                         logger.error(f"MiniMax API error: {resp.status} - {await resp.text()}")
         except Exception as e:
