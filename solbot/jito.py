@@ -5,7 +5,7 @@ from solbot.logger import get_logger
 logger = get_logger("jito")
 
 class JitoClient:
-    \"\"\"Asynchronous Jito Block-Engine client for Block-0 sniping.\"\"\"
+    """Asynchronous Jito Block-Engine client for Block-0 sniping."""
     def __init__(self, config):
         self._config = config
         self._endpoints = [
@@ -19,7 +19,7 @@ class JitoClient:
         ]
 
     async def send_bundle(self, transactions: list, tip_lamports: int):
-        \"\"\"Submit a bundle of transactions with a Jito tip.\"\"\"
+        """Submit a bundle of transactions with a Jito tip."""
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
