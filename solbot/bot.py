@@ -19,6 +19,7 @@ from solbot.pumpfun_client import PumpFunClient
 from solbot.telegram import TelegramManager
 from solbot.wallet import Wallet
 from solbot.twitter import TwitterMonitor
+from solbot.ai_filter import AIFilter
 
 logger = get_logger("bot")
 
@@ -53,6 +54,9 @@ class Solbot:
         self._positions: Dict[str, Position] = {}
         self._paused = False
         self._state_file = "data/state.json"
+        self._ai_enabled = True
+        self._ai_min_score = 75
+        self._ai_filter = AIFilter()
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -63,7 +67,9 @@ class Solbot:
                 "trades": [asdict(t) for t in self._trades],
                 "copy_targets": list(self._filter._copy_targets),
                 "wallet_scores": {addr: asdict(score) for addr, score in self._filter._wallet_scores.items()},
-                "twitter_handles": list(self._twitter._handles) if self._twitter else []
+                "twitter_handles": list(self._twitter._handles) if self._twitter else [],
+                "ai_enabled": self._ai_enabled,
+                "ai_min_score": self._ai_min_score
             }
             with open(self._state_file, "w") as f:
                 json.dump(state, f, indent=2)
@@ -102,6 +108,10 @@ class Solbot:
             # Restore trades
             raw_trades = state.get("trades", [])
             self._trades = [TradeResult(**t) for t in raw_trades[-100:]]
+            
+            # Restore AI settings
+            self._ai_enabled = state.get("ai_enabled", True)
+            self._ai_min_score = state.get("ai_min_score", 75)
             
             logger.info(f"Loaded {len(self._positions)} positions and {len(self._filter._copy_targets)} whales")
         except Exception as e:
@@ -163,6 +173,14 @@ class Solbot:
                     token = self._parse_token_event(data)
                     qualified, size = self._filter.is_qualified(token)
                     if qualified:
+                        if self._ai_enabled:
+                            token_data = {
+                                'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator
+                            }
+                            score = await self._ai_filter.score_token(token_data)
+                            if score < self._ai_min_score:
+                                logger.warning(f"AI score {score} < {self._ai_min_score}, skipping {token.symbol}")
+                                continue
                         asyncio.create_task(self._execute_snipe(token, size, "Sniper"))
             except asyncio.TimeoutError:
                 continue
