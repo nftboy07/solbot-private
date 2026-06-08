@@ -19,6 +19,7 @@ class TelegramManager:
         self._base_url = f"https://api.telegram.org/bot{self._config.token}"
         self._offset = 0
         self._running = False
+        self._sol_price = 150.0 # Default fallback
 
     async def start(self, bot_instance: Any):
         if not self._config.token or not self._config.chat_id:
@@ -43,6 +44,7 @@ class TelegramManager:
 
         self._running = True
         asyncio.create_task(self._poll_loop(bot_instance))
+        asyncio.create_task(self._update_sol_price())
         logger.info("Telegram command listener started.")
 
     async def stop(self):
@@ -50,6 +52,24 @@ class TelegramManager:
         if self._session:
             await self._session.close()
             self._session = None
+
+    async def _update_sol_price(self):
+        """Periodically update the SOL price from Jupiter Price API v2."""
+        sol_mint = "So11111111111111111111111111111111111111112"
+        url = f"https://api.jup.ag/price/v2?ids={sol_mint}"
+        while self._running:
+            try:
+                if self._session:
+                    async with self._session.get(url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            price = data.get("data", {}).get(sol_mint, {}).get("price")
+                            if price:
+                                self._sol_price = float(price)
+                                logger.debug(f"Updated SOL price: ${self._sol_price:.2f}")
+            except Exception as e:
+                logger.error(f"Failed to fetch SOL price: {e}")
+            await asyncio.sleep(60) # Update every minute
 
     async def send_message(self, text: str):
         if not self._session: return
@@ -71,6 +91,7 @@ class TelegramManager:
                         data = await resp.json()
                         updates = data.get("result", [])
                         if updates:
+                            # Process updates but don't wait for command execution to finish
                             await self._handle_updates(updates, bot_instance)
                 await asyncio.sleep(0.5)
             except Exception as e:
@@ -87,6 +108,12 @@ class TelegramManager:
             text = msg.get("text", "")
             if not text: continue
 
+            # Refactor: Process command in a separate task to avoid blocking the update loop
+            asyncio.create_task(self._execute_command(text, bot))
+
+    async def _execute_command(self, text: str, bot: Any):
+        """Identify and execute the command in its own task."""
+        try:
             cmd = text.split()[0].lower()
             
             if cmd == "/list" or cmd == "/help":
@@ -117,6 +144,8 @@ class TelegramManager:
                 os.execv(sys.executable, ['python'] + sys.argv)
             elif cmd == "/exitall":
                 await self._cmd_exitall(bot)
+        except Exception as e:
+            logger.error(f"Error executing command '{text}': {e}")
 
     async def _cmd_list(self):
         msg = (
@@ -167,37 +196,42 @@ class TelegramManager:
             await self.send_message("No active positions.")
             return
         
-        # FIX: Fetch all balances once to avoid iterative RPC filter bugs
+        # 1. Fetch all balances once
         try:
             all_balances = await bot._pump_client.get_all_token_balances()
         except Exception as e:
             logger.error(f"Failed to fetch all balances: {e}")
             all_balances = {}
             
+        # 2. Fetch all metadata in parallel using asyncio.gather
+        mints = sorted(bot._positions.keys())
+        tasks = [bot._pump_client.get_token_metadata(mint) for mint in mints]
+        metadata_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
         lines = ["<b>📍 Current Portfolio:</b>"]
-        # Process mints in a stable sorted order to prevent UI jumps
-        for mint in sorted(bot._positions.keys()):
+        
+        for mint, meta in zip(mints, metadata_results):
+            if isinstance(meta, Exception):
+                logger.error(f"Error fetching metadata for {mint}: {meta}")
+                lines.append(f"- ⚠️ Error loading {mint[:8]}...")
+                continue
+
             pos = bot._positions[mint]
-            
             try:
-                # 1. Use fetched balance if available, otherwise default to 0.0
+                # 1. Use fetched balance if available
                 balance = all_balances.get(mint, {}).get("balance", 0.0)
                 
-                # 2. Refresh metadata for live price/MC
-                meta = await bot._pump_client.get_token_metadata(mint)
+                # 2. Use fetched metadata
                 current_mc_sol = float(meta.get("market_cap_sol", 0))
-                current_mc_usd = current_mc_sol * 150
+                current_mc_usd = current_mc_sol * self._sol_price
                 
-                # Update symbol if it was SYNCED
                 if pos.symbol == "SYNCED" and meta.get("symbol"):
                     pos.symbol = meta["symbol"]
                 
-                # 3. Update position in-memory
                 pos.current_price = current_mc_usd
                 if current_mc_usd > pos.highest_price:
                     pos.highest_price = current_mc_usd
 
-                # 4. Calculate display values
                 sol_price_per_token = current_mc_sol / 1_000_000_000
                 current_sol_value = balance * sol_price_per_token
                 

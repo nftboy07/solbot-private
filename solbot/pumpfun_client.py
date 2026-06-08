@@ -29,6 +29,7 @@ class PumpFunClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self._jito: Optional[JitoClient] = None
         self._base_url = "https://pumpportal.fun/api/trade-local"
+        self._sol_price = 150.0 # Cache for fallback calculation
 
     async def start(self):
         if not self._session:
@@ -36,12 +37,29 @@ class PumpFunClient:
             self._session = aiohttp.ClientSession(timeout=timeout)
         self._jito = JitoClient(self._bot_config, self._wallet)
         await self._jito.start()
+        # Initial SOL price update
+        asyncio.create_task(self._update_sol_price())
 
     async def stop(self):
         if self._session:
             await self._session.close()
         if self._jito:
             await self._jito.stop()
+
+    async def _update_sol_price(self):
+        """Update SOL price for USD conversions."""
+        sol_mint = "So11111111111111111111111111111111111111112"
+        url = f"https://api.jup.ag/price/v2?ids={sol_mint}"
+        try:
+            if self._session:
+                async with self._session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        price = data.get("data", {}).get(sol_mint, {}).get("price")
+                        if price:
+                            self._sol_price = float(price)
+        except Exception:
+            pass
 
     async def get_sol_balance(self) -> float:
         """Fetch the current SOL balance for the wallet."""
@@ -125,8 +143,8 @@ class PumpFunClient:
                     token_info = jup_data.get("data", {}).get(mint)
                     if token_info:
                         price_usd = float(token_info.get("price", 0))
-                        # Convert USD price to market_cap_sol (Est. 1B supply, 150 SOL price)
-                        mc_sol = (price_usd * 1_000_000_000) / 150
+                        # Use dynamic SOL price for MC calculation
+                        mc_sol = (price_usd * 1_000_000_000) / self._sol_price
                         return {
                             "symbol": token_info.get("symbol", "SYNCED"),
                             "name": "Graduated Token",
