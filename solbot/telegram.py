@@ -27,7 +27,8 @@ class TelegramManager:
             logger.warning("Telegram configuration missing.")
             return
         if not self._session:
-            timeout = aiohttp.ClientTimeout(total=10)
+            # Increased total timeout to accommodate long polling
+            timeout = aiohttp.ClientTimeout(total=30, connect=5)
             self._session = aiohttp.ClientSession(timeout=timeout)
         try:
             async with self._session.get(f"{self._base_url}/getUpdates", params={"offset": -1, "limit": 1}) as resp:
@@ -78,13 +79,15 @@ class TelegramManager:
     async def _poll_loop(self, bot_instance: Any):
         while self._running:
             try:
+                # Use long polling: timeout=20 means Telegram holds the request up to 20s if no updates
                 params = {"offset": self._offset, "timeout": 20}
                 async with self._session.get(f"{self._base_url}/getUpdates", params=params) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         updates = data.get("result", [])
-                        if updates: await self._handle_updates(updates, bot_instance)
-                await asyncio.sleep(0.5)
+                        if updates:
+                            await self._handle_updates(updates, bot_instance)
+                # Removed the sleep(0.5) to allow immediate re-polling after an update
             except Exception as e:
                 logger.error(f"Telegram error: {e}")
                 await asyncio.sleep(5)
@@ -101,6 +104,7 @@ class TelegramManager:
     async def _execute_command(self, text: str, bot: Any):
         try:
             args = text.split()
+            if not args: return
             cmd = args[0].lower()
             if cmd == "/list" or cmd == "/help": await self._cmd_list()
             elif cmd == "/status": await self._cmd_status(bot)
