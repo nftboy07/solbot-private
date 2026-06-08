@@ -5,7 +5,7 @@ import aiohttp
 import logging
 import os
 import sys
-from typing import Optional, Any
+from typing import Optional, Any, List
 from datetime import datetime
 from solbot.config import TelegramConfig
 
@@ -27,8 +27,7 @@ class TelegramManager:
             logger.warning("Telegram configuration missing.")
             return
         if not self._session:
-            # Increased total timeout to accommodate long polling
-            timeout = aiohttp.ClientTimeout(total=30, connect=5)
+            timeout = aiohttp.ClientTimeout(total=10)
             self._session = aiohttp.ClientSession(timeout=timeout)
         try:
             async with self._session.get(f"{self._base_url}/getUpdates", params={"offset": -1, "limit": 1}) as resp:
@@ -79,15 +78,13 @@ class TelegramManager:
     async def _poll_loop(self, bot_instance: Any):
         while self._running:
             try:
-                # Use long polling: timeout=20 means Telegram holds the request up to 20s if no updates
                 params = {"offset": self._offset, "timeout": 20}
                 async with self._session.get(f"{self._base_url}/getUpdates", params=params) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         updates = data.get("result", [])
-                        if updates:
-                            await self._handle_updates(updates, bot_instance)
-                # Removed the sleep(0.5) to allow immediate re-polling after an update
+                        if updates: await self._handle_updates(updates, bot_instance)
+                # No additional sleep needed after successful request due to long polling
             except Exception as e:
                 logger.error(f"Telegram error: {e}")
                 await asyncio.sleep(5)
@@ -106,16 +103,18 @@ class TelegramManager:
             args = text.split()
             if not args: return
             cmd = args[0].lower()
-            if cmd == "/list" or cmd == "/help": await self._cmd_list()
+            if cmd in ["/list", "/help"]: await self._cmd_list()
             elif cmd == "/status": await self._cmd_status(bot)
             elif cmd == "/balance": await self._cmd_balance(bot)
-            elif cmd == "/portfolio" or cmd == "/positions": await self._cmd_portfolio(bot)
+            elif cmd in ["/portfolio", "/positions"]: await self._cmd_portfolio(bot)
             elif cmd == "/history": await self._cmd_history(bot)
-            elif cmd == "/whales" or cmd == "/smart": await self._cmd_whales(bot)
+            elif cmd in ["/whales", "/smart"]: await self._cmd_whales(bot)
             elif cmd == "/kols": await self._cmd_kols(bot)
             elif cmd == "/profit": await self._cmd_profit(bot)
             elif cmd == "/follow": await self._cmd_follow(args, bot)
             elif cmd == "/unfollow": await self._cmd_unfollow(args, bot)
+            elif cmd == "/blacklist": await self._cmd_blacklist(args, bot)
+            elif cmd == "/devs": await self._cmd_devs(bot)
             elif cmd == "/followtwitter": await self._cmd_follow_twitter(args, bot)
             elif cmd == "/unfollowtwitter": await self._cmd_unfollow_twitter(args, bot)
             elif cmd == "/pause":
@@ -124,7 +123,7 @@ class TelegramManager:
             elif cmd == "/resume":
                 bot._paused = False
                 await self.send_message("▶️ <b>Bot Resumed</b>")
-            elif cmd == "/reload" or cmd == "/restart":
+            elif cmd in ["/reload", "/restart"]:
                 await self.send_message("🔄 <b>Restarting...</b>")
                 try:
                     await asyncio.wait_for(bot.stop(), timeout=5.0)
@@ -151,6 +150,8 @@ class TelegramManager:
             "/profit - Daily PnL report\n"
             "/follow <addr> <alias> - Follow wallet\n"
             "/unfollow <addr> - Unfollow wallet\n"
+            "/blacklist <add/remove/list> <addr> - Manage blacklist\n"
+            "/devs - List active developer wallets\n"
             "/followtwitter <handle> - Track Twitter\n"
             "/unfollowtwitter <handle> - Untrack Twitter\n"
             "/pause - Pause sniper\n"
@@ -172,7 +173,8 @@ class TelegramManager:
             f"AI Filter: {ai_state} (Min: {bot._ai_min_score})\n"
             f"Positions: {len(bot._positions)}\n"
             f"Twitter: {len(bot._twitter._handles) if bot._twitter else 0}\n"
-            f"Tracked Wallets: {tracked_wallets}"
+            f"Tracked Wallets: {tracked_wallets}\n"
+            f"Blacklisted: {len(bot._blacklisted_wallets)}"
         )
         await self.send_message(msg)
 
@@ -274,6 +276,59 @@ class TelegramManager:
             bot._filter._copy_targets.remove(addr)
             bot._save_state()
             await self.send_message(f"🗑 Unfollowed: {addr}")
+
+    async def _cmd_blacklist(self, args: List[str], bot: Any):
+        if len(args) < 2:
+            await self.send_message("Usage: /blacklist <add/remove/list> [address]")
+            return
+        
+        action = args[1].lower()
+        if action == "list":
+            if not bot._blacklisted_wallets:
+                await self.send_message("Blacklist is empty.")
+                return
+            msg = "<b>🚫 Blacklisted Wallets:</b>\n" + "\n".join([f"<code>{a}</code>" for a in bot._blacklisted_wallets])
+            await self.send_message(msg)
+        elif action == "add":
+            if len(args) < 3:
+                await self.send_message("Usage: /blacklist add <address>")
+                return
+            addr = args[2]
+            bot._blacklisted_wallets.add(addr)
+            bot._save_state()
+            await self.send_message(f"✅ Added to blacklist: <code>{addr}</code>")
+        elif action == "remove":
+            if len(args) < 3:
+                await self.send_message("Usage: /blacklist remove <address>")
+                return
+            addr = args[2]
+            if addr in bot._blacklisted_wallets:
+                bot._blacklisted_wallets.remove(addr)
+                bot._save_state()
+                await self.send_message(f"🗑 Removed from blacklist: <code>{addr}</code>")
+            else:
+                await self.send_message("Address not in blacklist.")
+
+    async def _cmd_devs(self, bot: Any):
+        if not bot._positions:
+            await self.send_message("No active developer wallets to track.")
+            return
+        
+        lines = ["<b>👨‍💻 Active Developer Wallets:</b>"]
+        mints = list(bot._positions.keys())
+        tasks = [bot._pump_client.get_token_metadata(m) for m in mints]
+        metadata = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for mint, meta in zip(mints, metadata):
+            if isinstance(meta, dict) and meta.get("creator"):
+                creator = meta["creator"]
+                symbol = bot._positions[mint].symbol
+                lines.append(f"- {symbol} Dev: <code>{creator}</code>")
+        
+        if len(lines) == 1:
+            await self.send_message("Could not fetch developer info for active positions.")
+        else:
+            await self.send_message("\n".join(lines))
 
     async def _cmd_follow_twitter(self, args: list, bot: Any):
         if len(args) < 2: return
