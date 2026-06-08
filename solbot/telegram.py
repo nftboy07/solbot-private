@@ -108,6 +108,7 @@ class TelegramManager:
             elif cmd == "/portfolio" or cmd == "/positions": await self._cmd_portfolio(bot)
             elif cmd == "/history": await self._cmd_history(bot)
             elif cmd == "/whales" or cmd == "/smart": await self._cmd_whales(bot)
+            elif cmd == "/kols": await self._cmd_kols(bot)
             elif cmd == "/profit": await self._cmd_profit(bot)
             elif cmd == "/follow": await self._cmd_follow(args, bot)
             elif cmd == "/unfollow": await self._cmd_unfollow(args, bot)
@@ -137,6 +138,7 @@ class TelegramManager:
             "/balance - SOL balance\n"
             "/portfolio - Active holdings\n"
             "/whales - List tracked wallets\n"
+            "/kols - List tracked KOLs\n"
             "/profit - Daily PnL report\n"
             "/follow <addr> <alias> - Follow wallet\n"
             "/unfollow <addr> - Unfollow wallet\n"
@@ -167,24 +169,12 @@ class TelegramManager:
 
     async def _cmd_profit(self, bot: Any):
         now = datetime.now()
-        # Ensure fallback for timestamp and success/pnl fields
-        today_trades = [
-            t for t in bot._trades 
-            if hasattr(t, 'timestamp') and t.timestamp and datetime.fromtimestamp(t.timestamp).date() == now.date()
-        ]
+        today_trades = [t for t in bot._trades if hasattr(t, 'timestamp') and datetime.fromtimestamp(t.timestamp).date() == now.date()]
         
         total_trades = len(today_trades)
-        wins = 0
-        total_pnl = 0.0
-        
-        for t in today_trades:
-            # Check for PnL in SOL - fallback to 0 if not present
-            pnl = getattr(t, 'pnl_sol', 0.0) or 0.0
-            total_pnl += pnl
-            if t.success and pnl > 0:
-                wins += 1
-                
+        wins = len([t for t in today_trades if t.success and getattr(t, 'pnl_sol', 0) > 0])
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        total_pnl = sum([getattr(t, 'pnl_sol', 0) for t in today_trades])
         
         lines = [
             "<b>💰 Daily Profit Report</b>",
@@ -196,18 +186,30 @@ class TelegramManager:
             f"<b>📍 Active Positions ({len(bot._positions)}):</b>"
         ]
         
-        # Sort positions by highest gain
-        active_lines = []
         for mint, pos in bot._positions.items():
             gain = (pos.current_price / pos.entry_price - 1) * 100 if pos.entry_price > 0 else 0
-            active_lines.append(f"- {pos.symbol}: {gain:+.2f}% (${pos.current_price:,.0f} MC)")
-        
-        if not active_lines:
-            lines.append("No active positions.")
-        else:
-            lines.extend(active_lines)
+            lines.append(f"- {pos.symbol}: {gain:+.2f}% (${pos.current_price:,.0f} MC)")
             
         await self.send_message("\n".join(lines))
+
+    async def _cmd_kols(self, bot: Any):
+        if not bot._filter or not bot._filter._wallet_scores:
+            await self.send_message("No KOL data available.")
+            return
+            
+        lines = ["<b>🔥 Tracked KOLs & Smart Wallets:</b>"]
+        count = 0
+        for addr, score in bot._filter._wallet_scores.items():
+            alias = score.alias if hasattr(score, 'alias') and score.alias else "Unknown"
+            # Filter for VineWallet or SmartWallet or any custom KOL label
+            if any(term in alias for term in ["VineWallet", "SmartWallet", "KOL"]):
+                lines.append(f"- {alias} (<code>{addr[:6]}...{addr[-4:]}</code>)")
+                count += 1
+        
+        if count == 0:
+            await self.send_message("No addresses labeled as KOL, SmartWallet, or VineWallet found.")
+        else:
+            await self.send_message("\n".join(lines))
 
     async def _cmd_balance(self, bot: Any):
         balance = await bot._pump_client.get_sol_balance()
