@@ -1,7 +1,18 @@
 {
   "positions": {},
   "trades": [],
-  "copy_targets": [],
+  "copy_targets": [
+    "HRrZ6Q5j3zCPMz5b4txz9joPGjRKRZC5FoJmdPjUxMHo",
+    "5h7yzwmrGoG2BmxNCqNR2EnSv1LWCFo7n6SKSh5ZWkfE",
+    "5VXgaaRSiJPaJuK3PVbKpA5sdP3qob2q1AXk4N5L7SCC",
+    "4CqecFud362LKgALvChyhj6276he3Sy8yKim1uvFNV1m",
+    "2huXTbjeBhtMZ1ugNwUGucYBRasRaaiypymUX6P1Kwjx",
+    "8n1KsgmMjjCaeNK8TPx4eyb1RqQHBiL7A5zUAm9oX5Lm",
+    "Bpk7VVctpzXYx4BuPnZzs3VSSAWSAQJVq9VufFAq5p6b",
+    "B5fm5VnhXfH25FZpNpGhD3NNfBzSUu68zEX7AYev4tnv",
+    "9U5VWZo91NvmWLzEezaZDck99QyDidk4V4L79xPNYPZy",
+    "CCki7CsSj5oWhvonRJRjs8FvFAsYHSUNaakm5AmmvNKW"
+  ],
   "wallet_scores": {},
   "twitter_handles": [],
   "ai_enabled": true,
@@ -14,6 +25,7 @@
     "2ZJFX8mhxCt92zsX99EjsdUFw8W24ACAN3RpzUpV7R9q",
     "DZoDxXLn2Z2LcyjA9rnYZisRSVEZxueJssSBFXxZz6Xv",
     "CRVidEDtEUTYZisCxBZkpELzhQc9eauMLR3FWg74tReL",
-    "3URnnJKdG8eTjrKo7G8rN5GjzweYwSZSxwyJm5Ut5UmL"
+    "3URnnJKdG8eTjrKo7G8rN5GjzweYwSZSxwyJm5Ut5UmL",
+    "FXBXg6sqVNxt8Sgcdr2adxQ8LcoVgWV2qpL2wXb3m7xE"
   ]
 }
