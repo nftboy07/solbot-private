@@ -27,7 +27,7 @@ class TelegramManager:
             logger.warning("Telegram configuration missing.")
             return
         if not self._session:
-            timeout = aiohttp.ClientTimeout(total=10)
+            timeout = aiohttp.ClientTimeout(total=15)
             self._session = aiohttp.ClientSession(timeout=timeout)
         try:
             async with self._session.get(f"{self._base_url}/getUpdates", params={"offset": -1, "limit": 1}) as resp:
@@ -36,8 +36,11 @@ class TelegramManager:
                     results = data.get("result", [])
                     if results:
                         self._offset = results[0]["update_id"] + 1
+                else:
+                    logger.error(f"Telegram init error: {resp.status} - {await resp.text()}")
         except Exception as e:
-            logger.error(f"Failed to flush Telegram updates: {e}")
+            logger.error(f"Failed to flush Telegram updates: {type(e).__name__}: {e}")
+        
         self._running = True
         asyncio.create_task(self._poll_loop(bot_instance))
         asyncio.create_task(self._update_sol_price())
@@ -71,9 +74,9 @@ class TelegramManager:
         try:
             async with self._session.post(url, json=payload) as resp:
                 if resp.status != 200:
-                    logger.error(f"Telegram send error: {await resp.text()}")
+                    logger.error(f"Telegram send error (HTTP {resp.status}): {await resp.text()}")
         except Exception as e:
-            logger.error(f"Telegram exception: {e}")
+            logger.error(f"Telegram exception in send_message: {type(e).__name__}: {e}")
 
     async def _poll_loop(self, bot_instance: Any):
         while self._running:
@@ -84,8 +87,16 @@ class TelegramManager:
                         data = await resp.json()
                         updates = data.get("result", [])
                         if updates: await self._handle_updates(updates, bot_instance)
+                    else:
+                        error_text = await resp.text()
+                        logger.error(f"Telegram poll HTTP {resp.status}: {error_text}")
+                        await asyncio.sleep(10)
+            except asyncio.TimeoutError:
+                # Normal for long polling
+                continue
             except Exception as e:
-                logger.error(f"Telegram error: {e}")
+                # Fixed empty error body by logging exception type and message
+                logger.error(f"Telegram poll error ({type(e).__name__}): {e}")
                 await asyncio.sleep(5)
 
     async def _handle_updates(self, updates: list, bot: Any):
@@ -129,7 +140,7 @@ class TelegramManager:
             elif cmd == "/aitoggle": await self._cmd_aitoggle(bot)
             elif cmd == "/aiscore": await self._cmd_aiscore(args, bot)
         except Exception as e:
-            logger.error(f"Error executing command '{text}': {e}")
+            logger.error(f"Error executing command '{text}': {type(e).__name__}: {e}")
 
     async def _cmd_list(self):
         msg = (
