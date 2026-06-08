@@ -19,13 +19,24 @@ class GoMonitor:
         self._seen_bounties: Set[str] = set()
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
+        # FIX: Added browser-like headers to bypass Cloudflare 530 errors
+        self._headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": "https://pump.fun",
+            "Referer": "https://pump.fun/go",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
+        }
 
     async def start_monitoring(self):
         """Main loop for tracking new bounties."""
         self._running = True
         logger.info(f"Starting Pump.fun GO Monitor (Threshold: {self._reward_threshold} SOL)")
         
-        async with aiohttp.ClientSession() as session:
+        # FIX: Pass the headers to the ClientSession
+        async with aiohttp.ClientSession(headers=self._headers) as session:
             self._session = session
             while self._running:
                 try:
@@ -50,7 +61,10 @@ class GoMonitor:
         
         async with self._session.get(self._api_url, params=params, timeout=10) as response:
             if response.status != 200:
+                # FIX: Detailed logging for 404/530 debugging
                 logger.error(f"Failed to fetch bounties: HTTP {response.status}")
+                if response.status == 404:
+                    logger.error("Endpoint /go/bounties not found. Pump.fun may have moved the API.")
                 return
             
             data = await response.json()
