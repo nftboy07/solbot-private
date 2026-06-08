@@ -167,14 +167,21 @@ class TelegramManager:
             await self.send_message("No active positions.")
             return
         
+        # FIX: Fetch all balances once to avoid iterative RPC filter bugs
+        try:
+            all_balances = await bot._pump_client.get_all_token_balances()
+        except Exception as e:
+            logger.error(f"Failed to fetch all balances: {e}")
+            all_balances = {}
+            
         lines = ["<b>📍 Current Portfolio:</b>"]
         # Process mints in a stable sorted order to prevent UI jumps
         for mint in sorted(bot._positions.keys()):
             pos = bot._positions[mint]
             
             try:
-                # 1. Refresh balance for UI accuracy
-                balance = await bot._pump_client.get_token_balance(mint)
+                # 1. Use fetched balance if available, otherwise default to 0.0
+                balance = all_balances.get(mint, {}).get("balance", 0.0)
                 
                 # 2. Refresh metadata for live price/MC
                 meta = await bot._pump_client.get_token_metadata(mint)
@@ -204,7 +211,7 @@ class TelegramManager:
                 logger.error(f"Error processing portfolio for {mint}: {e}")
                 lines.append(f"- ⚠️ Error loading {mint[:8]}...")
             
-        await self.send_message("\n".join(lines))
+        await self.send_message(\"\n\".join(lines))
 
     async def _cmd_history(self, bot: Any):
         if not bot._trades:
@@ -214,18 +221,22 @@ class TelegramManager:
         for trade in bot._trades[-10:]:
             status = "✅" if trade.success else "❌"
             lines.append(f"{status} {trade.token_mint[:8]}... | {trade.latency_ms:.0f}ms")
-        await self.send_message("\n".join(lines))
+        await self.send_message(\"\n\".join(lines))
 
     async def _cmd_profit(self, bot: Any):
         # Placeholder for real P&L calculation
         await self.send_message("<b>📈 Session P&L</b>\nEstimated: Calculating tracked exits...")
 
     async def _cmd_scoring(self, bot: Any):
-        scores = len(getattr(bot._filter, 'wallet_metrics', {}))
+        # FIX: Use correct attribute name '_wallet_scores'
+        scores_dict = getattr(bot._filter, '_wallet_scores', {})
+        total_tracked = len(scores_dict)
+        smart_count = sum(1 for s in scores_dict.values() if s.score > 10)
+        
         msg = (
             "<b>🐋 Wallet Intelligence</b>\n"
-            f"Tracked Wallets: <code>{scores}</code>\n"
-            "Smart Wallets: <code>0</code> (Building data...)"
+            f"Tracked Wallets: <code>{total_tracked}</code>\n"
+            f"Smart Wallets: <code>{smart_count}</code>"
         )
         await self.send_message(msg)
 
