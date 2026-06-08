@@ -1,0 +1,19 @@
+{
+  "positions": {},
+  "trades": [],
+  "copy_targets": [],
+  "wallet_scores": {},
+  "twitter_handles": [],
+  "ai_enabled": true,
+  "ai_min_score": 75,
+  "blacklisted_wallets": [
+    "AQAkAGVERPKLxJ9RGgZQpo3WnUHH7Z2Ft9oNP3EnNVpt",
+    "85NzpfYwHCAQCDXvhBGLMDvCPHGYhkniT9X9K4SWa1SK",
+    "HFVqeVBCJoo8pVffynxQ9Bb34iVcToKJFpVhWUTi77RV",
+    "GVG6vkwRM8hbxeatzMUaNEcfkRnngNpD7KXj6P36g97b",
+    "2ZJFX8mhxCt92zsX99EjsdUFw8W24ACAN3RpzUpV7R9q",
+    "DZoDxXLn2Z2LcyjA9rnYZisRSVEZxueJssSBFXxZz6Xv",
+    "CRVidEDtEUTYZisCxBZkpELzhQc9eauMLR3FWg74tReL",
+    "3URnnJKdG8eTjrKo7G8rN5GjzweYwSZSxwyJm5Ut5UmL"
+  ]
+}
