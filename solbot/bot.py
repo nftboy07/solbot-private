@@ -20,6 +20,7 @@ from solbot.telegram import TelegramManager
 from solbot.wallet import Wallet
 from solbot.twitter import TwitterMonitor
 from solbot.ai_filter import AIFilter
+from solbot.go_monitor import GoMonitor
 
 logger = get_logger("bot")
 
@@ -57,6 +58,7 @@ class Solbot:
         self._ai_enabled = True
         self._ai_min_score = 75
         self._ai_filter = AIFilter()
+        self._go_monitor = None
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -143,6 +145,10 @@ class Solbot:
         self._monitor = PumpFunMonitor(self._config.pumpfun, loop)
         self._monitor.start()
 
+        # Pump.fun GO Monitor
+        self._go_monitor = GoMonitor(self)
+        asyncio.create_task(self._go_monitor.start_monitoring())
+
         self._running = True
         asyncio.create_task(self._process_events())
         
@@ -158,6 +164,7 @@ class Solbot:
         if self._jupiter: await self._jupiter.stop()
         if self._telegram: await self._telegram.stop()
         if self._twitter: await self._twitter.stop()
+        if self._go_monitor: await self._go_monitor.stop()
         logger.info("Solbot stopped")
 
     async def _process_events(self):
