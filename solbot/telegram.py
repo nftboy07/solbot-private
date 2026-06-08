@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 from typing import Optional, Any
+from datetime import datetime
 from solbot.config import TelegramConfig
 
 logger = logging.getLogger("bot.telegram")
@@ -107,6 +108,7 @@ class TelegramManager:
             elif cmd == "/portfolio" or cmd == "/positions": await self._cmd_portfolio(bot)
             elif cmd == "/history": await self._cmd_history(bot)
             elif cmd == "/whales" or cmd == "/smart": await self._cmd_whales(bot)
+            elif cmd == "/profit": await self._cmd_profit(bot)
             elif cmd == "/follow": await self._cmd_follow(args, bot)
             elif cmd == "/unfollow": await self._cmd_unfollow(args, bot)
             elif cmd == "/followtwitter": await self._cmd_follow_twitter(args, bot)
@@ -135,6 +137,7 @@ class TelegramManager:
             "/balance - SOL balance\n"
             "/portfolio - Active holdings\n"
             "/whales - List tracked wallets\n"
+            "/profit - Daily PnL report\n"
             "/follow <addr> <alias> - Follow wallet\n"
             "/unfollow <addr> - Unfollow wallet\n"
             "/followtwitter <handle> - Track Twitter\n"
@@ -151,8 +154,41 @@ class TelegramManager:
     async def _cmd_status(self, bot: Any):
         state = "PAUSED" if bot._paused else "ACTIVE"
         ai_state = "ENABLED" if bot._ai_enabled else "DISABLED"
-        msg = f"<b>📊 Solbot Status</b>\nState: {state}\nAI Filter: {ai_state} (Min: {bot._ai_min_score})\nPositions: {len(bot._positions)}\nTwitter: {len(bot._twitter._handles) if bot._twitter else 0}"
+        tracked_wallets = len(bot._filter._copy_targets) if bot._filter else 0
+        msg = (
+            f"<b>📊 Solbot Status</b>\n"
+            f"State: {state}\n"
+            f"AI Filter: {ai_state} (Min: {bot._ai_min_score})\n"
+            f"Positions: {len(bot._positions)}\n"
+            f"Twitter: {len(bot._twitter._handles) if bot._twitter else 0}\n"
+            f"Tracked Wallets: {tracked_wallets}"
+        )
         await self.send_message(msg)
+
+    async def _cmd_profit(self, bot: Any):
+        now = datetime.now()
+        today_trades = [t for t in bot._trades if hasattr(t, 'timestamp') and datetime.fromtimestamp(t.timestamp).date() == now.date()]
+        
+        total_trades = len(today_trades)
+        wins = len([t for t in today_trades if t.success and getattr(t, 'pnl_sol', 0) > 0])
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+        total_pnl = sum([getattr(t, 'pnl_sol', 0) for t in today_trades])
+        
+        lines = [
+            "<b>💰 Daily Profit Report</b>",
+            f"Date: {now.strftime('%A, %b %d, %Y')}",
+            f"Total Trades: {total_trades}",
+            f"Win Rate: {win_rate:.1f}%",
+            f"Realized PnL: <code>{total_pnl:.4f} SOL</code>",
+            "",
+            f"<b>📍 Active Positions ({len(bot._positions)}):</b>"
+        ]
+        
+        for mint, pos in bot._positions.items():
+            gain = (pos.current_price / pos.entry_price - 1) * 100 if pos.entry_price > 0 else 0
+            lines.append(f"- {pos.symbol}: {gain:+.2f}% (${pos.current_price:,.0f} MC)")
+            
+        await self.send_message("\n".join(lines))
 
     async def _cmd_balance(self, bot: Any):
         balance = await bot._pump_client.get_sol_balance()
@@ -181,8 +217,8 @@ class TelegramManager:
         lines = ["<b>🐋 Tracked Whales:</b>"]
         for addr in targets:
             score = bot._filter._wallet_scores.get(addr)
-            alias = score.alias if score and score.alias else "No Alias"
-            lines.append(f"- {alias} (<code>{addr[:6]}...</code>) Score: {score.score if score else 0}")
+            alias = score.alias if score and hasattr(score, 'alias') else "No Alias"
+            lines.append(f"- {alias} (<code>{addr[:6]}...</code>)")
         await self.send_message("\n".join(lines))
 
     async def _cmd_follow(self, args: list, bot: Any):

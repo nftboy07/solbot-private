@@ -24,6 +24,7 @@ from solbot.go_monitor import GoMonitor
 from solbot.raydium import RaydiumClient
 from solbot.dexscreener import DexScreenerClient
 from solbot.monitor_scraper import Monitor985Scraper
+from solbot.tungscreener import TungscreenerScraper
 
 logger = get_logger("bot")
 
@@ -65,6 +66,7 @@ class Solbot:
         self._raydium = None
         self._dexscreener = DexScreenerClient()
         self._monitor_scraper = None
+        self._tungscreener = None
         self._blacklisted_wallets: Set[str] = set()
 
     def _save_state(self):
@@ -166,6 +168,10 @@ class Solbot:
         self._monitor_scraper = Monitor985Scraper(self)
         asyncio.create_task(self._monitor_scraper.start_monitoring())
 
+        # Tungscreener Scraper
+        self._tungscreener = TungscreenerScraper(self)
+        asyncio.create_task(self._tungscreener.start_monitoring())
+
         self._running = True
         asyncio.create_task(self._process_events())
         
@@ -184,6 +190,7 @@ class Solbot:
         if self._go_monitor: await self._go_monitor.stop()
         if self._raydium: await self._raydium.stop()
         if self._monitor_scraper: await self._monitor_scraper.stop()
+        if self._tungscreener: await self._tungscreener.stop()
         logger.info("Solbot stopped")
 
     def is_blacklisted(self, address: str) -> bool:
