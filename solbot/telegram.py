@@ -122,6 +122,8 @@ class TelegramManager:
                 await bot.stop()
                 os.execv(sys.executable, ['python'] + sys.argv)
             elif cmd == "/exitall": await self._cmd_exitall(bot)
+            elif cmd == "/aitoggle": await self._cmd_aitoggle(bot)
+            elif cmd == "/aiscore": await self._cmd_aiscore(args, bot)
         except Exception as e:
             logger.error(f"Error executing command '{text}': {e}")
 
@@ -140,13 +142,16 @@ class TelegramManager:
             "/pause - Pause sniper\n"
             "/resume - Resume sniper\n"
             "/reload - Restart process\n"
-            "/exitall - Liquidate everything"
+            "/exitall - Liquidate everything\n"
+            "/aitoggle - Toggle AI filter\n"
+            "/aiscore <value> - Set min AI score"
         )
         await self.send_message(msg)
 
     async def _cmd_status(self, bot: Any):
         state = "PAUSED" if bot._paused else "ACTIVE"
-        msg = f"<b>📊 Solbot Status</b>\nState: {state}\nPositions: {len(bot._positions)}\nTwitter: {len(bot._twitter._handles) if bot._twitter else 0}"
+        ai_state = "ENABLED" if bot._ai_enabled else "DISABLED"
+        msg = f"<b>📊 Solbot Status</b>\nState: {state}\nAI Filter: {ai_state} (Min: {bot._ai_min_score})\nPositions: {len(bot._positions)}\nTwitter: {len(bot._twitter._handles) if bot._twitter else 0}"
         await self.send_message(msg)
 
     async def _cmd_balance(self, bot: Any):
@@ -232,3 +237,21 @@ class TelegramManager:
         await self.send_message("🚨 <b>Liquidating all positions...</b>")
         for mint in list(bot._positions.keys()):
             asyncio.create_task(bot._exit_position(bot._positions[mint], "Manual Exit", 1.0))
+
+    async def _cmd_aitoggle(self, bot: Any):
+        bot._ai_enabled = not bot._ai_enabled
+        bot._save_state()
+        state = "ENABLED" if bot._ai_enabled else "DISABLED"
+        await self.send_message(f"🤖 <b>AI Filter: {state}</b>")
+
+    async def _cmd_aiscore(self, args: list, bot: Any):
+        if len(args) < 2:
+            await self.send_message("Usage: /aiscore <value>")
+            return
+        try:
+            score = int(args[1])
+            bot._ai_min_score = max(0, min(100, score))
+            bot._save_state()
+            await self.send_message(f"🎯 <b>Min AI Score set to: {bot._ai_min_score}</b>")
+        except ValueError:
+            await self.send_message("❌ Invalid score value.")
