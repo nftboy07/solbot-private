@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, List, Any, Set
 
 from solbot.config import BotConfig, BotMode
-from solbot.filters import TokenFilter, WalletScore
+from solbot.filters import TokenFilter
 from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
 from solbot.models import TokenEvent, TradeResult
@@ -18,6 +18,7 @@ from solbot.pumpfun import PumpFunMonitor
 from solbot.pumpfun_client import PumpFunClient
 from solbot.telegram import TelegramManager
 from solbot.wallet import Wallet
+from solbot.twitter import TwitterMonitor
 
 logger = get_logger("bot")
 
@@ -46,6 +47,7 @@ class Solbot:
         self._jupiter: Optional[JupiterClient] = None
         self._telegram: Optional[TelegramManager] = None
         self._filter: Optional[TokenFilter] = None
+        self._twitter: Optional[TwitterMonitor] = None
         self._running = False
         self._trades: List[TradeResult] = []
         self._positions: Dict[str, Position] = {}
@@ -53,16 +55,15 @@ class Solbot:
         self._state_file = "data/state.json"
 
     def _save_state(self):
-        """Persist positions, trades, and wallet intelligence to a JSON file."""
+        """Persist positions, trades, and intelligence to a JSON file."""
         try:
             os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
             state = {
                 "positions": {mint: asdict(pos) for mint, pos in self._positions.items()},
                 "trades": [asdict(t) for t in self._trades],
-                "wallet_intelligence": {
-                    "copy_targets": list(self._filter._copy_targets),
-                    "wallet_scores": {addr: asdict(score) for addr, score in self._filter._wallet_scores.items()}
-                }
+                "copy_targets": list(self._filter._copy_targets),
+                "wallet_scores": {addr: asdict(score) for addr, score in self._filter._wallet_scores.items()},
+                "twitter_handles": list(self._twitter._handles) if self._twitter else []
             }
             with open(self._state_file, "w") as f:
                 json.dump(state, f, indent=2)
@@ -71,7 +72,7 @@ class Solbot:
             logger.error(f"Failed to save state: {e}")
 
     def _load_state(self):
-        """Load positions, trades, and wallet intelligence from the JSON file."""
+        """Load positions, trades, and intelligence from the JSON file."""
         if not os.path.exists(self._state_file):
             return
         try:
@@ -81,79 +82,52 @@ class Solbot:
             # Restore positions
             for mint, data in state.get("positions", {}).items():
                 if "tp_sold" in data:
-                    tp_sold = data.pop("tp_sold")
-                    if tp_sold and not data.get("tp_targets_hit"):
+                    data.pop("tp_sold")
+                    if not data.get("tp_targets_hit"):
                         data["tp_targets_hit"] = [0.0]
                 self._positions[mint] = Position(**data)
+            
+            # Restore intelligence
+            if self._filter:
+                self._filter._copy_targets = set(state.get("copy_targets", []))
+                for addr, score_data in state.get("wallet_scores", {}).items():
+                    from solbot.filters import WalletScore
+                    self._filter._wallet_scores[addr] = WalletScore(**score_data)
+            
+            # Restore Twitter handles
+            if self._twitter:
+                for handle in state.get("twitter_handles", []):
+                    self._twitter.add_handle(handle)
             
             # Restore trades
             raw_trades = state.get("trades", [])
             self._trades = [TradeResult(**t) for t in raw_trades[-100:]]
-
-            # Restore wallet intelligence
-            intel = state.get("wallet_intelligence", {})
-            for addr in intel.get("copy_targets", []):
-                self._filter._copy_targets.add(addr)
-            for addr, data in intel.get("wallet_scores", {}).items():
-                self._filter._wallet_scores[addr] = WalletScore(**data)
             
-            logger.info(f"Loaded {len(self._positions)} positions, {len(self._trades)} trades, and {len(self._filter._copy_targets)} copy targets from state")
+            logger.info(f"Loaded {len(self._positions)} positions and {len(self._filter._copy_targets)} whales")
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
 
-    async def _sync_existing_holdings(self):
-        """Detect SPL and Token-2022 tokens in wallet with metadata enrichment."""
-        logger.info("Scanning wallet for existing holdings (SPL & Token-2022)...")
-        try:
-            tokens = await self._pump_client.get_all_token_balances()
-            for mint, data in tokens.items():
-                if mint not in self._positions and data["balance"] > 0:
-                    meta = await self._pump_client.get_token_metadata(mint)
-                    symbol = meta.get("symbol", "SYNCED")
-                    mcap_sol = float(meta.get("market_cap_sol", 0))
-                    # Use telegram's cached sol price if available, else 150
-                    sol_p = self._telegram._sol_price if self._telegram else 150.0
-                    price_usd = mcap_sol * sol_p
-                    
-                    size_sol = data["balance"] * mcap_sol / 1_000_000_000 if mcap_sol > 0 else 0.0
-
-                    logger.info(f"Detected holding: {symbol} ({mint}) | Balance: {data['balance']}")
-                    pos = Position(
-                        mint=mint,
-                        symbol=symbol,
-                        entry_price=price_usd, 
-                        entry_liq=float(meta.get("liquidity_sol", 0)),
-                        creator=meta.get("creator", "unknown"),
-                        size=size_sol,
-                        active=True
-                    )
-                    pos.current_price = price_usd
-                    pos.highest_price = price_usd
-                    self._positions[mint] = pos
-            self._save_state()
-        except Exception as e:
-            logger.error(f"Failed to sync holdings: {e}")
-
     async def start(self):
         setup_logger(self._config.logging)
-        logger.info("SOLBOT DEGEN SNIPER + DEV PROTECTION STARTING")
+        logger.info("SOLBOT DEGEN SNIPER STARTING")
 
         self._wallet = Wallet(self._config.solana)
         self._filter = TokenFilter(self._config)
-
         self._pump_client = PumpFunClient(self._config, self._wallet)
         await self._pump_client.start()
-
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
-
         self._telegram = TelegramManager(self._config.telegram)
         await self._telegram.start(self)
+        
+        # Twitter Monitor Initialization
+        self._twitter = TwitterMonitor(self._config, self)
+        await self._twitter.start()
         
         self._load_state()
         await self._sync_existing_holdings()
         
-        await self._telegram.send_message("<b>Solbot Sniper (Dev Protection) started!</b>")
+        await self._telegram.send_message("<b>Solbot Sniper (Twitter Tracking) started!</b>")
 
         loop = asyncio.get_running_loop()
         self._monitor = PumpFunMonitor(self._config.pumpfun, loop)
@@ -173,50 +147,37 @@ class Solbot:
         if self._pump_client: await self._pump_client.stop()
         if self._jupiter: await self._jupiter.stop()
         if self._telegram: await self._telegram.stop()
+        if self._twitter: await self._twitter.stop()
         logger.info("Solbot stopped")
 
     async def _process_events(self):
-        """Unified event processor for Launches, Copytrades, and Dev Dumps."""
         while self._running:
             if self._paused:
                 await asyncio.sleep(1)
                 continue
             try:
                 data = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
-                
-                if data.get("txType") == "sell" or data.get("txType") == "buy":
+                if data.get("txType") in ["sell", "buy"]:
                     await self._handle_trade_event(data)
-                    continue
-
-                mint = data.get("mint")
-                if mint and "txType" not in data:
+                elif data.get("mint") and "txType" not in data:
                     token = self._parse_token_event(data)
                     qualified, size = self._filter.is_qualified(token)
                     if qualified:
                         asyncio.create_task(self._execute_snipe(token, size, "Sniper"))
-            
             except asyncio.TimeoutError:
                 continue
 
     async def _handle_trade_event(self, data: dict):
-        """Handles real-time trade events for Dev Dumps and Copytrading."""
         trader = data.get("traderPublicKey")
         mint = data.get("mint")
         tx_type = data.get("txType")
         mcap_sol = data.get("marketCapSol")
-
-        if not trader or not mint:
-            return
+        if not trader or not mint: return
 
         if mint in self._positions and mcap_sol:
-            sol_p = self._telegram._sol_price if self._telegram else 150.0
-            price_usd = float(mcap_sol) * sol_p
+            price_usd = float(mcap_sol) * self._telegram._sol_price
             pos = self._positions[mint]
             pos.current_price = price_usd
-            
-            if pos.entry_price == 0:
-                pos.entry_price = price_usd
-            
             if price_usd > pos.highest_price:
                 pos.highest_price = price_usd
                 self._save_state()
@@ -224,38 +185,30 @@ class Solbot:
         if tx_type == "sell" and mint in self._positions:
             pos = self._positions[mint]
             if trader == pos.creator:
-                logger.warning(f"⚠️ DEV DUMP DETECTED: {trader} on {pos.symbol}!")
                 asyncio.create_task(self._exit_position(pos, "DEV DUMP", 1.0))
-                return
 
         if tx_type == "buy" and self._filter.is_copy_target(trader):
             token = self._parse_token_event(data)
-            score_obj = self._filter._wallet_scores.get(trader)
-            alias = score_obj.alias if score_obj else None
-            reason = f"Copytrade [{alias or trader[:8]}]"
-            asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, reason))
+            alias = self._filter._wallet_scores.get(trader, {}).alias or trader[:8]
+            asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, f"Copytrade [{alias}]"))
 
     def _parse_token_event(self, data: dict) -> TokenEvent:
-        sol_p = self._telegram._sol_price if self._telegram else 150.0
         return TokenEvent(
             mint=data.get("mint"),
             name=data.get("name", "Unknown"),
             symbol=data.get("symbol", "???"),
             creator=data.get("traderPublicKey") or data.get("creator"),
-            market_cap_usd=float(data.get("marketCapSol", 0)) * sol_p,
+            market_cap_usd=float(data.get("marketCapSol", 0)) * self._telegram._sol_price,
             liquidity_sol=float(data.get("vSolInBondingCurve", 0)) / 1e9,
             timestamp=time(),
         )
 
     async def _execute_snipe(self, token: TokenEvent, size: float, reason: str):
-        if token.mint in self._positions:
-            return
-
+        if token.mint in self._positions: return
         priority_fee_sol = self._filter.get_dynamic_fee(token.mint) / 1_000_000_000
         result = await self._pump_client.execute_trade(
             token.mint, action="buy", amount=size, priority_fee=priority_fee_sol
         )
-        
         if result.success:
             self._trades.append(result)
             pos = Position(
@@ -267,75 +220,72 @@ class Solbot:
             pos.highest_price = token.market_cap_usd
             self._positions[token.mint] = pos
             self._save_state()
-            
             await self._telegram.send_message(f"✅ <b>BUY ({reason}): {token.symbol}</b>")
             asyncio.create_task(self._position_manager(pos))
 
     async def _position_manager(self, pos: Position):
-        """Position management task (TP/SL/Moonbag)."""
         strat = self._config.strategy
         while self._running and pos.active:
             if pos.current_price == 0:
                 await asyncio.sleep(1)
                 continue
-
             if hasattr(self._config.strategy, "mcap_tp_target_usd") and pos.current_price >= self._config.strategy.mcap_tp_target_usd:
                 await self._exit_position(pos, f"MCAP TP @ {pos.current_price:.0f}", 1.0)
                 return
-
             gain = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
             drawdown = (pos.highest_price - pos.current_price) / pos.highest_price if pos.highest_price > 0 else 0.0
-
             for tp in strat.tp_targets:
                 mult = tp["multiplier"]
                 if gain >= mult and mult not in pos.tp_targets_hit:
-                    logger.info(f"🎯 TP TARGET HIT: {pos.symbol} at {gain:.2f}x (Target: {mult}x)")
                     await self._exit_position(pos, f"TP {mult}x", tp["sell_pct"])
                     pos.tp_targets_hit.append(mult)
                     self._save_state()
-            
             if gain <= (1.0 - strat.stop_loss_pct):
-                logger.warning(f"🛑 STOP LOSS HIT: {pos.symbol} at {gain:.2f}x")
                 await self._exit_position(pos, "STOP LOSS", 1.0)
                 break
-
             if drawdown >= strat.trailing_stop_pct:
-                logger.warning(f"📉 TRAILING STOP HIT: {pos.symbol} at {drawdown*100:.1f}% drawdown")
                 await self._exit_position(pos, "TRAILING STOP", 1.0)
                 break
-
             await asyncio.sleep(5)
 
     async def _exit_position(self, pos: Position, reason: str, pct: float):
         if not pos.active: return
-        
         token_balance = await self._pump_client.get_token_balance(pos.mint)
         if token_balance <= 0:
-            logger.warning(f"No balance found for {pos.symbol}, marking as inactive.")
             pos.active = False
             if pos.mint in self._positions: del self._positions[pos.mint]
             self._save_state()
             return
-
         sell_amount = token_balance * pct
-        
-        result = await self._pump_client.execute_trade(
-            pos.mint, 
-            action="sell", 
-            amount=sell_amount,
-            denominated_in_sol=False
-        )
-        
+        result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=sell_amount, denominated_in_sol=False)
         if result.success:
             self._trades.append(result)
             if pct >= 0.99:
                 pos.active = False
                 if pos.mint in self._positions: del self._positions[pos.mint]
-            
             self._save_state()
             await self._telegram.send_message(f"🚨 <b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
-        else:
-            logger.error(f"Failed to sell {pos.symbol}: {result.error}")
+
+    async def _sync_existing_holdings(self):
+        try:
+            tokens = await self._pump_client.get_all_token_balances()
+            for mint, data in tokens.items():
+                if mint not in self._positions and data["balance"] > 0:
+                    meta = await self._pump_client.get_token_metadata(mint)
+                    symbol = meta.get("symbol", "SYNCED")
+                    price_usd = float(meta.get("market_cap_sol", 0)) * self._telegram._sol_price
+                    pos = Position(
+                        mint=mint, symbol=symbol, entry_price=price_usd,
+                        entry_liq=float(meta.get("liquidity_sol", 0)),
+                        creator=meta.get("creator", "unknown"),
+                        size=0.0, active=True
+                    )
+                    pos.current_price = price_usd
+                    pos.highest_price = price_usd
+                    self._positions[mint] = pos
+            self._save_state()
+        except Exception as e:
+            logger.error(f"Failed to sync holdings: {e}")
 
 async def run_bot():
     config = BotConfig()
