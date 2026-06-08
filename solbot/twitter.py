@@ -4,6 +4,7 @@ import asyncio
 import re
 import logging
 import time
+import os
 from typing import List, Set, Optional, Dict
 import aiohttp
 from solbot.config import BotConfig
@@ -121,6 +122,22 @@ class TwitterMonitor:
             
             if mint:
                 logger.info(f"🐦 Twitter Match (@{handle}): Found Mint {mint}")
+                # AI Filter integration
+                if self._bot._ai_enabled:
+                    token_data = {
+                        "mint": mint,
+                        "symbol": "TWEET",
+                        "name": f"Twitter: @{handle}",
+                        "creator": "twitter",
+                        "sentiment_text": text
+                    }
+                    score = await self._bot._ai_filter.score_token(token_data)
+                    logger.info(f"🤖 AI Score for {mint}: {score}")
+                    if score < self._bot._ai_min_score:
+                        logger.warning(f"❌ AI score {score} < {self._bot._ai_min_score}, skipping {mint}")
+                        await self._bot._telegram.send_message(f"🚫 <b>AI Filtered: {mint}</b> (Score: {score})")
+                        continue
+
                 # Trigger sniping logic directly
                 token = TokenEvent(
                     mint=mint,
@@ -132,5 +149,3 @@ class TwitterMonitor:
                     timestamp=time.time()
                 )
                 asyncio.create_task(self._bot._execute_snipe(token, self._config.jupiter.buy_amount_sol, f"Twitter (@{handle})"))
-
-import os
