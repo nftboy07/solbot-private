@@ -14,6 +14,7 @@ class WalletScore:
     wins: int = 0
     losses: int = 0
     score: int = 0
+    pnl: float = 0.0
     alias: Optional[str] = None
 
 class TokenFilter:
