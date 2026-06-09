@@ -1,12 +1,12 @@
-"""Pump.fun Movers Module for tracking and auto-buying trending tokens."""
+"""Pump.fun Movers Module using curl_cffi for tracking trending tokens."""
 
 import asyncio
 import logging
 import re
 from typing import List, Dict, Any, Optional
-import aiohttp
 from time import time
 from dataclasses import dataclass
+from curl_cffi.requests import AsyncSession
 
 from solbot.models import TokenEvent
 
@@ -23,23 +23,15 @@ class MoverToken:
     usd_market_cap: float
 
 class PumpMovers:
-    """Polls pump.fun trending API for high-momentum 'Movers'."""
+    """Polls pump.fun trending API for high-momentum 'Movers' using impersonated browser requests."""
 
     def __init__(self, bot: Any):
         self.bot = bot
         self._running = False
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session: Optional[AsyncSession] = None
         self._trending_url = "https://frontend-api.pump.fun/coins/trending"
         self._seen_mints: set = set()
         self._poll_interval = 30  
-        
-        # Headers to bypass Cloudflare 530/403
-        self._headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Referer": "https://pump.fun/",
-            "Origin": "https://pump.fun"
-        }
         
         # Thresholds for auto-buying movers
         self.min_market_cap_usd = 10000  
@@ -48,27 +40,28 @@ class PumpMovers:
 
     def _sanitize_proxy(self, proxy: str) -> str:
         """Hide password in proxy URL for safe logging."""
-        if not proxy: return "None"
+        if not proxy:
+            return "None"
         return re.sub(r"://.*@", "://***:***@", proxy)
 
     async def start_monitoring(self):
         self._running = True
-        logger.info("Pump.fun Movers Monitor started with updated headers.")
-        if not self._session:
-            self._session = aiohttp.ClientSession(headers=self._headers, timeout=aiohttp.ClientTimeout(total=10))
+        logger.info("Pump.fun Movers Monitor started with curl_cffi impersonation.")
         
-        while self._running:
-            try:
-                await self._poll_movers()
-            except Exception as e:
-                logger.error(f"PumpMovers error: {e}")
-            await asyncio.sleep(self._poll_interval)
+        async with AsyncSession(impersonate="chrome120") as session:
+            self._session = session
+            while self._running:
+                try:
+                    await self._poll_movers()
+                except Exception as e:
+                    logger.error(f"PumpMovers error: {e}")
+                await asyncio.sleep(self._poll_interval)
 
     async def _poll_movers(self):
         """Fetch trending coins from pump.fun and process them."""
         params = {
-            "offset": 0,
-            "limit": 20,
+            "offset": "0",
+            "limit": "20",
             "sort": "market_cap",
             "order": "DESC",
             "includeNsfw": "false"
@@ -77,12 +70,19 @@ class PumpMovers:
         proxy = self.bot._config.proxy_url if self.bot._config.proxy_url else None
         logger.debug(f"Polling Movers. Proxy: {self._sanitize_proxy(proxy)}")
         
-        async with self._session.get(self._trending_url, params=params, proxy=proxy) as resp:
-            if resp.status != 200:
-                logger.warning(f"Failed to fetch movers: HTTP {resp.status}")
+        try:
+            resp = await self._session.get(
+                self._trending_url, 
+                params=params, 
+                proxy=proxy, 
+                timeout=10
+            )
+            
+            if resp.status_code != 200:
+                logger.warning(f"Failed to fetch movers: HTTP {resp.status_code}")
                 return
             
-            movers = await resp.json()
+            movers = resp.json()
             for m in movers:
                 mint = m.get("mint")
                 if not mint or mint in self._seen_mints:
@@ -106,8 +106,9 @@ class PumpMovers:
                     
                     asyncio.create_task(self.bot._execute_snipe(token, self.bot._config.jupiter.buy_amount_sol, "Pump Mover"))
                     self._seen_mints.add(mint)
+        except Exception as e:
+            logger.error(f"Movers polling exception: {e}")
 
     async def stop(self):
         self._running = False
-        if self._session:
-            await self._session.close()
+        logger.info("Pump.fun Movers Monitor stopped.")
