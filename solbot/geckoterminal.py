@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger("bot.gecko")
 
 class GeckoTerminalClient:
-    \"\"\"GeckoTerminal API Client for Solana Token Data.\"\"\"
+    """GeckoTerminal API Client for Solana Token Data."""
     
     BASE_URL = "https://api.geckoterminal.com/api/v2"
     
@@ -28,7 +28,7 @@ class GeckoTerminalClient:
             await self._session.close()
 
     async def get_token_info(self, mint: str) -> Optional[Dict[str, Any]]:
-        \"\"\"Fetch token info for a Solana mint address.\"\"\"
+        """Fetch token info for a Solana mint address."""
         if not self._session: await self.start()
         
         # Endpoint for specific token on Solana
@@ -48,7 +48,7 @@ class GeckoTerminalClient:
         return None
 
     async def evaluate_safety(self, mint: str, min_liq_usd: float = 5000) -> bool:
-        \"\"\"Check if token has enough liquidity to be safe for trading.\"\"\"
+        """Check if token has enough liquidity to be safe for trading."""
         info = await self.get_token_info(mint)
         if not info:
             # If not found on GeckoTerminal yet, it's either brand new or a scam

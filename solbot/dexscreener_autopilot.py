@@ -6,7 +6,7 @@ from solbot.models import TokenEvent
 logger = get_logger("dex_autopilot")
 
 class DexScreenerAutopilot:
-    \"\"\"Autopilot for sniping DexScreener breakouts.\"\"\"
+    """Autopilot for sniping DexScreener breakouts."""
     def __init__(self, bot):
         self._bot = bot
         self._trending_url = "https://api.dexscreener.com/token-profiles/latest/v1"
