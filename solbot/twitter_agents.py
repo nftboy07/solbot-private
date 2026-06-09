@@ -10,7 +10,7 @@ from solbot.models import TokenEvent
 logger = logging.getLogger("bot.twitter_agents")
 
 class TwitterAgentMonitor:
-    \"\"\"Monitors Top AI Trading Agents for Alpha using SocialData API.\"\"\"
+    """Monitors Top AI Trading Agents for Alpha using SocialData API."""
 
     def __init__(self, bot_instance, api_key: Optional[str] = None):
         self._bot = bot_instance
