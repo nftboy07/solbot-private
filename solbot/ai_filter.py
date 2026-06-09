@@ -118,7 +118,7 @@ class AIFilter:
         Score a token (0-100) based on metadata and sentiment.
         Attempts NVIDIA/BluesMinds/MiniMax first, then falls back to Amazon Bedrock.
         """
-        prompt = r\"\"\"
+        prompt = f\"\"\"
         Analyze this Solana token for safety. Look for rugpull risks or supply splits.
         - Mint: {token_data.get('mint')}
         - Symbol: {token_data.get('symbol')}
