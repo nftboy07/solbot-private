@@ -29,6 +29,7 @@ from solbot.kol_tracker import KOLTracker
 from solbot.pump_movers import PumpMovers
 from solbot.geckoterminal import GeckoTerminalClient
 from solbot.twitter_agents import TwitterAgentMonitor
+from solbot.telegram_scraper import TelegramScraper
 
 logger = get_logger("bot")
 
@@ -77,6 +78,7 @@ class Solbot:
         self._pump_movers = PumpMovers(self)
         self._gecko = GeckoTerminalClient()
         self._agent_monitor = TwitterAgentMonitor(self)
+        self._telegram_scraper = TelegramScraper(self._config.telegram, self)
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -197,6 +199,9 @@ class Solbot:
 
         # Pump.fun Movers Monitor
         asyncio.create_task(self._pump_movers.start_monitoring())
+        
+        # Telegram Scraper Monitor
+        asyncio.create_task(self._telegram_scraper.start_monitoring())
 
         self._running = True
         asyncio.create_task(self._process_events())
@@ -220,6 +225,7 @@ class Solbot:
         if self._monitor_scraper: await self._monitor_scraper.stop()
         if self._tungscreener: await self._tungscreener.stop()
         if self._pump_movers: await self._pump_movers.stop()
+        if self._telegram_scraper: await self._telegram_scraper.stop()
         logger.info("Solbot stopped")
 
     def is_blacklisted(self, address: str) -> bool:

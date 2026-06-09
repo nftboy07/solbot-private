@@ -67,6 +67,8 @@ class DynamicFeeConfig:
 class TelegramConfig:
     token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", ""))
     chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
+    api_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_API_ID", ""))
+    api_hash: str = field(default_factory=lambda: os.getenv("TELEGRAM_API_HASH", ""))
 
 
 @dataclass(frozen=True)
