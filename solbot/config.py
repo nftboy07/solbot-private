@@ -84,6 +84,10 @@ class AIConfig:
     nvidia_model: str = field(default_factory=lambda: os.getenv("NVIDIA_MODEL", "meta/llama-3.1-405b-instruct"))
     bluesminds_api_key: str = field(default_factory=lambda: os.getenv("BLUESMINDS_API_KEY", ""))
     minimax_api_key: str = field(default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""))
+    # AWS Bedrock config
+    aws_bearer_token_bedrock: str = field(default_factory=lambda: os.getenv("AWS_BEARER_TOKEN_BEDROCK", ""))
+    aws_region: str = field(default_factory=lambda: os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "ap-south-1")))
+    bedrock_model_id: str = field(default_factory=lambda: os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0"))
 
 
 @dataclass(frozen=True)

@@ -45,29 +45,58 @@ class AIFilter:
     async def _score_with_bedrock(self, prompt: str) -> Optional[int]:
         """
         Fallback scoring using Amazon Bedrock Runtime.
-        Uses asyncio.to_thread to keep the event loop non-blocking.
+        Supports AWS Bearer Token via direct HTTP request if configured,
+        otherwise uses standard boto3 SigV4.
         """
+        bearer_token = self._config.ai.aws_bearer_token_bedrock
+        region = self._config.ai.aws_region
+        model_id = self._config.ai.bedrock_model_id
+
+        payload = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1
+        }
+
+        # Use Bearer Token if available (Direct HTTP)
+        if bearer_token:
+            logger.info("Using AWS Bearer Token for Bedrock.")
+            url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_id}/invoke"
+            headers = {
+                "Authorization": f"Bearer {bearer_token}",
+                "Content-Type": "application/json",
+                "X-Amzn-Bedrock-Accept": "application/json"
+            }
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=payload, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            content = data["content"][0]["text"]
+                            match = re.search(r"\d+", content)
+                            return int(match.group()) if match else None
+                        else:
+                            error_text = await resp.text()
+                            logger.error(f"Bedrock Bearer Token error: {resp.status} - {error_text}")
+                            return None
+            except Exception as e:
+                logger.error(f"Bedrock HTTP call failed: {e}")
+                return None
+
+        # Standard boto3 SigV4 Fallback
         try:
             import boto3
             from botocore.config import Config
         except ImportError:
-            logger.error("boto3 not installed. Cannot use Bedrock fallback.")
+            logger.error("boto3 not installed and no Bearer Token provided.")
             return None
 
         def _invoke():
-            region = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION") or "ap-south-1"
-            model_id = os.getenv("BEDROCK_MODEL_ID") or "anthropic.claude-3-5-sonnet-20241022-v2:0"
-            
             config = Config(region_name=region)
             client = boto3.client("bedrock-runtime", config=config)
             
-            body = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 10,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1
-            })
-            
+            body = json.dumps(payload)
             response = client.invoke_model(
                 modelId=model_id,
                 body=body
@@ -81,7 +110,7 @@ class AIFilter:
             match = re.search(r"\d+", content)
             return int(match.group()) if match else None
         except Exception as e:
-            logger.error(f"Bedrock scoring failed: {e}")
+            logger.error(f"Bedrock SigV4 scoring failed: {e}")
             return None
 
     async def score_token(self, token_data: Dict) -> int:
@@ -89,7 +118,7 @@ class AIFilter:
         Score a token (0-100) based on metadata and sentiment.
         Attempts NVIDIA/BluesMinds/MiniMax first, then falls back to Amazon Bedrock.
         """
-        prompt = f"""
+        prompt = f\"\"\"
         Analyze this Solana token for safety. Look for rugpull risks or supply splits.
         - Mint: {token_data.get('mint')}
         - Symbol: {token_data.get('symbol')}
@@ -103,7 +132,7 @@ class AIFilter:
         0-30: High risk/Rug
         31-70: Medium risk/Neutral
         71-100: Safe/Low risk
-        """
+        \"\"\"
 
         if self._api_key:
             try:
