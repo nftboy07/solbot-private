@@ -62,6 +62,7 @@ class Solbot:
         self._state_file = "data/state.json"
         self._ai_enabled = True
         self._ai_min_score = 75
+        self._autobuy_enabled = False
         self._ai_filter = AIFilter()
         self._go_monitor = None
         self._raydium = None
@@ -83,6 +84,7 @@ class Solbot:
                 "twitter_handles": list(self._twitter._handles) if self._twitter else [],
                 "ai_enabled": self._ai_enabled,
                 "ai_min_score": self._ai_min_score,
+                "autobuy_enabled": self._autobuy_enabled,
                 "blacklisted_wallets": list(self._blacklisted_wallets)
             }
             with open(self._state_file, "w") as f:
@@ -134,6 +136,7 @@ class Solbot:
             # Restore AI settings
             self._ai_enabled = state.get("ai_enabled", True)
             self._ai_min_score = state.get("ai_min_score", 75)
+            self._autobuy_enabled = state.get("autobuy_enabled", False)
             
             # Restore Blacklist
             self._blacklisted_wallets = set(state.get("blacklisted_wallets", []))
@@ -226,6 +229,11 @@ class Solbot:
 
                     qualified, size = self._filter.is_qualified(token)
                     if qualified:
+                        # On-chain Supply/Bubble Check
+                        if not await self._filter.check_supply_bubbles(token.mint, self._pump_client._async_client):
+                            logger.warning(f"SKIPPING {token.symbol}: Insider cluster detected (Supply Check Failed)")
+                            continue
+
                         if self._ai_enabled:
                             token_data = {
                                 'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator
@@ -234,7 +242,12 @@ class Solbot:
                             if score < self._ai_min_score:
                                 logger.warning(f"AI score {score} < {self._ai_min_score}, skipping {token.symbol}")
                                 continue
-                        asyncio.create_task(self._execute_snipe(token, size, "Sniper"))
+                        
+                        if self._autobuy_enabled:
+                            asyncio.create_task(self._execute_snipe(token, size, "Sniper (Auto)"))
+                        else:
+                            await self._telegram.send_message(f"🔔 <b>Qualified Token:</b> {token.symbol}\nMint: <code>{token.mint}</code>\nCreator: <code>{token.creator}</code>\n\n(Auto-buy is OFF)")
+                            
             except asyncio.TimeoutError:
                 continue
 
