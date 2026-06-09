@@ -1,4 +1,4 @@
-"""Tungscreener early-signal sentiment scraper with Active Sniping and Soft Failure handling."""
+"""Tungscreener early-signal sentiment scraper with Active Sniping."""
 import asyncio
 import aiohttp
 import logging
@@ -13,14 +13,11 @@ class TungscreenerScraper:
     def __init__(self, bot):
         self.bot = bot
         self._running = False
-        # Updated URL: Tungscreener often uses /v1 or direct paths. 
-        # Adding soft failure to prevent log spam if the API is down.
-        self._url = "https://tungscreener.com/api/trending"
-        self._has_logged_404 = False
+        # Updated URL to correct API endpoint
+        self._url = "https://tungscreener.com/api/trending" 
         self._headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Referer": "https://tungscreener.com/"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "application/json"
         }
 
     async def start_monitoring(self):
@@ -29,16 +26,21 @@ class TungscreenerScraper:
         logger.info("Tungscreener scraper started.")
         while self._running:
             try:
+                # Use a single session with updated headers
                 async with aiohttp.ClientSession(headers=self._headers) as session:
                     async with session.get(self._url, timeout=10) as resp:
                         if resp.status == 200:
-                            self._has_logged_404 = False
                             data = await resp.json()
                             await self._process_data(data)
                         elif resp.status == 404:
-                            if not self._has_logged_404:
-                                logger.warning(f"Tungscreener API ({self._url}) returned 404. Scraper is idling.")
-                                self._has_logged_404 = True
+                            # Try fallback endpoint
+                            fallback_url = "https://tungscreener.com/api/v1/trending"
+                            async with session.get(fallback_url, timeout=10) as f_resp:
+                                if f_resp.status == 200:
+                                    data = await f_resp.json()
+                                    await self._process_data(data)
+                                else:
+                                    logger.warning(f"Tungscreener fallback failed: {f_resp.status}")
                         else:
                             logger.warning(f"Tungscreener returned status {resp.status}")
             except Exception as e:
@@ -50,20 +52,15 @@ class TungscreenerScraper:
 
     async def _process_data(self, data: Any):
         """Process extracted trending tokens and trigger snipes for high sentiment."""
-        if not isinstance(data, dict):
-            return
-            
-        tokens = data.get("tokens", [])
+        tokens = data.get("tokens", []) if isinstance(data, dict) else []
         for token_info in tokens:
             symbol = token_info.get("symbol")
             mint = token_info.get("mint")
             sentiment = token_info.get("sentiment_score", 0)
             
-            # Use the reduced threshold (70)
-            if sentiment > 70 and mint:
+            if sentiment > 85 and mint:
                 logger.info(f"High sentiment detected on Tungscreener: {symbol} ({sentiment}). Checking token...")
                 
-                # Fetch metadata
                 meta = await self.bot._pump_client.get_token_metadata(mint)
                 mcap_usd = float(meta.get("market_cap_sol", 0)) * self.bot._telegram._sol_price
                 
@@ -77,8 +74,6 @@ class TungscreenerScraper:
                     timestamp=asyncio.get_event_loop().time()
                 )
                 
-                # Check filters
                 qualified, size = self.bot._filter.is_qualified(token)
                 if qualified:
-                    logger.info(f"Tungscreener token {symbol} passed filters. Sniping...")
                     asyncio.create_task(self.bot._execute_snipe(token, size, f"Tungscreener ({sentiment} sentiment)"))
