@@ -68,7 +68,9 @@ class PumpMovers:
             "includeNsfw": "false"
         }
         
-        async with self._session.get(self._trending_url, params=params) as resp:
+        proxy = self.bot._config.proxy_url if self.bot._config.proxy_url else None
+        
+        async with self._session.get(self._trending_url, params=params, proxy=proxy) as resp:
             if resp.status != 200:
                 logger.warning(f"Failed to fetch movers: HTTP {resp.status}")
                 return
