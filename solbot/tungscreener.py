@@ -46,7 +46,7 @@ class TungscreenerScraper:
             mint = token_info.get("mint")
             sentiment = token_info.get("sentiment_score", 0)
             
-            if sentiment > 85 and mint:
+            if sentiment > 70 and mint:
                 logger.info(f"High sentiment detected on Tungscreener: {symbol} ({sentiment}). Checking token...")
                 
                 # Fetch metadata
