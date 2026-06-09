@@ -67,7 +67,9 @@ class GoMonitor:
             "order": "desc"
         }
         
-        async with self._session.get(self._api_url, params=params, timeout=10) as response:
+        proxy = self._bot._config.proxy_url if self._bot._config.proxy_url else None
+        
+        async with self._session.get(self._api_url, params=params, timeout=10, proxy=proxy) as response:
             if response.status != 200:
                 # Handle ANY HTTP error (530, 403, 404, etc.) as a permanent failure for this session
                 self._has_failed = True
