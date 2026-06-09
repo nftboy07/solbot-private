@@ -8,7 +8,7 @@ class KOLTracker:
         self.active_buys = {}  # {token_address: set(kol_addresses)}
         self.telegram_client = telegram_client
         self.logger = logging.getLogger("KOLTracker")
-        self.threshold = 5
+        self.threshold = 2
 
     def add_wallet(self, address: str, name: str):
         self.wallets[address] = name
