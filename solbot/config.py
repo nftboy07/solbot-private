@@ -84,6 +84,7 @@ class BotConfig:
     fee: DynamicFeeConfig = field(default_factory=DynamicFeeConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     logging: LogConfig = field(default_factory=LogConfig)
+    proxy_url: str = field(default_factory=lambda: os.getenv("PROXY_URL", ""))
 
     def validate(self) -> list[str]:
         errors = []
