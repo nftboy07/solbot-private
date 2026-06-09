@@ -30,18 +30,26 @@ class PumpMovers:
         self._session: Optional[aiohttp.ClientSession] = None
         self._trending_url = "https://frontend-api.pump.fun/coins/trending"
         self._seen_mints: set = set()
-        self._poll_interval = 30  # Poll every 30 seconds
+        self._poll_interval = 30  
+        
+        # Headers to bypass Cloudflare 530/403
+        self._headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": "https://pump.fun/",
+            "Origin": "https://pump.fun"
+        }
         
         # Thresholds for auto-buying movers
-        self.min_market_cap_usd = 10000  # Only buy if mcap > 10k
-        self.max_market_cap_usd = 500000 # Only buy if mcap < 500k
-        self.min_replies = 5            # Basic social activity check
+        self.min_market_cap_usd = 10000  
+        self.max_market_cap_usd = 500000 
+        self.min_replies = 5            
 
     async def start_monitoring(self):
         self._running = True
-        logger.info("Pump.fun Movers Monitor started.")
+        logger.info("Pump.fun Movers Monitor started with updated headers.")
         if not self._session:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+            self._session = aiohttp.ClientSession(headers=self._headers, timeout=aiohttp.ClientTimeout(total=10))
         
         while self._running:
             try:
@@ -82,18 +90,15 @@ class PumpMovers:
                 if self.min_market_cap_usd <= mcap <= self.max_market_cap_usd and replies >= self.min_replies:
                     logger.info(f"Detected Pump Mover: {m.get('symbol')} ({mint}) | Mcap: ${mcap:,.0f} | Replies: {replies}")
                     
-                    # Convert to TokenEvent for the bot
                     token = TokenEvent(
                         mint=mint,
                         name=m.get("name", "Unknown"),
                         symbol=m.get("symbol", "???"),
                         creator=m.get("creator", ""),
                         market_cap_usd=mcap,
-                        liquidity_sol=0.0, # Trending API doesn't always provide raw liquidity
+                        liquidity_sol=0.0, 
                         timestamp=time()
                     )
                     
-                    # Execute snipe if qualified by bot's main loop checks
-                    # We pass 'Mover' as the reason
                     asyncio.create_task(self.bot._execute_snipe(token, self.bot._config.jupiter.buy_amount_sol, "Pump Mover"))
                     self._seen_mints.add(mint)
