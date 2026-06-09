@@ -58,11 +58,6 @@ class PumpMovers:
                 logger.error(f"PumpMovers error: {e}")
             await asyncio.sleep(self._poll_interval)
 
-    async def stop(self):
-        self._running = False
-        if self._session:
-            await self._session.close()
-
     async def _poll_movers(self):
         """Fetch trending coins from pump.fun and process them."""
         params = {
@@ -102,3 +97,8 @@ class PumpMovers:
                     
                     asyncio.create_task(self.bot._execute_snipe(token, self.bot._config.jupiter.buy_amount_sol, "Pump Mover"))
                     self._seen_mints.add(mint)
+
+    async def stop(self):
+        self._running = False
+        if self._session:
+            await self._session.close()
