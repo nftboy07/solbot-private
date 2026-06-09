@@ -63,6 +63,7 @@ class Solbot:
         self._state_file = "data/state.json"
         self._ai_enabled = True
         self._ai_min_score = 75
+        self._autobuy_enabled = False # Fixed: Initialized missing attribute
         self._ai_filter = AIFilter()
         self._go_monitor = None
         self._raydium = None
@@ -85,6 +86,7 @@ class Solbot:
                 "twitter_handles": list(self._twitter._handles) if self._twitter else [],
                 "ai_enabled": self._ai_enabled,
                 "ai_min_score": self._ai_min_score,
+                "autobuy_enabled": self._autobuy_enabled, # Fixed: Included in state save
                 "blacklisted_wallets": list(self._blacklisted_wallets)
             }
             with open(self._state_file, "w") as f:
@@ -136,6 +138,7 @@ class Solbot:
             # Restore AI settings
             self._ai_enabled = state.get("ai_enabled", True)
             self._ai_min_score = state.get("ai_min_score", 75)
+            self._autobuy_enabled = state.get("autobuy_enabled", False) # Fixed: Restore attribute
             
             # Restore Blacklist
             self._blacklisted_wallets = set(state.get("blacklisted_wallets", []))
@@ -240,7 +243,13 @@ class Solbot:
                             if score < self._ai_min_score:
                                 logger.warning(f"AI score {score} < {self._ai_min_score}, skipping {token.symbol}")
                                 continue
-                        asyncio.create_task(self._execute_snipe(token, size, "Sniper"))
+                        
+                        # Snipe only if autobuy is enabled
+                        if self._autobuy_enabled:
+                             asyncio.create_task(self._execute_snipe(token, size, "Sniper"))
+                        else:
+                             await self._telegram.send_message(f"🔔 <b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>")
+                             
             except asyncio.TimeoutError:
                 continue
 
