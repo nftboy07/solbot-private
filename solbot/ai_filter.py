@@ -1,4 +1,4 @@
-"""AI-powered token safety filter using MiniMax M3."""
+"""AI-powered token safety filter using BluesMinds AI or MiniMax."""
 
 import aiohttp
 import json
@@ -9,12 +9,20 @@ from typing import Dict, Optional
 logger = logging.getLogger("bot.ai_filter")
 
 class AIFilter:
-    """AI-powered token safety filter using MiniMax M3."""
+    """AI-powered token safety filter using BluesMinds (OpenAI-compatible) or MiniMax."""
 
     def __init__(self, api_key: Optional[str] = None):
-        self._api_key = api_key or os.getenv("MINIMAX_API_KEY")
-        self._base_url = "https://api.minimax.io/v1/chat/completions"
-        self._model = "minimax-m3"
+        # Prefer BluesMinds for $100 free credits, fallback to MiniMax
+        self._api_key = os.getenv("BLUESMINDS_API_KEY") or api_key or os.getenv("MINIMAX_API_KEY")
+        
+        if os.getenv("BLUESMINDS_API_KEY"):
+            self._base_url = "https://api.bluesminds.com/v1/chat/completions"
+            self._model = "gpt-4-turbo" # Or any available BluesMinds model
+            logger.info("Using BluesMinds AI Platform.")
+        else:
+            self._base_url = "https://api.minimax.io/v1/chat/completions"
+            self._model = "minimax-m3"
+            logger.info("Using MiniMax AI (Fallback).")
 
     async def score_token(self, token_data: Dict) -> int:
         """
@@ -22,7 +30,7 @@ class AIFilter:
         Higher score = Safer.
         """
         if not self._api_key:
-            logger.warning("MiniMax API key missing, skipping AI filter.")
+            logger.warning("AI API key missing, skipping AI filter.")
             return 100
 
         # Enhanced prompt for better "non-degen" filtering
@@ -62,7 +70,7 @@ class AIFilter:
                         match = re.search(r'\d+', content)
                         return int(match.group()) if match else 50
                     else:
-                        logger.error(f"MiniMax API error: {resp.status} - {await resp.text()}")
+                        logger.error(f"AI API error: {resp.status} - {await resp.text()}")
         except Exception as e:
             logger.error(f"AI scoring failed: {e}")
         
