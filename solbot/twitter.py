@@ -27,8 +27,9 @@ class TwitterMonitor:
         self._mint_regex = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
         self._pump_regex = re.compile(r"pump\.fun/coin/([1-9A-HJ-NP-Za-km-z]{32,44})")
         
-        # API Config (Fallback to SocialData format or similar if key present)
-        self._api_key = os.getenv("TWITTER_API_KEY")
+        # API Config
+        self._api_key = os.getenv("TWITTER_API_KEY") or os.getenv("SOCIALDATA_API_KEY")
+        # Mode is 'api' if we have a key, otherwise we fallback to a scraper mode
         self._mode = "api" if self._api_key else "scraper"
 
     async def start(self):
@@ -73,19 +74,24 @@ class TwitterMonitor:
             await asyncio.sleep(15)
 
     async def _fetch_tweets(self, handle: str) -> List[Dict]:
-        """Fetch tweets using either API or lightweight scraping fallback."""
+        """Fetch tweets using SocialData API or SocialData-compatible provider."""
         if self._mode == "api":
-            # Example implementation for SocialData/Apify-like API
+            # Using SocialData API endpoint for user tweets
             url = f"https://api.socialdata.tools/twitter/user/{handle}/tweets"
-            headers = {"Authorization": f"Bearer {self._api_key}"}
-            async with self._session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("tweets", [])
+            headers = {"Authorization": f"Bearer {self._api_key}", "Accept": "application/json"}
+            try:
+                async with self._session.get(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("tweets", [])
+                    else:
+                        logger.error(f"Twitter API error for @{handle}: {resp.status}")
+                        return []
+            except Exception as e:
+                logger.error(f"Failed to fetch tweets for @{handle}: {e}")
                 return []
         else:
-            # Scraper Fallback (Pseudo-code: in production use a robust guest-token logic)
-            # This is a simplified placeholder for the logic
+            # Placeholder for alternative scraper integration (e.g. BluesMinds or Apify)
             return []
 
     async def _process_tweets(self, handle: str, tweets: List[Dict]):
