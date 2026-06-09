@@ -138,6 +138,7 @@ class TelegramManager:
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             elif cmd == "/exitall": await self._cmd_exitall(bot)
             elif cmd == "/aitoggle": await self._cmd_aitoggle(bot)
+            elif cmd == "/autobuy": await self._cmd_autobuy(bot)
             elif cmd == "/aiscore": await self._cmd_aiscore(args, bot)
         except Exception as e:
             logger.error(f"Error executing command '{text}': {type(e).__name__}: {e}")
@@ -160,6 +161,7 @@ class TelegramManager:
             "/resume - Resume sniper\n"
             "/reload - Restart process\n"
             "/exitall - Liquidate everything\n"
+            "/autobuy - Toggle auto-buy mode\n"
             "/aitoggle - Toggle AI filter\n"
             "/aiscore <value> - Set min AI score"
         )
@@ -168,10 +170,12 @@ class TelegramManager:
     async def _cmd_status(self, bot: Any):
         state = "PAUSED" if bot._paused else "ACTIVE"
         ai_state = "ENABLED" if bot._ai_enabled else "DISABLED"
+        autobuy_state = "ON" if bot._autobuy_enabled else "OFF"
         tracked_wallets = len(bot._filter._copy_targets) if bot._filter else 0
         msg = (
             f"<b>📊 Solbot Status</b>\n"
             f"State: {state}\n"
+            f"Auto-buy: {autobuy_state}\n"
             f"AI Filter: {ai_state} (Min: {bot._ai_min_score})\n"
             f"Positions: {len(bot._positions)}\n"
             f"Tracked KOLs: {len(bot._kol_tracker.wallets)}\n"
@@ -321,6 +325,12 @@ class TelegramManager:
         bot._save_state()
         state = "ENABLED" if bot._ai_enabled else "DISABLED"
         await self.send_message(f"🤖 AI Filter: {state}")
+
+    async def _cmd_autobuy(self, bot: Any):
+        bot._autobuy_enabled = not bot._autobuy_enabled
+        bot._save_state()
+        state = "ON" if bot._autobuy_enabled else "OFF"
+        await self.send_message(f"🛍 Auto-buy mode: {state}")
 
     async def _cmd_aiscore(self, args: list, bot: Any):
         if len(args) < 2: return
