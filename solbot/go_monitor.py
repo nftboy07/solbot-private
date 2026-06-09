@@ -1,4 +1,4 @@
-"""Asynchronous monitor for Pump.fun GO bounties with Cloudflare and 404 Resiliency."""
+"""Asynchronous monitor for Pump.fun GO bounties with Updated API Endpoints and anti-spam protection."""
 
 import asyncio
 import aiohttp
@@ -15,32 +15,42 @@ class GoMonitor:
         self._bot = bot
         self._reward_threshold = reward_threshold  # in SOL
         self._poll_interval = poll_interval
-        # Fallback to frontend-api if livestream returns 404, or use direct frontend scrape
+        # Using frontend-api which is the standard endpoint for Go Bounties
         self._api_url = "https://frontend-api.pump.fun/go/bounties"
         self._seen_bounties: Set[str] = set()
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
-        self._has_logged_404 = False
-
-        self._headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Referer": "https://pump.fun/go",
-            "Origin": "https://pump.fun"
-        }
+        self._has_failed = False  # Track failure to stop log spam
 
     async def start_monitoring(self):
         """Main loop for tracking new bounties."""
         self._running = True
         logger.info(f"Starting Pump.fun GO Monitor (Threshold: {self._reward_threshold} SOL)")
         
-        async with aiohttp.ClientSession(headers=self._headers) as session:
+        # Standard browser headers to try and bypass simple Cloudflare blocks
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": "https://pump.fun/go",
+            "Origin": "https://pump.fun"
+        }
+        
+        async with aiohttp.ClientSession(headers=headers) as session:
             self._session = session
             while self._running:
+                if self._has_failed:
+                    # If it failed once, we idle to prevent log spam
+                    await asyncio.sleep(3600)
+                    continue
+
                 try:
                     await self._poll_bounties()
                 except Exception as e:
-                    logger.error(f"Error in GO monitor loop: {e}")
+                    logger.error(f"Unexpected error in GO monitor loop: {e}")
+                    # If it's a connection error or similar, we also treat it as a failure state
+                    self._has_failed = True
+                    logger.warning("Pump.fun GO Monitor entering idle state due to connection error.")
+                
                 await asyncio.sleep(self._poll_interval)
 
     async def stop(self):
@@ -57,32 +67,23 @@ class GoMonitor:
             "order": "desc"
         }
         
-        try:
-            async with self._session.get(self._api_url, params=params, timeout=10) as response:
-                if response.status == 404:
-                    if not self._has_logged_404:
-                        logger.warning(f"Pump.fun GO Bounty endpoint ({self._api_url}) returned 404. It may have been moved or disabled. Monitor is idling.")
-                        self._has_logged_404 = True
-                    return
-                
-                if response.status != 200:
-                    logger.error(f"Failed to fetch bounties: HTTP {response.status}")
-                    return
-                
-                # Reset 404 flag if we get a successful response
-                self._has_logged_404 = False
-                
-                data = await response.json()
-                if not isinstance(data, list):
-                    logger.error("Bounty API returned unexpected format")
-                    return
+        async with self._session.get(self._api_url, params=params, timeout=10) as response:
+            if response.status != 200:
+                # Handle ANY HTTP error (530, 403, 404, etc.) as a permanent failure for this session
+                self._has_failed = True
+                logger.warning(
+                    f"Pump.fun GO Monitor disabled: Endpoint returned HTTP {response.status} "
+                    "(likely Cloudflare blocking AWS Lightsail IP). Monitor will now idle."
+                )
+                return
+            
+            data = await response.json()
+            if not isinstance(data, list):
+                logger.error("Bounty API returned unexpected format")
+                return
 
-                for bounty in data:
-                    await self._process_bounty(bounty)
-        except aiohttp.ClientConnectorError:
-            logger.error("Connection error to Pump.fun GO API. Check internet/DNS.")
-        except Exception as e:
-            logger.error(f"Unexpected error polling bounties: {e}")
+            for bounty in data:
+                await self._process_bounty(bounty)
 
     async def _process_bounty(self, bounty: Dict[str, Any]):
         """Evaluate a single bounty and trigger sniping if it passes filters."""
