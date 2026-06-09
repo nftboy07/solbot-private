@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from typing import List, Dict, Any, Optional
 import aiohttp
 from time import time
@@ -45,6 +46,11 @@ class PumpMovers:
         self.max_market_cap_usd = 500000 
         self.min_replies = 5            
 
+    def _sanitize_proxy(self, proxy: str) -> str:
+        """Hide password in proxy URL for safe logging."""
+        if not proxy: return "None"
+        return re.sub(r"://.*@", "://***:***@", proxy)
+
     async def start_monitoring(self):
         self._running = True
         logger.info("Pump.fun Movers Monitor started with updated headers.")
@@ -69,6 +75,7 @@ class PumpMovers:
         }
         
         proxy = self.bot._config.proxy_url if self.bot._config.proxy_url else None
+        logger.debug(f"Polling Movers. Proxy: {self._sanitize_proxy(proxy)}")
         
         async with self._session.get(self._trending_url, params=params, proxy=proxy) as resp:
             if resp.status != 200:

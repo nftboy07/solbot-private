@@ -2,6 +2,7 @@
 
 import asyncio
 import aiohttp
+import re
 from typing import Set, List, Dict, Any, Optional
 from solbot.logger import get_logger
 from solbot.models import TokenEvent
@@ -21,6 +22,11 @@ class GoMonitor:
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
         self._has_failed = False  # Track failure to stop log spam
+
+    def _sanitize_proxy(self, proxy: str) -> str:
+        """Hide password in proxy URL for safe logging."""
+        if not proxy: return "None"
+        return re.sub(r"://.*@", "://***:***@", proxy)
 
     async def start_monitoring(self):
         """Main loop for tracking new bounties."""
@@ -68,6 +74,7 @@ class GoMonitor:
         }
         
         proxy = self._bot._config.proxy_url if self._bot._config.proxy_url else None
+        logger.debug(f"Polling GO bounties. Proxy: {self._sanitize_proxy(proxy)}")
         
         async with self._session.get(self._api_url, params=params, timeout=10, proxy=proxy) as response:
             if response.status != 200:
