@@ -17,6 +17,11 @@ class GoMonitor:
         self._poll_interval = poll_interval
         # Updated to use livestream API to bypass Cloudflare 530 issues on frontend API
         self._api_url = "https://livestream-api.pump.fun/go/bounties"
+        self._headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": "https://pump.fun/"
+        }
         self._seen_bounties: Set[str] = set()
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
@@ -26,7 +31,7 @@ class GoMonitor:
         self._running = True
         logger.info(f"Starting Pump.fun GO Monitor (Threshold: {self._reward_threshold} SOL)")
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=self._headers) as session:
             self._session = session
             while self._running:
                 try:
