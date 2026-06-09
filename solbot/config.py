@@ -78,6 +78,15 @@ class LogConfig:
 
 
 @dataclass(frozen=True)
+class AIConfig:
+    nvidia_api_key: str = field(default_factory=lambda: os.getenv("NVIDIA_API_KEY", ""))
+    nvidia_api_url: str = field(default_factory=lambda: os.getenv("NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1/chat/completions"))
+    nvidia_model: str = field(default_factory=lambda: os.getenv("NVIDIA_MODEL", "meta/llama-3.1-405b-instruct"))
+    bluesminds_api_key: str = field(default_factory=lambda: os.getenv("BLUESMINDS_API_KEY", ""))
+    minimax_api_key: str = field(default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""))
+
+
+@dataclass(frozen=True)
 class BotConfig:
     solana: SolanaConfig = field(default_factory=SolanaConfig)
     pumpfun: PumpFunConfig = field(default_factory=PumpFunConfig)
@@ -86,6 +95,7 @@ class BotConfig:
     fee: DynamicFeeConfig = field(default_factory=DynamicFeeConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     logging: LogConfig = field(default_factory=LogConfig)
+    ai: AIConfig = field(default_factory=AIConfig)
     proxy_url: str = field(default_factory=lambda: os.getenv("PROXY_URL", ""))
 
     def validate(self) -> list[str]:

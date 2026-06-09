@@ -1,4 +1,4 @@
-"""AI-powered token safety filter using BluesMinds AI, MiniMax, or Amazon Bedrock."""
+"""AI-powered token safety filter with NVIDIA NIM, BluesMinds AI, MiniMax, or Amazon Bedrock."""
 
 import aiohttp
 import asyncio
@@ -8,25 +8,38 @@ import os
 import re
 from typing import Dict, Optional
 
+from solbot.config import BotConfig
+
 logger = logging.getLogger("bot.ai_filter")
 
 class AIFilter:
     """AI-powered token safety filter with fallbacks."""
 
-    def __init__(self, api_key: Optional[str] = None):
-        # API Keys for primary/secondary providers
-        self._api_key = os.getenv("BLUESMINDS_API_KEY") or api_key or os.getenv("MINIMAX_API_KEY")
-        
-        if os.getenv("BLUESMINDS_API_KEY"):
+    def __init__(self, config: Optional[BotConfig] = None):
+        self._config = config or BotConfig()
+        self._api_key = None
+        self._base_url = None
+        self._model = None
+
+        # Prioritize NVIDIA NIM
+        if self._config.ai.nvidia_api_key:
+            self._api_key = self._config.ai.nvidia_api_key
+            self._base_url = self._config.ai.nvidia_api_url
+            self._model = self._config.ai.nvidia_model
+            logger.info(f"Using NVIDIA NIM API (Primary): {self._model}")
+        # Fallback to BluesMinds
+        elif self._config.ai.bluesminds_api_key:
+            self._api_key = self._config.ai.bluesminds_api_key
             self._base_url = "https://api.bluesminds.com/v1/chat/completions"
             self._model = "gpt-4-turbo"
             logger.info("Using BluesMinds AI Platform.")
-        elif os.getenv("MINIMAX_API_KEY") or api_key:
+        # Fallback to MiniMax
+        elif self._config.ai.minimax_api_key:
+            self._api_key = self._config.ai.minimax_api_key
             self._base_url = "https://api.minimax.io/v1/chat/completions"
             self._model = "minimax-m3"
-            logger.info("Using MiniMax AI (Secondary).")
+            logger.info("Using MiniMax AI.")
         else:
-            self._api_key = None
             logger.info("No primary AI API keys found. Will attempt Bedrock fallback.")
 
     async def _score_with_bedrock(self, prompt: str) -> Optional[int]:
@@ -35,7 +48,6 @@ class AIFilter:
         Uses asyncio.to_thread to keep the event loop non-blocking.
         """
         try:
-            # Dynamic import to prevent crash if boto3 is missing
             import boto3
             from botocore.config import Config
         except ImportError:
@@ -75,7 +87,7 @@ class AIFilter:
     async def score_token(self, token_data: Dict) -> int:
         """
         Score a token (0-100) based on metadata and sentiment.
-        Attempts primary providers first, then falls back to Amazon Bedrock.
+        Attempts NVIDIA/BluesMinds/MiniMax first, then falls back to Amazon Bedrock.
         """
         prompt = f"""
         Analyze this Solana token for safety. Look for rugpull risks or supply splits.
@@ -93,7 +105,6 @@ class AIFilter:
         71-100: Safe/Low risk
         """
 
-        # 1. Attempt Primary/Secondary HTTP Providers (BluesMinds/MiniMax)
         if self._api_key:
             try:
                 payload = {
@@ -118,11 +129,9 @@ class AIFilter:
             except Exception as e:
                 logger.error(f"Primary AI scoring failed: {e}")
 
-        # 2. Fallback to Amazon Bedrock
         logger.info("Attempting Amazon Bedrock fallback...")
         bedrock_score = await self._score_with_bedrock(prompt)
         if bedrock_score is not None:
             return bedrock_score
         
-        # 3. Final neutral fallback
         return 50
