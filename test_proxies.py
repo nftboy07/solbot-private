@@ -1,6 +1,6 @@
 import asyncio
-import aiohttp
 import os
+from curl_cffi.requests import AsyncSession
 
 proxies = [
     "http://zijcgwiq:3l2wgagrbb4k@38.154.203.95:5863",
@@ -17,12 +17,16 @@ proxies = [
 
 async def test_proxy(url):
     try:
-        async with aiohttp.ClientSession() as s:
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            async with s.get("https://frontend-api.pump.fun/coins/latest", proxy=url, headers=headers, timeout=5) as r:
-                if r.status == 200:
-                    return url, True, r.status
-                return url, False, r.status
+        async with AsyncSession(impersonate="chrome120") as s:
+            # curl_cffi handles common browser headers automatically via impersonate
+            resp = await s.get(
+                "https://frontend-api.pump.fun/coins/latest", 
+                proxy=url, 
+                timeout=10
+            )
+            if resp.status_code == 200:
+                return url, True, resp.status_code
+            return url, False, resp.status_code
     except Exception as e:
         return url, False, str(e)
 
@@ -31,13 +35,14 @@ async def main():
     res = await asyncio.gather(*tasks)
     working = [r[0] for r in res if r[1]]
     
-    print("\n--- TEST RESULTS ---")
+    print("\n--- TEST RESULTS (using curl_cffi) ---")
     for url, status, detail in res:
-        short_url = url.split('@')[1]
+        # Mask the auth part for cleaner output
+        short_url = url.split('@')[1] if '@' in url else url
         print(f"{short_url}: {'WORKING (200 OK)' if status else f'FAILED ({detail})'}")
         
     if working:
-        print(f"\nfound a working one: {working[0].split('@')[1]}")
+        print(f"\nfound a working one: {working[0].split('@')[1] if '@' in working[0] else working[0]}")
         lines = []
         if os.path.exists(".env"):
             with open(".env", "r") as f:
@@ -47,7 +52,7 @@ async def main():
             f.writelines(lines)
         print("cleaned .env and updated PROXY_URL")
     else:
-        print("\nall 10 proxies are blocked by cloudflare fr")
+        print("\nall 10 proxies are blocked or failing even with chrome120 impersonation")
 
 if __name__ == '__main__':
     asyncio.run(main())
