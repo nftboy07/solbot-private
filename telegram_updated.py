@@ -107,6 +107,20 @@ class TelegramController:
             except Exception as e:
                 logger.error(f"Handler error /health: {e}\n{traceback.format_exc()}")
 
+        @self._client.on(events.NewMessage(pattern='/pipeline'))
+        async def pipeline_handler(event):
+            try:
+                await self._cmd_pipeline(event)
+            except Exception as e:
+                logger.error(f"Handler error /pipeline: {e}")
+
+        @self._client.on(events.NewMessage(pattern='/balancecheck'))
+        async def balancecheck_handler(event):
+            try:
+                await self._cmd_balancecheck(event)
+            except Exception as e:
+                logger.error(f"Handler error /balancecheck: {e}")
+
         @self._client.on(events.NewMessage(pattern='/version'))
         async def version_handler(event):
             try:
@@ -224,7 +238,7 @@ class TelegramController:
 
     async def _cmd_help(self, event):
         msg = ("<b>🛠 SOLBOT V3 COMMAND REGISTRY</b>\n\n"
-               "<b>Core:</b> /status (/dashboard), /health, /version, /ping\n"
+               "<b>Core:</b> /status (/dashboard), /health, /version, /ping, /pipeline, /balancecheck\n"
                "<b>Intelligence:</b> /brain, /wallet (/balance), /alpha\n"
                "<b>Data:</b> /signals, /why\n"
                "<b>Ops:</b> /portfolio, /history, /proxy\n"
@@ -267,6 +281,33 @@ class TelegramController:
                f"Network Manager: <code>STABLE</code>\n"
                f"Primary RPC: <code>{rpc_url[-12:] if rpc_url != 'N/A' else 'N/A'}</code>\n"
                f"SOL Price: <code>${self._sol_price:.2f}</code>")
+        await event.reply(msg)
+
+    async def _cmd_pipeline(self, event):
+        uptime_sec = time.time() - self._bot._start_time
+        epm = (self._bot._events_count / (uptime_sec / 60)) if uptime_sec > 0 else 0
+        spm = (self._bot._signals_count / (uptime_sec / 60)) if uptime_sec > 0 else 0
+        
+        msg = (f"<b>🔬 PIPELINE DIAGNOSTICS</b>\n"
+               f"Uptime: <code>{uptime_sec/3600:.2f} hours</code>\n"
+               f"Total Events: <code>{self._bot._events_count}</code>\n"
+               f"EPM: <code>{epm:.2f}</code>\n"
+               f"Total Signals: <code>{self._bot._signals_count}</code>\n"
+               f"SPM: <code>{spm:.2f}</code>\n"
+               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\n"
+               f"Filter Rejects: <code>{getattr(self._bot, '_filter_rejects_count', 0)}</code>")
+        await event.reply(msg)
+
+    async def _cmd_balancecheck(self, event):
+        start = time.time()
+        balance = await self._bot._pump_client.get_sol_balance()
+        latency = (time.time() - start) * 1000
+        
+        msg = (f"<b>⚖️ BALANCE DIAGNOSTIC</b>\n"
+               f"Wallet: <code>{self._bot._wallet.pubkey_str}</code>\n"
+               f"Balance: <code>{balance:.6f} SOL</code>\n"
+               f"RPC Latency: <code>{latency:.2f}ms</code>\n"
+               f"Status: <code>{'ONLINE' if balance > 0 else 'CHECK_RPC'}</code>")
         await event.reply(msg)
 
     async def _cmd_model(self, event):

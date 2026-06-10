@@ -30,17 +30,21 @@ class TokenFilter:
         """Check if a token meets all snipe criteria."""
         # Check blacklist
         if token.mint in self._blacklisted_tokens:
+            logger.info(f"FILTER REJECT {token.mint}: blacklisted")
             return False, 0.0
 
         # Check market cap limits
-        if token.market_cap_usd < self._config.strategy.min_mcap:
+        if token.market_cap_usd < self._config.pumpfun.min_market_cap_usd:
+            logger.info(f"FILTER REJECT MCAP {token.mint}: ${token.market_cap_usd:.2f} < ${self._config.pumpfun.min_market_cap_usd:.2f}")
             return False, 0.0
         
         # Check liquidity
         if token.liquidity_sol < self._config.pumpfun.min_liquidity_sol:
+            logger.info(f"FILTER REJECT LIQ {token.mint}: {token.liquidity_sol:.2f} SOL < {self._config.pumpfun.min_liquidity_sol:.2f} SOL")
             return False, 0.0
 
         # Default trade size
+        logger.info(f"FILTER ACCEPT {token.mint}: MCAP ${token.market_cap_usd:.2f}, LIQ {token.liquidity_sol:.2f} SOL")
         return True, self._config.jupiter.buy_amount_sol
 
     async def check_supply_bubbles(self, mint: str, rpc_client: AsyncClient) -> bool:

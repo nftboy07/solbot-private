@@ -51,11 +51,17 @@ class PumpFunClient:
             "method": "getBalance",
             "params": [self._wallet.pubkey_str]
         }
+        rpc_url = self._solana_config.rpc_url
+        logger.debug(f"Fetching SOL balance for {self._wallet.pubkey_str} via {rpc_url}")
         try:
-            async with self._session.post(self._solana_config.rpc_url, json=payload) as resp:
+            async with self._session.post(rpc_url, json=payload) as resp:
+                raw_response = await resp.text()
+                logger.debug(f"RPC raw response: {raw_response}")
                 data = await resp.json()
                 lamports = data.get("result", {}).get("value", 0)
-                return lamports / 1_000_000_000
+                balance = lamports / 1_000_000_000
+                logger.info(f"Calculated SOL balance for {self._wallet.pubkey_str}: {balance:.4f}")
+                return balance
         except Exception as e:
             logger.error(f"Error fetching SOL balance: {e}")
             return 0.0
