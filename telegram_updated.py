@@ -26,7 +26,7 @@ class TelegramController:
         self._bot = bot_instance
         self._client: Optional[TelegramClient] = None
         self._start_time = datetime.now()
-        self._version = "3.0.0-async-refactor"
+        self._version = "3.1.0-risk-engine"
         
         # UI State
         self._paper_mode = True
@@ -128,7 +128,7 @@ class TelegramController:
         async def autobuy_handler(event):
             await self._cmd_autobuy(event)
 
-        @self._client.on(events.NewMessage(pattern='/risk|/kill|/pause|/resume|/max_position|/max_drawdown'))
+        @self._client.on(events.NewMessage(pattern='/risk|/kill|/pause|/resume|/max_position|/max_drawdown|/buy|/drawdown'))
         async def risk_handler(event):
             await self._cmd_risk(event)
 
@@ -154,7 +154,7 @@ class TelegramController:
                "<b>Intelligence:</b> /model (/brain), /creator, /wallet (/balance), /alpha\n"
                "<b>Data:</b> /feature, /signals, /why\n"
                "<b>Ops:</b> /portfolio, /history, /rpc, /proxies (/proxy)\n"
-               "<b>Control:</b> /risk, /kill, /paper (/mode), /autobuy, /replay")
+               "<b>Control:</b> /risk, /kill, /paper, /autobuy, /buy, /max_position, /drawdown")
         await event.reply(msg)
 
     async def _cmd_status(self, event):
@@ -276,49 +276,123 @@ class TelegramController:
     async def _cmd_paper(self, event):
         args = event.message.text.split()
         if len(args) > 1:
-            if args[1] == "on": self._paper_mode = True
-            elif args[1] == "off": self._paper_mode = False
+            val = args[1].lower()
+            if val == "on": self._paper_mode = True
+            elif val == "off": self._paper_mode = False
         else:
-            # Toggle if no arg
             self._paper_mode = not self._paper_mode
             
         status = "ENABLED" if self._paper_mode else "DISABLED"
         await event.reply(f"🧪 <b>Paper Trading Mode:</b> <code>{status}</code>")
 
     async def _cmd_autobuy(self, event):
-        if not hasattr(self._bot, "_autobuy_enabled"): setattr(self._bot, "_autobuy_enabled", False)
-        if True:
-            args = event.message.text.split()
-            if len(args) > 1:
-                if args[1] == "on": self._bot._autobuy_enabled = True
-                elif args[1] == "off": self._bot._autobuy_enabled = False
-            else:
-                self._bot._autobuy_enabled = not self._bot._autobuy_enabled
-                
-            status = "ENABLED" if self._bot._autobuy_enabled else "DISABLED"
-            await event.reply(f"🤖 <b>Autobuy:</b> <code>{status}</code>")
+        args = event.message.text.split()
+        if len(args) > 1:
+            val = args[1].lower()
+            if val == "on": self._bot._autobuy_enabled = True
+            elif val == "off": self._bot._autobuy_enabled = False
         else:
-            await event.reply("❌ <b>Error:</b> Autobuy variable not found in bot instance.")
+            self._bot._autobuy_enabled = not getattr(self._bot, "_autobuy_enabled", False)
+            
+        status = "ENABLED" if self._bot._autobuy_enabled else "DISABLED"
+        if hasattr(self._bot, "_save_state"): self._bot._save_state()
+        await event.reply(f"🤖 <b>Autobuy:</b> <code>{status}</code>")
 
     async def _cmd_risk(self, event):
-        cmd = event.message.text.split()[0].lower()
+        args = event.message.text.split()
+        cmd = args[0].lower()
+        
+        # Helper for persisting state
+        def save():
+            if hasattr(self._bot, "_save_state"): self._bot._save_state()
+
         if cmd == "/kill":
-            self._kill_switch = True
-            if hasattr(self._bot, '_paused'): self._bot._paused = True
-            await event.reply("🚨 <b>KILL SWITCH ACTIVATED</b>\nNew entries disabled. Monitoring exits only.")
-        elif cmd == "/pause":
+            if len(args) > 1:
+                val = args[1].lower()
+                self._kill_switch = (val == "on")
+            else:
+                self._kill_switch = not self._kill_switch
+            
+            if self._kill_switch:
+                if hasattr(self._bot, '_paused'): self._bot._paused = True
+                await event.reply("🚨 <b>KILL SWITCH ACTIVATED</b>\nNew entries disabled. Monitoring exits only.")
+            else:
+                if hasattr(self._bot, '_paused'): self._bot._paused = False
+                await event.reply("✅ <b>KILL SWITCH DEACTIVATED</b>\nNormal operation resumed.")
+            return
+
+        if cmd == "/buy" or cmd == "/max_position":
+            if len(args) > 1:
+                try:
+                    val = float(args[1])
+                    # Update config (which is frozen=True but we can replace if needed or hack the dict)
+                    # Solbot uses self._config.jupiter.buy_amount_sol
+                    # Since it is a dataclass, we might need to recreate if it was truly immutable, 
+                    # but here we'll try direct assignment first or update the internal bot state
+                    object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", val)
+                    save()
+                    await event.reply(f"💰 <b>Default Buy Amount:</b> <code>{val} SOL</code>")
+                except Exception as e:
+                    await event.reply(f"❌ <b>Error:</b> Invalid value. {e}")
+            else:
+                current = self._bot._config.jupiter.buy_amount_sol
+                await event.reply(f"💰 <b>Current Buy Amount:</b> <code>{current} SOL</code>")
+            return
+
+        if cmd == "/drawdown":
+            if len(args) > 1:
+                try:
+                    val = float(args[1]) / 100.0 # Convert from percentage
+                    object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", val)
+                    save()
+                    await event.reply(f"📉 <b>Max Drawdown (Trailing Stop):</b> <code>{val*100:.1f}%</code>")
+                except Exception as e:
+                    await event.reply(f"❌ <b>Error:</b> Invalid value. {e}")
+            else:
+                current = self._bot._config.strategy.trailing_stop_pct * 100
+                await event.reply(f"📉 <b>Current Max Drawdown:</b> <code>{current:.1f}%</code>")
+            return
+
+        if cmd == "/pause":
             if hasattr(self._bot, '_paused'): self._bot._paused = True
             await event.reply("⏸ <b>Bot Paused</b>")
-        elif cmd == "/resume":
+            return
+            
+        if cmd == "/resume":
             self._kill_switch = False
             if hasattr(self._bot, '_paused'): self._bot._paused = False
             await event.reply("▶️ <b>Bot Resumed</b>")
-        else:
-            msg = ("<b>🛡 RISK MANAGEMENT</b>\n"
-                   "Max Position: <code>1.0 SOL</code>\n"
-                   "Max Drawdown: <code>15%</code>\n"
-                   "Kill Switch: <code>OFF</code>")
-            await event.reply(msg)
+            return
+
+        # Handle Presets
+        if cmd == "/risk" and len(args) > 1:
+            preset = args[1].lower()
+            if preset == "safe":
+                object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.01)
+                object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.05)
+                await event.reply("🛡 <b>Preset: SAFE</b>\nMax Position: 0.01 SOL\nDrawdown: 5%")
+            elif preset == "normal":
+                object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.10)
+                object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.10)
+                await event.reply("⚖️ <b>Preset: NORMAL</b>\nMax Position: 0.10 SOL\nDrawdown: 10%")
+            elif preset == "degen":
+                object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.50)
+                object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.20)
+                await event.reply("🌋 <b>Preset: DEGEN</b>\nMax Position: 0.50 SOL\nDrawdown: 20%")
+            else:
+                await event.reply("❌ Unknown preset. Use: safe, normal, degen")
+            save()
+            return
+
+        # Display current risk profile
+        msg = ("<b>🛡 RISK MANAGEMENT ENGINE</b>\n\n"
+               f"Max Position: <code>{self._bot._config.jupiter.buy_amount_sol} SOL</code>\n"
+               f"Max Drawdown: <code>{self._bot._config.strategy.trailing_stop_pct*100:.1f}%</code>\n"
+               f"Kill Switch: <code>{'ON' if self._kill_switch else 'OFF'}</code>\n"
+               f"Paper Mode: <code>{'ON' if self._paper_mode else 'OFF'}</code>\n"
+               f"Autobuy: <code>{'ON' if getattr(self._bot, '_autobuy_enabled', False) else 'OFF'}</code>\n\n"
+               "<b>Presets:</b> <code>/risk <safe|normal|degen></code>")
+        await event.reply(msg)
 
     async def _cmd_why(self, event):
         msg = ("<b>🤔 WHY ENGINE: TR-49921</b>\n"
