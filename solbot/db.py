@@ -91,6 +91,67 @@ class Database:
             win_rate REAL DEFAULT 0.0,
             historical_roi REAL DEFAULT 0.0
         );
+
+        CREATE TABLE IF NOT EXISTS trade_events (
+            trade_id TEXT PRIMARY KEY,
+            signal_id TEXT,
+            detect_ts REAL,
+            feature_complete_ts REAL,
+            model_complete_ts REAL,
+            tx_build_start_ts REAL,
+            tx_build_end_ts REAL,
+            tx_submit_ts REAL,
+            rpc_ack_ts REAL,
+            block_confirm_ts REAL,
+            exit_submit_ts REAL,
+            exit_confirm_ts REAL,
+            entry_price REAL,
+            exit_price REAL,
+            pnl REAL,
+            strategy_version TEXT,
+            git_commit_hash TEXT,
+            metadata TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS signal_events (
+            event_id TEXT PRIMARY KEY,
+            signal_id TEXT,
+            mint TEXT,
+            creator TEXT,
+            wallet_signal TEXT,
+            confidence REAL,
+            raw_signal_data TEXT,
+            timestamp REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS rpc_events (
+            request_id TEXT PRIMARY KEY,
+            provider TEXT,
+            endpoint TEXT,
+            method TEXT,
+            latency_ms REAL,
+            slot INTEGER,
+            success INTEGER,
+            timestamp REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS proxy_events (
+            proxy_id TEXT PRIMARY KEY,
+            proxy_url TEXT,
+            endpoint TEXT,
+            latency_ms REAL,
+            status_code INTEGER,
+            error_type TEXT,
+            timestamp REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS feature_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT,
+            signal_id TEXT,
+            serialized_features TEXT,
+            timestamp REAL
+        );
         """
         await self._execute_write(schemas)
 
@@ -164,3 +225,34 @@ class Database:
     async def get_wallet(self, address: str) -> Optional[Dict]:
         rows = await self._execute_read("SELECT * FROM wallets WHERE address = ?", (address,))
         return dict(rows[0]) if rows else None
+
+    # Telemetry Methods
+    async def log_trade_event(self, data: Dict[str, Any]):
+        cols = list(data.keys())
+        placeholders = ", ".join(["?" for _ in cols])
+        query = f"INSERT OR REPLACE INTO trade_events ({', '.join(cols)}) VALUES ({placeholders})"
+        await self._execute_write(query, tuple(data.values()))
+
+    async def log_signal_event(self, data: Dict[str, Any]):
+        cols = list(data.keys())
+        placeholders = ", ".join(["?" for _ in cols])
+        query = f"INSERT OR REPLACE INTO signal_events ({', '.join(cols)}) VALUES ({placeholders})"
+        await self._execute_write(query, tuple(data.values()))
+
+    async def log_rpc_event(self, data: Dict[str, Any]):
+        cols = list(data.keys())
+        placeholders = ", ".join(["?" for _ in cols])
+        query = f"INSERT OR REPLACE INTO rpc_events ({', '.join(cols)}) VALUES ({placeholders})"
+        await self._execute_write(query, tuple(data.values()))
+
+    async def log_proxy_event(self, data: Dict[str, Any]):
+        cols = list(data.keys())
+        placeholders = ", ".join(["?" for _ in cols])
+        query = f"INSERT OR REPLACE INTO proxy_events ({', '.join(cols)}) VALUES ({placeholders})"
+        await self._execute_write(query, tuple(data.values()))
+
+    async def log_feature_snapshot(self, data: Dict[str, Any]):
+        cols = list(data.keys())
+        placeholders = ", ".join(["?" for _ in cols])
+        query = f"INSERT INTO feature_snapshots ({', '.join(cols)}) VALUES ({placeholders})"
+        await self._execute_write(query, tuple(data.values()))
