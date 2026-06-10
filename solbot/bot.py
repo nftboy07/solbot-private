@@ -30,10 +30,8 @@ from solbot.tungscreener import TungscreenerScraper
 from solbot.kol_tracker import KOLTracker
 from solbot.pump_movers import PumpMovers
 from solbot.geckoterminal import GeckoTerminalClient
-from solbot.gmgn_monitor import GMGNMonitor
 from solbot.twitter_agents import TwitterAgentMonitor
 from solbot.core.network import NetworkManager
-from solbot.database import DatabaseManager
 
 logger = get_logger("bot")
 
@@ -82,18 +80,7 @@ class Solbot:
         self._pump_movers = PumpMovers(self)
         self._gecko = GeckoTerminalClient()
         self._agent_monitor = TwitterAgentMonitor(self)
-        self._gmgn_monitor = GMGNMonitor(self)
         self._network_manager = NetworkManager(config.proxy_list_path)
-        self._db = DatabaseManager()
-        
-        # Runtime Metrics
-        self._start_time = time()
-        self._events_count = 0
-        self._signals_count = 0
-        self._ai_rejects_count = 0
-        self._total_buys = 0
-        self._executed_trades = 0
-        self._last_event_time = time()
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -118,12 +105,6 @@ class Solbot:
 
     def _load_state(self):
         """Load positions, trades, and intelligence from the JSON file."""
-        # Initial migration check
-        db_path = self._db.db_path
-        if not os.path.exists(db_path) or os.path.getsize(db_path) < 4096:
-            logger.info("New database detected. Running migration...")
-            self._db.migrate_from_json(self._state_file)
-
         if not os.path.exists(self._state_file):
             return
         try:
@@ -138,12 +119,20 @@ class Solbot:
                         data["tp_targets_hit"] = [0.0]
                 self._positions[mint] = Position(**data)
             
-            # Restore intelligence from DB primarily, fallback to state
-            self._blacklisted_wallets = set(self._db.get_blacklist())
-            whales = self._db.get_whales_and_kols()
-            for w in whales:
-                self._filter.add_copy_target(w['address'])
-                self._kol_tracker.add_wallet(w['address'], w['alias'] or w['address'][:8])
+            # Restore intelligence
+            if self._filter:
+                self._filter._copy_targets = set(state.get("copy_targets", []))
+                for addr, score_data in state.get("wallet_scores", {}).items():
+                    from solbot.filters import WalletScore
+                    valid_keys = WalletScore.__dataclass_fields__.keys()
+                    filtered_data = {k: v for k, v in score_data.items() if k in valid_keys}
+                    score_obj = WalletScore(**filtered_data)
+                    self._filter._wallet_scores[addr] = score_obj
+                    
+                    # Also load into KOL Tracker if it matches KOL labels
+                    alias = getattr(score_obj, 'alias', '') or ''
+                    if any(term in alias for term in ["KOL", "VineWallet", "SmartWallet"]):
+                        self._kol_tracker.add_wallet(addr, alias)
             
             # Restore Twitter handles
             if self._twitter:
@@ -153,13 +142,14 @@ class Solbot:
             # Restore trades
             raw_trades = state.get("trades", [])
             self._trades = [TradeResult(**t) for t in raw_trades[-100:]]
-            self._total_buys = sum(1 for t in self._trades if t.success and t.action == "buy")
-            self._executed_trades = len(self._trades)
             
             # Restore AI settings
             self._ai_enabled = state.get("ai_enabled", True)
             self._ai_min_score = state.get("ai_min_score", 75)
             self._autobuy_enabled = state.get("autobuy_enabled", False)
+            
+            # Restore Blacklist
+            self._blacklisted_wallets = set(state.get("blacklisted_wallets", []))
             
             logger.info(f"Loaded {len(self._positions)} positions, {len(self._filter._copy_targets)} whales, and {len(self._kol_tracker.wallets)} KOLs")
         except Exception as e:
@@ -175,9 +165,21 @@ class Solbot:
         await self._pump_client.start()
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
-        from telegram_updated import TelegramController
-        self._telegram = TelegramController(self._config.telegram, self)
-        await self._telegram.start()
+        
+        # Determine which Telegram module to use
+        try:
+            from telegram_updated import TelegramController
+            self._telegram = TelegramController(self._config.telegram, self)
+        except ImportError:
+            from solbot.telegram import TelegramManager
+            self._telegram = TelegramManager(self._config.telegram)
+        
+        # Start Telegram
+        if hasattr(self._telegram, 'start'):
+            if 'TelegramController' in str(type(self._telegram)):
+                 await self._telegram.start()
+            else:
+                 await self._telegram.start(self)
         
         # New Module Starts
         await self._gecko.start()
@@ -190,6 +192,8 @@ class Solbot:
         self._load_state()
         await self._sync_existing_holdings()
         
+        await self._telegram.send_message("<b>Solbot Sniper (Coordinated KOL Tracking) started!</b>")
+
         loop = asyncio.get_running_loop()
         self._monitor = PumpFunMonitor(self._config.pumpfun, loop)
         self._monitor.start()
@@ -210,11 +214,9 @@ class Solbot:
 
         # Pump.fun Movers Monitor
         asyncio.create_task(self._pump_movers.start_monitoring())
-        asyncio.create_task(self._gmgn_monitor.start())
 
         self._running = True
         asyncio.create_task(self._process_events())
-        asyncio.create_task(self._watchdog_loop())
         
         for pos in self._positions.values():
             if pos.active:
@@ -235,25 +237,11 @@ class Solbot:
         if self._monitor_scraper: await self._monitor_scraper.stop()
         if self._tungscreener: await self._tungscreener.stop()
         if self._pump_movers: await self._pump_movers.stop()
-        if self._gmgn_monitor: await self._gmgn_monitor.stop()
         logger.info("Solbot stopped")
 
     def is_blacklisted(self, address: str) -> bool:
         """Check if an address is blacklisted."""
         return address in self._blacklisted_wallets
-
-    async def _watchdog_loop(self):
-        """Monitors event frequency and sends alerts."""
-        while self._running:
-            try:
-                if time() - self._last_event_time > 60:
-                    logger.warning("Watchdog: No Pump.fun events received for 60 seconds!")
-                    if self._telegram:
-                        await self._telegram.send_message("⚠️ <b>WATCHDOG ALERT</b>: No Pump.fun events received for >60s. Checking connection...")
-                await asyncio.sleep(30)
-            except Exception as e:
-                logger.error(f"Watchdog error: {e}")
-                await asyncio.sleep(10)
 
     async def _process_events(self):
         while self._running:
@@ -262,9 +250,6 @@ class Solbot:
                 continue
             try:
                 data = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
-                self._events_count += 1
-                self._last_event_time = time()
-                
                 if data.get("txType") in ["sell", "buy"]:
                     await self._handle_trade_event(data)
                 elif data.get("mint") and "txType" not in data:
@@ -277,14 +262,12 @@ class Solbot:
 
                     qualified, size = self._filter.is_qualified(token)
                     if qualified:
-                        self._signals_count += 1
                         if self._ai_enabled:
                             token_data = {
                                 'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator
                             }
                             score = await self._ai_filter.score_token(token_data)
                             if score < self._ai_min_score:
-                                self._ai_rejects_count += 1
                                 logger.warning(f"AI score {score} < {self._ai_min_score}, skipping {token.symbol}")
                                 continue
                         
@@ -302,7 +285,6 @@ class Solbot:
         mint = data.get("mint")
         tx_type = data.get("txType")
         mcap_sol = data.get("marketCapSol")
-        sol_amount = float(data.get("solAmount", 0))
         if not trader or not mint: return
 
         # Blacklist check
@@ -310,19 +292,19 @@ class Solbot:
             logger.warning(f"IGNORING event from blacklisted wallet: {trader}")
             return
 
-        # Feed to KOL Tracker & Log to DB
+        # Feed to KOL Tracker
         if trader in self._kol_tracker.wallets:
-            self._db.log_kol_activity(trader, mint, sol_amount)
             kol_event = {
                 'wallet': trader,
                 'action': tx_type,
                 'token': mint,
-                'amount': sol_amount
+                'amount': float(data.get("solAmount", 0))
             }
             asyncio.create_task(self._kol_tracker.process_event(kol_event, self))
 
         if mint in self._positions and mcap_sol:
-            price_usd = float(mcap_sol) * (getattr(self._telegram, '_sol_price', 150.0))
+            sol_price = getattr(self._telegram, '_sol_price', 150.0)
+            price_usd = float(mcap_sol) * sol_price
             pos = self._positions[mint]
             pos.current_price = price_usd
             if price_usd > pos.highest_price:
@@ -374,8 +356,6 @@ class Solbot:
             token.mint, action="buy", amount=size, priority_fee=priority_fee_sol
         )
         if result.success:
-            self._total_buys += 1
-            self._executed_trades += 1
             self._trades.append(result)
             pos = Position(
                 mint=token.mint, symbol=token.symbol,
@@ -428,7 +408,6 @@ class Solbot:
         priority_fee = 0.01 if "KOL EXIT" in reason else 0.001
         result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=sell_amount, denominated_in_sol=False, priority_fee=priority_fee)
         if result.success:
-            self._executed_trades += 1
             self._trades.append(result)
             if pct >= 0.99:
                 pos.active = False
