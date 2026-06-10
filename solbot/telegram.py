@@ -10,7 +10,7 @@ the main event loop. Supports alerts for:
 """
 
 import asyncio
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 import aiohttp
 
@@ -39,8 +39,9 @@ class TelegramAlert:
         self._enabled = config.enabled
         self._base_url = f"https://api.telegram.org/bot{config.bot_token}"
         self._rate_limiter = asyncio.Semaphore(config.max_messages_per_second)
+        self._offset = 0
 
-    async def start(self):
+    async def start(self, bot_instance: Any = None):
         """Initialize the aiohttp session."""
         if not self._enabled:
             logger.info("Telegram alerts DISABLED")
@@ -55,12 +56,102 @@ class TelegramAlert:
         self._session = aiohttp.ClientSession(timeout=timeout)
         logger.info(f"Telegram alerts enabled | chat_id={self._config.chat_id}")
 
+        if bot_instance:
+            asyncio.create_task(self._poll_loop(bot_instance))
+
     async def stop(self):
         """Close the aiohttp session."""
         if self._session:
             await self._session.close()
             self._session = None
         logger.info("Telegram client closed")
+
+    async def _poll_loop(self, bot: Any):
+        while self._enabled and self._session:
+            try:
+                params = {"offset": self._offset, "timeout": 20}
+                async with self._session.get(f"{self._base_url}/getUpdates", params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        updates = data.get("result", [])
+                        for update in updates:
+                            self._offset = update["update_id"] + 1
+                            msg = update.get("message")
+                            if not msg or str(msg.get("chat", {}).get("id", "")) != str(self._config.chat_id):
+                                continue
+                            text = msg.get("text", "")
+                            if text: asyncio.create_task(self._execute_command(text, bot))
+            except Exception as e:
+                logger.error(f"Telegram poll error: {e}")
+                await asyncio.sleep(5)
+
+    async def _execute_command(self, text: str, bot: Any):
+        try:
+            args = text.split()
+            if not args: return
+            cmd = args[0].lower()
+            
+            if cmd == "/gmgn_trending": await self._cmd_gmgn_trending(bot)
+            elif cmd == "/gmgn_smart": await self._cmd_gmgn_smart(bot)
+            elif cmd == "/gmgn_scan": await self._cmd_gmgn_scan(args, bot)
+            elif cmd == "/list": await self._cmd_list()
+        except Exception as e:
+            logger.error(f"Error executing command '{text}': {e}")
+
+    async def _cmd_list(self):
+        msg = (
+            "<b>📜 Command Registry</b>\n"
+            "/gmgn_trending - New tokens discovery\n"
+            "/gmgn_smart - Smart money inflow\n"
+            "/gmgn_scan <mint> - Security scan"
+        )
+        await self._send_message(msg)
+
+    async def _cmd_gmgn_trending(self, bot: Any):
+        await self._send_message("🔍 <b>Fetching GMGN Trending...</b>")
+        tokens = await bot._gmgn_monitor.client.get_new_tokens()
+        if not tokens:
+            await self._send_message("No trending tokens found.")
+            return
+        lines = ["<b>🔥 GMGN New Tokens:</b>"]
+        for t in tokens[:10]:
+            lines.append(f"- {t.get('symbol')}: <code>{t.get('address')}</code> ($ {float(t.get('market_cap', 0)):,.0f})")
+        await self._send_message("\n".join(lines))
+
+    async def _cmd_gmgn_smart(self, bot: Any):
+        await self._send_message("🧠 <b>Fetching Smart Money Inflow...</b>")
+        tokens = await bot._gmgn_monitor.client.get_smart_money_inflow()
+        if not tokens:
+            await self._send_message("No smart money inflow detected.")
+            return
+        lines = ["<b>💎 Smart Money Inflow:</b>"]
+        for t in tokens[:10]:
+            lines.append(f"- {t.get('symbol')}: <code>{t.get('address')}</code>")
+        await self._send_message("\n".join(lines))
+
+    async def _cmd_gmgn_scan(self, args: List[str], bot: Any):
+        if len(args) < 2:
+            await self._send_message("Usage: /gmgn_scan <mint_address>")
+            return
+        mint = args[1]
+        await self._send_message(f"🛡 <b>Scanning:</b> <code>{mint}</code>")
+        report = await bot._gmgn_monitor.client.get_token_security(mint)
+        if not report:
+            await self._send_message("Could not retrieve security report.")
+            return
+        
+        is_honeypot = "YES" if report.get("is_honeypot") else "NO"
+        buy_tax = report.get("buy_tax", "N/A")
+        sell_tax = report.get("sell_tax", "N/A")
+        
+        msg = (
+            f"<b>🛡 GMGN Security Report</b>\n"
+            f"Mint: <code>{mint}</code>\n"
+            f"Honeypot: {is_honeypot}\n"
+            f"Tax: {buy_tax}% / {sell_tax}%\n"
+            f"Renounced: {'✅' if report.get('renounced') else '❌'}"
+        )
+        await self._send_message(msg)
 
     # ── Token Detection Alerts ──────────────────────────────────────────
 
