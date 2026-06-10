@@ -1,31 +1,42 @@
+import os
 import sys
-import requests
+import subprocess
 import time
 
-def check_health(url, timeout=30):
+def check_process(process_name):
+    """Check if the process is running using pgrep."""
+    try:
+        subprocess.check_output(["pgrep", "-f", process_name])
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def check_tmux(session_name):
+    """Check if a tmux session exists."""
+    try:
+        subprocess.check_output(["tmux", "has-session", "-t", session_name])
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def run_health_check(timeout=30):
     start_time = time.time()
-    print(f"Starting health check for {url}...")
+    print("Starting process-based health check...")
+    
     while time.time() - start_time < timeout:
-        try:
-            # We assume the bot might have a simple health endpoint or we check if it responds
-            # Since it's a Telegram bot, we might just check if the process is up or 
-            # if we can hit a local metrics/status port if configured.
-            # For this implementation, we'll check a placeholder status URL or 
-            # simply verify requirements are met.
-            response = requests.get(url)
-            if response.status_code == 200:
-                print("Health check passed!")
-                return True
-        except Exception as e:
-            print(f"Check failed: {e}")
+        # Check if the main script is running or the tmux session is active
+        is_running = check_process("python main.py") or check_tmux("solbot")
         
+        if is_running:
+            print("Health check passed: Solbot process or session detected!")
+            return True
+        
+        print("Bot process not found, retrying...")
         time.sleep(5)
     
-    print("Health check timed out.")
+    print("Health check timed out: Bot process not detected.")
     return False
 
 if __name__ == "__main__":
-    # Default to localhost if not provided
-    target_url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8080/health"
-    if not check_health(target_url):
+    if not run_health_check():
         sys.exit(1)

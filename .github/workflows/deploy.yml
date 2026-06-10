@@ -47,9 +47,29 @@ jobs:
           port: ${{ secrets.VPS_PORT || 22 }}
           script: |
             set -e
-            cd ~/solbot-production
-            git pull origin feature/v3.1-production
+            
+            # Ensure target directory exists and is a git repo
+            if [ ! -d "$HOME/solbot-production/.git" ]; then
+              echo "Initializing production directory..."
+              mkdir -p $HOME/solbot-production
+              cd $HOME/solbot-production
+              git init
+              git remote add origin https://github.com/${{ github.repository }}.git || true
+              git fetch origin feature/v3.1-production
+              git checkout -f feature/v3.1-production
+            else
+              cd $HOME/solbot-production
+              git fetch origin feature/v3.1-production
+              git checkout -f feature/v3.1-production
+            fi
+            
+            # Setup Virtual Environment if missing
+            if [ ! -d "venv" ]; then
+              python3 -m venv venv
+            fi
+            
             source venv/bin/activate
+            pip install --upgrade pip
             if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
             
             # Restart Service (Systemd preferred, tmux fallback)
@@ -62,7 +82,7 @@ jobs:
             
             # Health Check
             if [ -f scripts/health_check.py ]; then
-              python scripts/health_check.py http://localhost:8080/health
+              python scripts/health_check.py
             else
               echo "Health check script not found, skipping."
             fi
