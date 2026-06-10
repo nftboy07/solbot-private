@@ -120,8 +120,9 @@ class TelegramManager:
             elif cmd == "/followtwitter": await self._cmd_follow_twitter(args, bot)
             elif cmd == "/unfollowtwitter": await self._cmd_unfollow_twitter(args, bot)
             elif cmd == "/mode": await self._cmd_mode(args, bot)
-            elif cmd == "/autobuy": await self._cmd_autobuy(bot)
+            elif cmd == "/autobuy": await self._cmd_autobuy(args, bot)
             elif cmd == "/proxy": await self._cmd_proxy(bot)
+            elif cmd in ["/risk", "/kill", "/buy", "/max_position", "/drawdown"]: await self._cmd_risk(args, bot)
             elif cmd == "/pause":
                 bot._paused = True
                 await self.send_message("⏸ <b>Bot Paused</b>")
@@ -146,7 +147,11 @@ class TelegramManager:
             "/balance - SOL balance\n"
             "/portfolio - Active holdings\n"
             "/mode <degen/normal> - Switch mode\n"
-            "/autobuy - Toggle auto-buy\n"
+            "/autobuy <on/off> - Toggle auto-buy\n"
+            "/buy <val> - Set buy amount\n"
+            "/drawdown <val> - Set trailing stop %\n"
+            "/risk <safe/normal/degen> - Presets/Status\n"
+            "/kill <on/off> - Global halt\n"
             "/proxy - Network health telemetry\n"
             "/profit - Daily PnL report\n"
             "/follow <addr> <alias> - Follow wallet\n"
@@ -186,37 +191,100 @@ class TelegramManager:
         
         mode = args[1].lower()
         if mode in ["degen", "normal"]:
-            # Note: This requires BotMode enum from config
             from solbot.config import BotMode
-            bot._config.strategy.mode = BotMode.DEGEN if mode == "degen" else BotMode.NORMAL
+            object.__setattr__(bot._config.strategy, "mode", BotMode.DEGEN if mode == "degen" else BotMode.NORMAL)
             await self.send_message(f"✅ <b>Mode switched to:</b> {mode.upper()}")
         else:
             await self.send_message("❌ Invalid mode. Use /mode degen or /mode normal")
 
-    async def _cmd_autobuy(self, bot: Any):
-        current = getattr(bot, "_autobuy_enabled", False)
-        new_state = not current
-        setattr(bot, "_autobuy_enabled", new_state)
+    async def _cmd_autobuy(self, args: list, bot: Any):
+        if len(args) > 1:
+            val = args[1].lower()
+            if val == "on": bot._autobuy_enabled = True
+            elif val == "off": bot._autobuy_enabled = False
+        else:
+            bot._autobuy_enabled = not getattr(bot, "_autobuy_enabled", False)
         
-        if hasattr(bot, "_save_state"):
-            try:
-                bot._save_state()
-            except Exception as e:
-                logger.error(f"Failed to save state on autobuy toggle: {e}")
-                
-        state_text = "ON" if new_state else "OFF"
+        if hasattr(bot, "_save_state"): bot._save_state()
+        state_text = "ON" if bot._autobuy_enabled else "OFF"
         await self.send_message(f"🤖 <b>Auto-buy:</b> {state_text}")
 
+    async def _cmd_risk(self, args: list, bot: Any):
+        cmd = args[0].lower()
+        
+        def save():
+            if hasattr(bot, "_save_state"): bot._save_state()
+
+        if cmd == "/kill":
+            kill = True
+            if len(args) > 1:
+                kill = (args[1].lower() == "on")
+            else:
+                kill = not bot._paused
+            
+            bot._paused = kill
+            save()
+            status = "ACTIVATED" if kill else "DEACTIVATED"
+            await self.send_message(f"🚨 <b>KILL SWITCH {status}</b>")
+            return
+
+        if cmd == "/buy" or cmd == "/max_position":
+            if len(args) > 1:
+                try:
+                    val = float(args[1])
+                    object.__setattr__(bot._config.jupiter, "buy_amount_sol", val)
+                    save()
+                    await self.send_message(f"💰 <b>Buy Amount:</b> <code>{val} SOL</code>")
+                except:
+                    await self.send_message("❌ Invalid number")
+            else:
+                await self.send_message(f"💰 <b>Current Buy:</b> <code>{bot._config.jupiter.buy_amount_sol} SOL</code>")
+            return
+
+        if cmd == "/drawdown":
+            if len(args) > 1:
+                try:
+                    val = float(args[1]) / 100.0
+                    object.__setattr__(bot._config.strategy, "trailing_stop_pct", val)
+                    save()
+                    await self.send_message(f"📉 <b>Trailing Stop:</b> <code>{val*100:.1f}%</code>")
+                except:
+                    await self.send_message("❌ Invalid number")
+            else:
+                await self.send_message(f"📉 <b>Current Drawdown:</b> <code>{bot._config.strategy.trailing_stop_pct*100:.1f}%</code>")
+            return
+
+        if cmd == "/risk" and len(args) > 1:
+            preset = args[1].lower()
+            if preset == "safe":
+                object.__setattr__(bot._config.jupiter, "buy_amount_sol", 0.01)
+                object.__setattr__(bot._config.strategy, "trailing_stop_pct", 0.05)
+                await self.send_message("🛡 <b>SAFE PRESET</b>\nPos: 0.01 SOL | Drawdown: 5%")
+            elif preset == "normal":
+                object.__setattr__(bot._config.jupiter, "buy_amount_sol", 0.10)
+                object.__setattr__(bot._config.strategy, "trailing_stop_pct", 0.10)
+                await self.send_message("⚖️ <b>NORMAL PRESET</b>\nPos: 0.10 SOL | Drawdown: 10%")
+            elif preset == "degen":
+                object.__setattr__(bot._config.jupiter, "buy_amount_sol", 0.50)
+                object.__setattr__(bot._config.strategy, "trailing_stop_pct", 0.20)
+                await self.send_message("🌋 <b>DEGEN PRESET</b>\nPos: 0.50 SOL | Drawdown: 20%")
+            save()
+            return
+
+        msg = ("<b>🛡 RISK PROFILE</b>\n"
+               f"Max Pos: <code>{bot._config.jupiter.buy_amount_sol} SOL</code>\n"
+               f"Drawdown: <code>{bot._config.strategy.trailing_stop_pct*100:.1f}%</code>\n"
+               f"Autobuy: <code>{'ON' if bot._autobuy_enabled else 'OFF'}</code>\n"
+               f"Halt: <code>{'ON' if bot._paused else 'OFF'}</code>")
+        await self.send_message(msg)
+
     async def _cmd_proxy(self, bot: Any):
-        """Display network health telemetry from NetworkManager."""
         nm = getattr(bot, "_network_manager", None)
         if not nm:
             await self.send_message("❌ <b>NetworkManager not initialized.</b>")
             return
-        
         stats = await nm.get_stats()
         err = stats["errors"]
-        
         msg = (
             f"<b>🌐 Proxy Health Report</b>\n"
             f"Total Proxies: {stats['total_proxies']}\n"
@@ -236,22 +304,18 @@ class TelegramManager:
         if not bot._kol_tracker or not bot._kol_tracker.wallets:
             await self.send_message("No KOLs currently tracked. Tip: Add 'KOL' to an alias when using /follow.")
             return
-            
         lines = ["<b>🔥 Active KOL Tracklist:</b>"]
         for addr, alias in bot._kol_tracker.wallets.items():
             lines.append(f"- {alias} (<code>{addr[:6]}...{addr[-4:]}</code>)")
-            
         await self.send_message("\n".join(lines))
 
     async def _cmd_profit(self, bot: Any):
         now = datetime.now()
         today_trades = [t for t in bot._trades if hasattr(t, 'timestamp') and datetime.fromtimestamp(t.timestamp).date() == now.date()]
-        
         total_trades = len(today_trades)
         wins = len([t for t in today_trades if t.success and getattr(t, 'pnl_sol', 0) > 0])
         win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
         total_pnl = sum([getattr(t, 'pnl_sol', 0) for t in today_trades])
-        
         lines = [
             "<b>💰 Daily Profit Report</b>",
             f"Date: {now.strftime('%A, %b %d, %Y')}",
@@ -261,11 +325,9 @@ class TelegramManager:
             "",
             f"<b>📍 Active Positions ({len(bot._positions)}):</b>"
         ]
-        
         for mint, pos in bot._positions.items():
             gain = (pos.current_price / pos.entry_price - 1) * 100 if pos.entry_price > 0 else 0
             lines.append(f"- {pos.symbol}: {gain:+.2f}% (${pos.current_price:,.0f} MC)")
-            
         await self.send_message("\n".join(lines))
 
     async def _cmd_balance(self, bot: Any):
@@ -326,7 +388,6 @@ class TelegramManager:
         if len(args) < 2:
             await self.send_message("Usage: /blacklist <add/remove/list> [address]")
             return
-        
         action = args[1].lower()
         if action == "list":
             if not bot._blacklisted_wallets:
