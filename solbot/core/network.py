@@ -1,135 +1,136 @@
 import asyncio
+import aiohttp
 import time
 import random
 import logging
-from typing import Dict, List, Optional, Any
+import os
 from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Any
 
-try:
-    from curl_cffi import requests
-except ImportError:
-    requests = None
-
-try:
-    from playwright.async_api import async_playwright
-except ImportError:
-    async_playwright = None
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("solbot.network")
+logger = logging.getLogger("bot.network")
 
 @dataclass
 class ProxyNode:
     url: str
-    pool: str
-    headers: Dict[str, str] = field(default_factory=dict)
-    user_agent: str = ""
-    browser_fingerprint: str = "chrome120"
-    latency: List[float] = field(default_factory=list)
-    success_count: int = 0
-    fail_count: int = 0
-    status_403: int = 0
-    status_429: int = 0
-    status_530: int = 0
-    last_used: float = 0
-    cool_down_until: float = 0
+    total_requests: int = 0
+    success_requests: int = 0
+    error_counts: Dict[int, int] = field(default_factory=lambda: {403: 0, 407: 0, 429: 0, 530: 0})
+    latencies: List[float] = field(default_factory=list)
+    cooldown_until: float = 0
+    health_score: float = 100.0
 
     @property
-    def health_score(self) -> float:
-        total = self.success_count + self.fail_count
-        if total == 0:
-            return 100.0
-        
-        success_rate = (self.success_count / total) * 100
-        # Penalize heavily for blocks
-        penalty = (self.status_403 * 5) + (self.status_429 * 10) + (self.status_530 * 15)
-        score = success_rate - (penalty / total)
-        return max(0.0, min(100.0, score))
+    def success_rate(self) -> float:
+        if self.total_requests == 0: return 0.0
+        return (self.success_requests / self.total_requests) * 100
 
-    def is_available(self) -> bool:
-        return time.time() > self.cool_down_until and self.health_score >= 70
+    @property
+    def avg_latency(self) -> float:
+        if not self.latencies: return 0.0
+        return sum(self.latencies[-10:]) / len(self.latencies[-10:])
 
 class NetworkManager:
-    def __init__(self):
-        self.pools: Dict[str, List[ProxyNode]] = {
-            "webshare": [],
-            "iproyal": [],
-            "smartproxy": []
-        }
-        self.session: Optional[Any] = None
-
-    async def add_proxy(self, pool: str, url: str, user_agent: str, headers: Dict[str, str] = None):
-        if pool not in self.pools:
-            self.pools[pool] = []
-        node = ProxyNode(url=url, pool=pool, user_agent=user_agent, headers=headers or {})
-        self.pools[pool].append(node)
-
-    def _get_best_proxy(self) -> Optional[ProxyNode]:
-        candidates = [p for pool in self.pools.values() for p in pool if p.is_available()]
-        if not candidates:
-            return None
-        return random.choice(candidates)
-
-    async def fetch(self, url: str, **kwargs) -> Any:
-        proxy_node = self._get_best_proxy()
-        proxy_dict = {"http": proxy_node.url, "https": proxy_node.url} if proxy_node else None
+    """Manages residential proxy rotation and health telemetry."""
+    
+    def __init__(self, proxy_list_path: Optional[str] = None):
+        self.proxies: List[ProxyNode] = []
+        self.proxy_list_path = proxy_list_path or os.getenv("PROXY_LIST_PATH")
+        self.residential_session_id = random.randint(10000, 99999)
+        self._session: Optional[aiohttp.ClientSession] = None
         
-        headers = kwargs.pop("headers", {})
-        if proxy_node:
-            headers.update(proxy_node.headers)
-            if proxy_node.user_agent:
-                headers["User-Agent"] = proxy_node.user_agent
+        if self.proxy_list_path:
+            self.load_from_file(self.proxy_list_path)
 
-        start_time = time.time()
+    def load_from_file(self, filepath: str):
+        """Load proxies from file in http://user:pass@host:port or host:port:user:pass format."""
+        if not os.path.exists(filepath):
+            logger.warning(f"Proxy file not found: {filepath}")
+            return
+            
         try:
-            if requests:
-                # Use curl_cffi for advanced fingerprinting
-                impersonate = proxy_node.browser_fingerprint if proxy_node else "chrome120"
-                response = await asyncio.to_thread(
-                    requests.get, 
-                    url, 
-                    proxy=proxy_node.url if proxy_node else None,
-                    headers=headers,
-                    impersonate=impersonate,
-                    timeout=30,
-                    **kwargs
-                )
+            with open(filepath, "r") as f:
+                lines = [l.strip() for l in f if l.strip()]
                 
-                latency = time.time() - start_time
-                if proxy_node:
-                    proxy_node.latency.append(latency)
-                    if response.status_code == 200:
-                        proxy_node.success_count += 1
-                    else:
-                        proxy_node.fail_count += 1
-                        if response.status_code == 403: proxy_node.status_403 += 1
-                        elif response.status_code == 429: proxy_node.status_429 += 1
-                        elif response.status_code == 530:
-                            proxy_node.status_530 += 1
-                            return await self._fallback_playwright(url, proxy_node)
+            count = 0
+            for line in lines:
+                proxy_url = line
+                if not line.startswith("http"):
+                    # Handle host:port:user:pass
+                    parts = line.split(":")
+                    if len(parts) == 4:
+                        host, port, user, password = parts
+                        proxy_url = f"http://{user}:{password}@{host}:{port}"
                 
-                return response.text
-            else:
-                raise ImportError("curl_cffi not installed")
+                self.proxies.append(ProxyNode(url=proxy_url))
+                count += 1
+            
+            logger.info(f"Loaded {count} proxies from {filepath}")
         except Exception as e:
-            logger.error(f"Fetch failed: {e}")
-            if proxy_node:
-                proxy_node.fail_count += 1
-                proxy_node.cool_down_until = time.time() + 60
-            raise
+            logger.error(f"Failed to load proxies: {e}")
 
-    async def _fallback_playwright(self, url: str, proxy_node: ProxyNode) -> str:
-        if not async_playwright:
-            logger.warning("Playwright not available for fallback")
-            proxy_node.cool_down_until = time.time() + 300
-            return ""
+    def get_proxy(self) -> Optional[str]:
+        """Get a healthy proxy from the list, or rotating residential if configured."""
+        now = time.time()
+        available = [p for p in self.proxies if p.cooldown_until < now and p.health_score > 20]
+        
+        if not available:
+            # Fallback to random if all on cooldown
+            if not self.proxies: return None
+            return random.choice(self.proxies).url
+            
+        # Select best health + low latency
+        selected = sorted(available, key=lambda x: (-x.health_score, x.avg_latency))[0]
+        return selected.url
 
-        logger.info(f"Initiating Playwright fallback for {url}")
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(proxy={"server": proxy_node.url})
-            context = await browser.new_context(user_agent=proxy_node.user_agent)
-            page = await context.new_page()
-            await page.goto(url, wait_until="networkidle")
-            content = await page.content()
-            await browser.close()
-            return content
+    def report_result(self, proxy_url: str, success: bool, status: int = 200, latency: float = 0):
+        """Update telemetry for a proxy."""
+        node = next((p for p in self.proxies if p.url == proxy_url), None)
+        if not node: return
+        
+        node.total_requests += 1
+        if success:
+            node.success_requests += 1
+            node.health_score = min(100.0, node.health_score + 2.0)
+            if latency > 0:
+                node.latencies.append(latency)
+        else:
+            if status in node.error_counts:
+                node.error_counts[status] += 1
+            
+            # Penalize based on status
+            penalty = 10.0
+            if status in [403, 429, 530]:
+                penalty = 25.0
+                node.cooldown_until = time.time() + 30 # 30s cooldown
+            elif status == 407:
+                penalty = 50.0 # Auth failure is severe
+                
+            node.health_score = max(0.0, node.health_score - penalty)
+
+    async def get_stats(self) -> Dict[str, Any]:
+        """Aggregate stats for /proxy command."""
+        total_reqs = sum(p.total_requests for p in self.proxies)
+        total_success = sum(p.success_requests for p in self.proxies)
+        
+        errors = {403: 0, 407: 0, 429: 0, 530: 0}
+        for p in self.proxies:
+            for code in errors:
+                errors[code] += p.error_counts.get(code, 0)
+        
+        avg_lat = 0
+        nodes_with_lat = [p.avg_latency for p in self.proxies if p.avg_latency > 0]
+        if nodes_with_lat:
+            avg_lat = sum(nodes_with_lat) / len(nodes_with_lat)
+            
+        health = 0
+        if self.proxies:
+            health = sum(p.health_score for p in self.proxies) / len(self.proxies)
+
+        return {
+            "total_proxies": len(self.proxies),
+            "total_requests": total_reqs,
+            "success_rate": (total_success / total_reqs * 100) if total_reqs > 0 else 0,
+            "errors": errors,
+            "avg_latency": avg_lat,
+            "health_score": health
+        }
