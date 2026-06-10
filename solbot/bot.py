@@ -177,17 +177,9 @@ class Solbot:
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
 
-        # Dynamic Telegram loading for V3 compatibility
-        try:
-            from telegram_updated import TelegramController
-            self._telegram = TelegramController(self._config.telegram, self)
-            logger.info("Using V3 Telethon Telegram Controller")
-        except (ImportError, TypeError) as e:
-            logger.warning(f"Failed to load TelegramController (V3): {e}. Falling back to TelegramManager (V2).")
-            from solbot.telegram import TelegramManager
-            self._telegram = TelegramManager(self._config.telegram)
-
-        await self._telegram.start()
+        # Check for injected Telegram controller
+        if self._telegram is None:
+            raise RuntimeError("TelegramController not injected")
         
         # New Module Starts
         await self._gecko.start()

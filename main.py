@@ -23,10 +23,11 @@ async def main():
     
     # 4. Telegram Controller (V3 Redesign)
     tg_controller = TelegramController(config.telegram, bot)
+    bot._telegram = tg_controller
     await tg_controller.start()
     
     # 5. Bot Startup
-    asyncio.create_task(bot.start())
+    await bot.start()
     
     # 6. Keep Alive
     stop_event = asyncio.Event()
