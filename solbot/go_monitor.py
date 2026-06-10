@@ -2,6 +2,7 @@
 
 import asyncio
 import aiohttp
+import os
 from typing import Set, List, Dict, Any, Optional
 from solbot.logger import get_logger
 from solbot.models import TokenEvent
@@ -15,11 +16,36 @@ class GoMonitor:
         self._bot = bot
         self._reward_threshold = reward_threshold  # in SOL
         self._poll_interval = poll_interval
-        # Updated to use livestream API to bypass Cloudflare 530 issues on frontend API
         self._api_url = "https://livestream-api.pump.fun/go/bounties"
         self._seen_bounties: Set[str] = set()
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
+        self._proxy_list_path = "/root/.secrets/webshare.txt"
+        self._proxies: List[str] = self._load_proxies()
+        self._current_proxy_idx = 0
+
+    def _load_proxies(self) -> List[str]:
+        """Load proxies from the secrets file."""
+        if not os.path.exists(self._proxy_list_path):
+            logger.warning(f"Proxy file not found at {self._proxy_list_path}")
+            return []
+        try:
+            with open(self._proxy_list_path, "r") as f:
+                return [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            logger.error(f"Failed to load proxies: {e}")
+            return []
+
+    def _get_next_proxy(self) -> Optional[str]:
+        """Rotate to the next proxy in the list."""
+        if not self._proxies:
+            return None
+        proxy = self._proxies[self._current_proxy_idx]
+        self._current_proxy_idx = (self._current_proxy_idx + 1) % len(self._proxies)
+        # Ensure it has the protocol
+        if not proxy.startswith("http"):
+            proxy = f"http://{proxy}"
+        return proxy
 
     async def start_monitoring(self):
         """Main loop for tracking new bounties."""
@@ -41,7 +67,7 @@ class GoMonitor:
         logger.info("Pump.fun GO Monitor stopped")
 
     async def _poll_bounties(self):
-        """Fetch and process active bounties from the pump.fun GO API with Cloudflare bypass."""
+        """Fetch and process active bounties with proxy failover."""
         params = {
             "offset": 0,
             "limit": 20,
@@ -49,32 +75,23 @@ class GoMonitor:
             "order": "desc"
         }
         
-        # Safe proxy and header injection
-        proxy = getattr(self._bot, "_network_manager", None)
-        proxy_url = proxy.get_proxy() if proxy else None
-        
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json",
             "Referer": "https://pump.fun/go"
         }
         
+        proxy_url = self._get_next_proxy()
+        
         try:
             async with self._session.get(self._api_url, params=params, proxy=proxy_url, headers=headers, timeout=10) as response:
-                if response.status == 530:
-                    logger.error("Cloudflare 530 Error: Request blocked by challenge/firewall. Rotating proxy...")
-                    if proxy and proxy_url:
-                        proxy.report_result(proxy_url, False, 530)
+                if response.status == 530 or response.status == 403:
+                    logger.error(f"Proxy Error {response.status}: Request blocked. Rotating proxy...")
                     return
                 
                 if response.status != 200:
                     logger.error(f"Failed to fetch bounties: HTTP {response.status}")
-                    if proxy and proxy_url:
-                        proxy.report_result(proxy_url, False, response.status)
                     return
-                
-                if proxy and proxy_url:
-                    proxy.report_result(proxy_url, True, response.status)
                 
                 data = await response.json()
                 if not isinstance(data, list):
@@ -87,7 +104,7 @@ class GoMonitor:
             logger.error(f"Exception in GO bounty poll: {e}")
 
     async def _process_bounty(self, bounty: Dict[str, Any]):
-        """Evaluate a single bounty and trigger sniping if it passes filters."""
+        """Evaluate a single bounty and trigger sniping."""
         bounty_id = str(bounty.get("id"))
         reward_lamports = bounty.get("reward_amount", 0)
         reward_sol = reward_lamports / 1e9
@@ -99,9 +116,9 @@ class GoMonitor:
         if reward_sol >= self._reward_threshold and token_mint:
             logger.info(f"Found high-reward bounty: {bounty_id} | Reward: {reward_sol} SOL | Mint: {token_mint}")
             
-            # Fetch actual token metadata to avoid mock valuation
             meta = await self._bot._pump_client.get_token_metadata(token_mint)
-            mcap_usd = float(meta.get("market_cap_sol", 0)) * self._bot._telegram._sol_price
+            sol_price = getattr(self._bot._telegram, '_sol_price', 150.0)
+            mcap_usd = float(meta.get("market_cap_sol", 0)) * sol_price
 
             token = TokenEvent(
                 mint=token_mint,
@@ -113,7 +130,6 @@ class GoMonitor:
                 timestamp=asyncio.get_event_loop().time()
             )
 
-            # AI Filtering logic
             if self._bot._ai_enabled:
                 token_data = {
                     'mint': token.mint,
@@ -123,11 +139,11 @@ class GoMonitor:
                 }
                 score = await self._bot._ai_filter.score_token(token_data)
                 if score < self._bot._ai_min_score:
+                    self._bot._ai_rejects_count += 1
                     logger.warning(f"AI score {score} < {self._bot._ai_min_score}, skipping GO token {token.symbol}")
                     self._seen_bounties.add(bounty_id)
                     return
 
-            # Trigger Snipe
             logger.info(f"GO Bounty token {token_mint} passed filters. Sniping...")
             asyncio.create_task(self._bot._execute_snipe(token, self._bot._config.jupiter.buy_amount_sol, f"GO Bounty Sniper ({reward_sol} SOL)"))
             

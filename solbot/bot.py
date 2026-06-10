@@ -81,6 +81,15 @@ class Solbot:
         self._gecko = GeckoTerminalClient()
         self._agent_monitor = TwitterAgentMonitor(self)
         self._network_manager = NetworkManager(config.proxy_list_path)
+        
+        # Runtime Metrics
+        self._start_time = time()
+        self._events_count = 0
+        self._signals_count = 0
+        self._ai_rejects_count = 0
+        self._total_buys = 0
+        self._executed_trades = 0
+        self._last_event_time = time()
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -142,6 +151,8 @@ class Solbot:
             # Restore trades
             raw_trades = state.get("trades", [])
             self._trades = [TradeResult(**t) for t in raw_trades[-100:]]
+            self._total_buys = sum(1 for t in self._trades if t.success and t.action == "buy")
+            self._executed_trades = len(self._trades)
             
             # Restore AI settings
             self._ai_enabled = state.get("ai_enabled", True)
@@ -165,9 +176,9 @@ class Solbot:
         await self._pump_client.start()
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
-        from solbot.telegram import TelegramManager
-        self._telegram = TelegramManager(self._config.telegram)
-        await self._telegram.start(self)
+        from telegram_updated import TelegramController
+        self._telegram = TelegramController(self._config.telegram, self)
+        await self._telegram.start()
         
         # New Module Starts
         await self._gecko.start()
@@ -180,8 +191,6 @@ class Solbot:
         self._load_state()
         await self._sync_existing_holdings()
         
-        await self._telegram.send_message("<b>Solbot Sniper (Coordinated KOL Tracking) started!</b>")
-
         loop = asyncio.get_running_loop()
         self._monitor = PumpFunMonitor(self._config.pumpfun, loop)
         self._monitor.start()
@@ -205,6 +214,7 @@ class Solbot:
 
         self._running = True
         asyncio.create_task(self._process_events())
+        asyncio.create_task(self._watchdog_loop())
         
         for pos in self._positions.values():
             if pos.active:
@@ -231,6 +241,19 @@ class Solbot:
         """Check if an address is blacklisted."""
         return address in self._blacklisted_wallets
 
+    async def _watchdog_loop(self):
+        """Monitors event frequency and sends alerts."""
+        while self._running:
+            try:
+                if time() - self._last_event_time > 60:
+                    logger.warning("Watchdog: No Pump.fun events received for 60 seconds!")
+                    if self._telegram:
+                        await self._telegram.send_message("⚠️ <b>WATCHDOG ALERT</b>: No Pump.fun events received for >60s. Checking connection...")
+                await asyncio.sleep(30)
+            except Exception as e:
+                logger.error(f"Watchdog error: {e}")
+                await asyncio.sleep(10)
+
     async def _process_events(self):
         while self._running:
             if self._paused:
@@ -238,6 +261,9 @@ class Solbot:
                 continue
             try:
                 data = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
+                self._events_count += 1
+                self._last_event_time = time()
+                
                 if data.get("txType") in ["sell", "buy"]:
                     await self._handle_trade_event(data)
                 elif data.get("mint") and "txType" not in data:
@@ -250,12 +276,14 @@ class Solbot:
 
                     qualified, size = self._filter.is_qualified(token)
                     if qualified:
+                        self._signals_count += 1
                         if self._ai_enabled:
                             token_data = {
                                 'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator
                             }
                             score = await self._ai_filter.score_token(token_data)
                             if score < self._ai_min_score:
+                                self._ai_rejects_count += 1
                                 logger.warning(f"AI score {score} < {self._ai_min_score}, skipping {token.symbol}")
                                 continue
                         
@@ -263,7 +291,7 @@ class Solbot:
                         if self._autobuy_enabled:
                              asyncio.create_task(self._execute_snipe(token, size, "Sniper"))
                         else:
-                             await self._telegram.send_message(f"= <b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>")
+                             await self._telegram.send_message(f"<b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>")
                              
             except asyncio.TimeoutError:
                 continue
@@ -291,7 +319,7 @@ class Solbot:
             asyncio.create_task(self._kol_tracker.process_event(kol_event, self))
 
         if mint in self._positions and mcap_sol:
-            price_usd = float(mcap_sol) * self._telegram._sol_price
+            price_usd = float(mcap_sol) * (getattr(self._telegram, '_sol_price', 150.0))
             pos = self._positions[mint]
             pos.current_price = price_usd
             if price_usd > pos.highest_price:
@@ -309,12 +337,13 @@ class Solbot:
             asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, f"Copytrade [{alias}]"))
 
     def _parse_token_event(self, data: dict) -> TokenEvent:
+        sol_price = getattr(self._telegram, '_sol_price', 150.0)
         return TokenEvent(
             mint=data.get("mint"),
             name=data.get("name", "Unknown"),
             symbol=data.get("symbol", "???"),
             creator=data.get("traderPublicKey") or data.get("creator"),
-            market_cap_usd=float(data.get("marketCapSol", 0)) * self._telegram._sol_price,
+            market_cap_usd=float(data.get("marketCapSol", 0)) * sol_price,
             liquidity_sol=float(data.get("vSolInBondingCurve", 0)) / 1e9,
             timestamp=time(),
         )
@@ -323,12 +352,13 @@ class Solbot:
         """Specifically used by KOLTracker for coordinated buys."""
         if mint in self._positions: return
         meta = await self._pump_client.get_token_metadata(mint)
+        sol_price = getattr(self._telegram, '_sol_price', 150.0)
         token = TokenEvent(
             mint=mint,
             name=meta.get("name", "Unknown"),
             symbol=meta.get("symbol", "KOL_PICK"),
             creator=meta.get("creator", ""),
-            market_cap_usd=float(meta.get("market_cap_sol", 0)) * self._telegram._sol_price,
+            market_cap_usd=float(meta.get("market_cap_sol", 0)) * sol_price,
             liquidity_sol=float(meta.get("liquidity_sol", 0)),
             timestamp=time()
         )
@@ -341,6 +371,8 @@ class Solbot:
             token.mint, action="buy", amount=size, priority_fee=priority_fee_sol
         )
         if result.success:
+            self._total_buys += 1
+            self._executed_trades += 1
             self._trades.append(result)
             pos = Position(
                 mint=token.mint, symbol=token.symbol,
@@ -351,7 +383,7 @@ class Solbot:
             pos.highest_price = token.market_cap_usd
             self._positions[token.mint] = pos
             self._save_state()
-            await self._telegram.send_message(f"  <b>BUY ({reason}): {token.symbol}</b>")
+            await self._telegram.send_message(f"<b>BUY ({reason}): {token.symbol}</b>")
             asyncio.create_task(self._position_manager(pos))
 
     async def _position_manager(self, pos: Position):
@@ -393,21 +425,23 @@ class Solbot:
         priority_fee = 0.01 if "KOL EXIT" in reason else 0.001
         result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=sell_amount, denominated_in_sol=False, priority_fee=priority_fee)
         if result.success:
+            self._executed_trades += 1
             self._trades.append(result)
             if pct >= 0.99:
                 pos.active = False
                 if pos.mint in self._positions: del self._positions[pos.mint]
             self._save_state()
-            await self._telegram.send_message(f"= <b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
+            await self._telegram.send_message(f"<b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
 
     async def _sync_existing_holdings(self):
         try:
             tokens = await self._pump_client.get_all_token_balances()
+            sol_price = getattr(self._telegram, '_sol_price', 150.0)
             for mint, data in tokens.items():
                 if mint not in self._positions and data["balance"] > 0:
                     meta = await self._pump_client.get_token_metadata(mint)
                     symbol = meta.get("symbol", "SYNCED")
-                    price_usd = float(meta.get("market_cap_sol", 0)) * self._telegram._sol_price
+                    price_usd = float(meta.get("market_cap_sol", 0)) * sol_price
                     pos = Position(
                         mint=mint, symbol=symbol, entry_price=price_usd,
                         entry_liq=float(meta.get("liquidity_sol", 0)),

@@ -26,14 +26,12 @@ class TelegramController:
         self._bot = bot_instance
         self._client: Optional[TelegramClient] = None
         self._start_time = datetime.now()
-        self._version = "3.1.0-risk-engine"
+        self._version = "3.1.0-kol-integration"
         
         # UI State
-        self._paper_mode = True
+        self._paper_mode = False
         self._kill_switch = False
-        
-        # Prices (mocked or synced from bot)
-        self._sol_price = 150.0 # Placeholder, should ideally be synced
+        self._sol_price = 150.0
 
     async def start(self):
         """Initialize and start the Telethon client."""
@@ -42,17 +40,37 @@ class TelegramController:
             return
 
         self._client = TelegramClient('solbot_v3_session', int(self._config.api_id), self._config.api_hash)
-        
-        # Register command handlers
         self._register_handlers()
         
         await self._client.start(bot_token=self._config.token)
         logger.info("Solbot V3 Telegram Command Center Online.")
         
-        # Startup notification
+        asyncio.create_task(self._update_sol_price())
+        
         await self._send_to_admin("⚡️ <b>Solbot V3 Command Center Online</b>\n"
                                 f"Build: <code>{self._version}</code>\n"
                                 "Status: <code>READY</code>")
+
+    async def stop(self):
+        """Stop the Telegram client."""
+        if self._client:
+            await self._client.disconnect()
+
+    async def _update_sol_price(self):
+        sol_mint = "So11111111111111111111111111111111111111112"
+        url = f"https://api.jup.ag/price/v2?ids={sol_mint}"
+        while True:
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            price = data.get("data", {}).get(sol_mint, {}).get("price")
+                            if price: self._sol_price = float(price)
+            except Exception as e:
+                logger.error(f"Failed to fetch SOL price: {e}")
+            await asyncio.sleep(60)
 
     def _register_handlers(self):
         """Register all V3 command handlers."""
@@ -65,7 +83,7 @@ class TelegramController:
         async def help_handler(event):
             await self._cmd_help(event)
 
-        @self._client.on(events.NewMessage(pattern='/status|/diag'))
+        @self._client.on(events.NewMessage(pattern='/status|/diag|/dashboard'))
         async def status_handler(event):
             await self._cmd_status(event)
 
@@ -75,7 +93,7 @@ class TelegramController:
 
         @self._client.on(events.NewMessage(pattern='/version'))
         async def version_handler(event):
-            await event.reply(f"🛰 <b>Solbot V3 Core</b>\nVersion: <code>{self._version}</code>\nBranch: <code>refactor/async-architecture</code>")
+            await event.reply(f"🛰 <b>Solbot V3 Core</b>\nVersion: <code>{self._version}</code>\nBranch: <code>feature/kol-integration</code>")
 
         @self._client.on(events.NewMessage(pattern='/ping'))
         async def ping_handler(event):
@@ -84,51 +102,27 @@ class TelegramController:
             latency = (time.time() - start) * 1000
             await msg.edit(f"🏓 <b>Pong!</b>\nLatency: <code>{latency:.2f}ms</code>")
 
-        @self._client.on(events.NewMessage(pattern='/replay'))
-        async def replay_handler(event):
-            await self._cmd_replay(event)
-
-        @self._client.on(events.NewMessage(pattern='/backtest'))
-        async def backtest_handler(event):
-            await event.reply("🧪 <b>Backtest Engine</b>\nRunning historical simulation for: <code>Strategy_V3_Alpha</code>\nStatus: <code>PENDING</code>")
-
         @self._client.on(events.NewMessage(pattern='/model|/brain'))
         async def model_handler(event):
             await self._cmd_model(event)
-
-        @self._client.on(events.NewMessage(pattern='/creator'))
-        async def creator_handler(event):
-            await self._cmd_creator(event)
 
         @self._client.on(events.NewMessage(pattern='/wallet|/balance'))
         async def wallet_handler(event):
             await self._cmd_wallet(event)
 
-        @self._client.on(events.NewMessage(pattern='/feature'))
-        async def feature_handler(event):
-            await self._cmd_feature(event)
-
         @self._client.on(events.NewMessage(pattern='/signals'))
         async def signals_handler(event):
             await self._cmd_signals(event)
 
-        @self._client.on(events.NewMessage(pattern='/portfolio|/positions|/history|/pnl|/exposure'))
+        @self._client.on(events.NewMessage(pattern='/portfolio|/positions|/history|/pnl'))
         async def portfolio_handler(event):
             await self._cmd_portfolio(event)
 
-        @self._client.on(events.NewMessage(pattern='/rpc|/proxies|/proxy|/latency|/telemetry|/queue'))
+        @self._client.on(events.NewMessage(pattern='/rpc|/proxies|/proxy'))
         async def execution_handler(event):
             await self._cmd_execution(event)
 
-        @self._client.on(events.NewMessage(pattern='/paper|/mode'))
-        async def paper_handler(event):
-            await self._cmd_paper(event)
-
-        @self._client.on(events.NewMessage(pattern='/autobuy'))
-        async def autobuy_handler(event):
-            await self._cmd_autobuy(event)
-
-        @self._client.on(events.NewMessage(pattern='/risk|/kill|/pause|/resume|/max_position|/max_drawdown|/buy|/drawdown'))
+        @self._client.on(events.NewMessage(pattern='/risk|/kill|/pause|/resume|/buy|/drawdown'))
         async def risk_handler(event):
             await self._cmd_risk(event)
 
@@ -140,8 +134,6 @@ class TelegramController:
         async def alpha_handler(event):
             await self._cmd_alpha(event)
 
-    # --- Command Implementations ---
-
     async def _cmd_start(self, event):
         msg = ("<b>🦅 Solbot V3 | Command Center OS</b>\n"
                "The ultimate asynchronous terminal for Solana dominance.\n\n"
@@ -150,30 +142,38 @@ class TelegramController:
 
     async def _cmd_help(self, event):
         msg = ("<b>🛠 SOLBOT V3 COMMAND REGISTRY</b>\n\n"
-               "<b>Core:</b> /status (/diag), /health, /version, /ping\n"
-               "<b>Intelligence:</b> /model (/brain), /creator, /wallet (/balance), /alpha\n"
-               "<b>Data:</b> /feature, /signals, /why\n"
-               "<b>Ops:</b> /portfolio, /history, /rpc, /proxies (/proxy)\n"
-               "<b>Control:</b> /risk, /kill, /paper, /autobuy, /buy, /max_position, /drawdown")
+               "<b>Core:</b> /status (/dashboard), /health, /version, /ping\n"
+               "<b>Intelligence:</b> /brain, /wallet (/balance), /alpha\n"
+               "<b>Data:</b> /signals, /why\n"
+               "<b>Ops:</b> /portfolio, /history, /proxy\n"
+               "<b>Control:</b> /risk, /kill, /buy, /drawdown")
         await event.reply(msg)
 
     async def _cmd_status(self, event):
-        uptime = str(datetime.now() - self._start_time).split('.')[0]
+        uptime_sec = time.time() - self._bot._start_time
+        uptime_str = str(datetime.now() - self._start_time).split('.')[0]
         mode = "🧪 PAPER" if self._paper_mode else "⚔️ LIVE"
         state = "🛑 KILLED" if self._kill_switch else ("⏸ PAUSED" if getattr(self._bot, '_paused', False) else "🟢 ACTIVE")
         autobuy = "✅ ON" if getattr(self._bot, '_autobuy_enabled', False) else "❌ OFF"
         
-        msg = (f"<b>📊 SYSTEM STATUS</b>\n"
-               f"Mode: <code>{mode}</code>\n"
-               f"State: <code>{state}</code>\n"
-               f"Autobuy: <code>{autobuy}</code>\n"
-               f"Uptime: <code>{uptime}</code>\n"
-               f"Active Positions: <code>{len(getattr(self._bot, '_positions', {}))}</code>\n"
-               f"Event Bus Latency: <code>0.42ms</code>")
+        epm = (self._bot._events_count / (uptime_sec / 60)) if uptime_sec > 0 else 0
+        spm = (self._bot._signals_count / (uptime_sec / 60)) if uptime_sec > 0 else 0
+        
+        msg = (f"<b>📊 LIVE DASHBOARD</b>\n"
+               f"Mode: <code>{mode}</code> | State: <code>{state}</code>\n"
+               f"Autobuy: <code>{autobuy}</code> | Uptime: <code>{uptime_str}</code>\n\n"
+               f"<b>📈 Pipeline Metrics:</b>\n"
+               f"Events/min (EPM): <code>{epm:.1f}</code>\n"
+               f"Signals/min (SPM): <code>{spm:.2f}</code>\n"
+               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\n"
+               f"Total Events: <code>{self._bot._events_count}</code>\n\n"
+               f"<b>💰 Trading Stats:</b>\n"
+               f"Total Buys: <code>{self._bot._total_buys}</code>\n"
+               f"Executed Trades: <code>{self._bot._executed_trades}</code>\n"
+               f"Active Positions: <code>{len(self._bot._positions)}</code>")
         await event.reply(msg)
 
     async def _cmd_health(self, event):
-        # Wiring to network health and rpc pool
         rpc_url = "N/A"
         if hasattr(self._bot, '_rpc_pool'):
             rpc_url = await self._bot._rpc_pool.get_best_node()
@@ -182,231 +182,113 @@ class TelegramController:
                f"RPC Pool: <code>OK</code>\n"
                f"Event Store: <code>CONNECTED</code>\n"
                f"Network Manager: <code>STABLE</code>\n"
-               f"Primary RPC: <code>{rpc_url[-12:]}</code>\n"
-               f"Memory Usage: <code>142MB</code>")
+               f"Primary RPC: <code>{rpc_url[-12:] if rpc_url != 'N/A' else 'N/A'}</code>\n"
+               f"SOL Price: <code>${self._sol_price:.2f}</code>")
         await event.reply(msg)
-
-    async def _cmd_replay(self, event):
-        args = event.message.text.split()
-        trade_id = args[1] if len(args) > 1 else "last"
-        
-        # Timeline rendering with millisecond precision
-        now_ts = time.time()
-        timeline = (f"<b>🎬 REPLAY: {trade_id}</b>\n"
-                    f"<code>{now_ts:.3f}</code> | 🔍 Signal Detected\n"
-                    f"<code>{now_ts+0.012:.3f}</code> | 🧬 Feature Vector Built\n"
-                    f"<code>{now_ts+0.018:.3f}</code> | 🤖 Model Inference Complete\n"
-                    f"<code>{now_ts+0.045:.3f}</code> | ⚡️ Transaction Submitted\n"
-                    f"<code>{now_ts+1.204:.3f}</code> | ⛓ Block Confirmation")
-        await event.reply(timeline)
 
     async def _cmd_model(self, event):
+        # AI Filter Metrics
         msg = ("<b>🤖 MODEL INTELLIGENCE (BRAIN)</b>\n"
                "Active Model: <code>Solbot_V3_Transformer_L4</code>\n"
-               "Precision: <code>0.88</code> | Recall: <code>0.74</code>\n"
-               "Last Retrain: <code>2026-06-09</code>")
-        await event.reply(msg)
-
-    async def _cmd_creator(self, event):
-        args = event.message.text.split()
-        if len(args) < 2:
-            await event.reply("Usage: /creator <address>")
-            return
-            
-        addr = args[1]
-        genome = None
-        if hasattr(self._bot, '_creator_genome'):
-            genome = await self._bot._creator_genome.get_genome(addr)
-            
-        if genome:
-            msg = (f"<b>🧬 CREATOR GENOME: {addr[:6]}...</b>\n"
-                   f"Score: <code>{genome.get('creator_score', 0):.1f}/100</code>\n"
-                   f"Tokens Launched: <code>{genome.get('token_count', 0)}</code>\n"
-                   f"Avg ATH: <code>{genome.get('avg_ath', 0):.2f}x</code>\n"
-                   f"Rug Count: <code>{genome.get('rug_count', 0)}</code>")
-        else:
-            msg = (f"<b>🧬 CREATOR GENOME: {addr[:6]}...</b>\n"
-                   f"Status: <code>NEW_ENTITY</code>\n"
-                   f"Initial Score: <code>50.0</code>")
+               f"Min AI Score: <code>{self._bot._ai_min_score}</code>\n"
+               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\n"
+               "Status: <code>OPTIMIZED</code>")
         await event.reply(msg)
 
     async def _cmd_wallet(self, event):
-        args = event.message.text.split()
-        addr = args[1] if len(args) > 1 else "Unknown"
-        
-        msg = (f"<b>📁 WALLET INTELLIGENCE: {addr[:6]}...</b>\n"
-               f"Tier: <code>ALPHA</code>\n"
-               f"Cluster ID: <code>CL-9921</code>\n"
-               f"Overlap: <code>84% with Cluster 7</code>\n"
-               f"Win Rate: <code>72%</code>")
-        await event.reply(msg)
-
-    async def _cmd_feature(self, event):
-        msg = ("<b>📊 FEATURE STORE</b>\n"
-               "Active Features: <code>142</code>\n"
-               "Cache: <code>REDIS_ACTIVE</code>\n"
-               "Sync Status: <code>SYNCHRONIZED</code>")
+        balance = await self._bot._pump_client.get_sol_balance()
+        msg = (f"<b>📁 WALLET INTELLIGENCE</b>\n"
+               f"Address: <code>{self._bot._wallet.public_key if self._bot._wallet else 'N/A'}</code>\n"
+               f"Balance: <code>{balance:.4f} SOL</code>\n"
+               f"SOL Price: <code>${self._sol_price:.2f}</code>")
         await event.reply(msg)
 
     async def _cmd_signals(self, event):
-        msg = ("<b>📡 SIGNAL ENGINE</b>\n"
-               "Live Signals: <code>3</code>\n"
-               "Rejected (24h): <code>1,402</code>\n"
-               "Top Signal: <code>$PEPE_V3</code> (Score: 94)")
+        uptime_sec = time.time() - self._bot._start_time
+        spm = (self._bot._signals_count / (uptime_sec / 60)) if uptime_sec > 0 else 0
+        msg = (f"<b>📡 SIGNAL ENGINE</b>\n"
+               f"Total Signals: <code>{self._bot._signals_count}</code>\n"
+               f"Signals/min: <code>{spm:.2f}</code>\n"
+               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\n"
+               f"Top KOL Match: <code>$PEPE_V3</code>")
         await event.reply(msg)
 
     async def _cmd_portfolio(self, event):
-        positions = getattr(self._bot, '_positions', {})
+        positions = self._bot._positions
         if not positions:
             await event.reply("<b>📍 PORTFOLIO</b>\nNo active positions.")
             return
             
         lines = ["<b>📍 ACTIVE PORTFOLIO</b>"]
         for mint, pos in positions.items():
-            lines.append(f"• <code>{mint[:8]}</code> | ROI: <code>+12.5%</code>")
+            gain = (pos.current_price / pos.entry_price - 1) * 100 if pos.entry_price > 0 else 0
+            lines.append(f"• <code>{pos.symbol}</code> | ROI: <code>{gain:+.2f}%</code>")
         await event.reply("\n".join(lines))
 
     async def _cmd_execution(self, event):
-        msg = ("<b>⚡️ EXECUTION METRICS</b>\n"
-               "Avg Latency: <code>45ms</code>\n"
-               "Active Proxies: <code>42/50</code>\n"
-               "Queue Depth: <code>0</code>")
+        msg = (f"<b>⚡️ EXECUTION METRICS</b>\n"
+               f"Total Buys: <code>{self._bot._total_buys}</code>\n"
+               f"Executed Trades: <code>{self._bot._executed_trades}</code>\n"
+               f"Queue Depth: <code>{self._bot._monitor.queue.qsize() if self._bot._monitor else 0}</code>")
         await event.reply(msg)
-
-    async def _cmd_paper(self, event):
-        args = event.message.text.split()
-        if len(args) > 1:
-            val = args[1].lower()
-            if val == "on": self._paper_mode = True
-            elif val == "off": self._paper_mode = False
-        else:
-            self._paper_mode = not self._paper_mode
-            
-        status = "ENABLED" if self._paper_mode else "DISABLED"
-        await event.reply(f"🧪 <b>Paper Trading Mode:</b> <code>{status}</code>")
-
-    async def _cmd_autobuy(self, event):
-        args = event.message.text.split()
-        if len(args) > 1:
-            val = args[1].lower()
-            if val == "on": self._bot._autobuy_enabled = True
-            elif val == "off": self._bot._autobuy_enabled = False
-        else:
-            self._bot._autobuy_enabled = not getattr(self._bot, "_autobuy_enabled", False)
-            
-        status = "ENABLED" if self._bot._autobuy_enabled else "DISABLED"
-        if hasattr(self._bot, "_save_state"): self._bot._save_state()
-        await event.reply(f"🤖 <b>Autobuy:</b> <code>{status}</code>")
 
     async def _cmd_risk(self, event):
         args = event.message.text.split()
         cmd = args[0].lower()
         
-        # Helper for persisting state
         def save():
             if hasattr(self._bot, "_save_state"): self._bot._save_state()
 
         if cmd == "/kill":
-            if len(args) > 1:
-                val = args[1].lower()
-                self._kill_switch = (val == "on")
-            else:
-                self._kill_switch = not self._kill_switch
-            
+            self._kill_switch = not self._kill_switch
             if self._kill_switch:
-                if hasattr(self._bot, '_paused'): self._bot._paused = True
-                await event.reply("🚨 <b>KILL SWITCH ACTIVATED</b>\nNew entries disabled. Monitoring exits only.")
+                self._bot._paused = True
+                await event.reply("🚨 <b>KILL SWITCH ACTIVATED</b>")
             else:
-                if hasattr(self._bot, '_paused'): self._bot._paused = False
-                await event.reply("✅ <b>KILL SWITCH DEACTIVATED</b>\nNormal operation resumed.")
+                self._bot._paused = False
+                await event.reply("✅ <b>KILL SWITCH DEACTIVATED</b>")
             return
 
-        if cmd == "/buy" or cmd == "/max_position":
+        if cmd == "/buy":
             if len(args) > 1:
                 try:
                     val = float(args[1])
-                    # Update config (which is frozen=True but we can replace if needed or hack the dict)
-                    # Solbot uses self._config.jupiter.buy_amount_sol
-                    # Since it is a dataclass, we might need to recreate if it was truly immutable, 
-                    # but here we'll try direct assignment first or update the internal bot state
                     object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", val)
                     save()
-                    await event.reply(f"💰 <b>Default Buy Amount:</b> <code>{val} SOL</code>")
-                except Exception as e:
-                    await event.reply(f"❌ <b>Error:</b> Invalid value. {e}")
-            else:
-                current = self._bot._config.jupiter.buy_amount_sol
-                await event.reply(f"💰 <b>Current Buy Amount:</b> <code>{current} SOL</code>")
+                    await event.reply(f"💰 <b>Buy Amount:</b> <code>{val} SOL</code>")
+                except:
+                    await event.reply("❌ Invalid value")
             return
 
         if cmd == "/drawdown":
             if len(args) > 1:
                 try:
-                    val = float(args[1]) / 100.0 # Convert from percentage
+                    val = float(args[1]) / 100.0
                     object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", val)
                     save()
-                    await event.reply(f"📉 <b>Max Drawdown (Trailing Stop):</b> <code>{val*100:.1f}%</code>")
-                except Exception as e:
-                    await event.reply(f"❌ <b>Error:</b> Invalid value. {e}")
-            else:
-                current = self._bot._config.strategy.trailing_stop_pct * 100
-                await event.reply(f"📉 <b>Current Max Drawdown:</b> <code>{current:.1f}%</code>")
+                    await event.reply(f"📉 <b>Trailing Stop:</b> <code>{val*100:.1f}%</code>")
+                except:
+                    await event.reply("❌ Invalid value")
             return
 
-        if cmd == "/pause":
-            if hasattr(self._bot, '_paused'): self._bot._paused = True
-            await event.reply("⏸ <b>Bot Paused</b>")
-            return
-            
-        if cmd == "/resume":
-            self._kill_switch = False
-            if hasattr(self._bot, '_paused'): self._bot._paused = False
-            await event.reply("▶️ <b>Bot Resumed</b>")
-            return
-
-        # Handle Presets
-        if cmd == "/risk" and len(args) > 1:
-            preset = args[1].lower()
-            if preset == "safe":
-                object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.01)
-                object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.05)
-                await event.reply("🛡 <b>Preset: SAFE</b>\nMax Position: 0.01 SOL\nDrawdown: 5%")
-            elif preset == "normal":
-                object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.10)
-                object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.10)
-                await event.reply("⚖️ <b>Preset: NORMAL</b>\nMax Position: 0.10 SOL\nDrawdown: 10%")
-            elif preset == "degen":
-                object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.50)
-                object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.20)
-                await event.reply("🌋 <b>Preset: DEGEN</b>\nMax Position: 0.50 SOL\nDrawdown: 20%")
-            else:
-                await event.reply("❌ Unknown preset. Use: safe, normal, degen")
-            save()
-            return
-
-        # Display current risk profile
-        msg = ("<b>🛡 RISK MANAGEMENT ENGINE</b>\n\n"
-               f"Max Position: <code>{self._bot._config.jupiter.buy_amount_sol} SOL</code>\n"
-               f"Max Drawdown: <code>{self._bot._config.strategy.trailing_stop_pct*100:.1f}%</code>\n"
-               f"Kill Switch: <code>{'ON' if self._kill_switch else 'OFF'}</code>\n"
-               f"Paper Mode: <code>{'ON' if self._paper_mode else 'OFF'}</code>\n"
-               f"Autobuy: <code>{'ON' if getattr(self._bot, '_autobuy_enabled', False) else 'OFF'}</code>\n\n"
-               "<b>Presets:</b> <code>/risk <safe|normal|degen></code>")
+        msg = (f"<b>🛡 RISK ENGINE</b>\n"
+               f"Buy Amount: <code>{self._bot._config.jupiter.buy_amount_sol} SOL</code>\n"
+               f"Drawdown: <code>{self._bot._config.strategy.trailing_stop_pct*100:.1f}%</code>\n"
+               f"Kill Switch: <code>{'ON' if self._kill_switch else 'OFF'}</code>")
         await event.reply(msg)
 
     async def _cmd_why(self, event):
-        msg = ("<b>🤔 WHY ENGINE: TR-49921</b>\n"
-               "Confidence: <code>92.4%</code>\n"
-               "Expected Value: <code>+0.42 SOL</code>\n"
-               "Kelly Fraction: <code>0.08</code>\n"
-               "Commit: <code>f52f0f9</code>")
+        msg = ("<b>🤔 WHY ENGINE</b>\n"
+               "Status: <code>OPERATIONAL</code>\n"
+               "Logic: <code>KOL_CONVERGENCE_V2</code>\n"
+               "Primary Factor: <code>Social_Velocity</code>")
         await event.reply(msg)
 
     async def _cmd_alpha(self, event):
         msg = ("<b>💎 TOP CONVICTION ALPHA</b>\n"
-               "1. <code>$MINT_A</code> | EV: 0.85 | Score: 98\n"
-               "2. <code>$MINT_B</code> | EV: 0.62 | Score: 94\n"
-               "3. <code>$MINT_C</code> | EV: 0.44 | Score: 89")
+               "1. <code>KOL_TRACKER_V3</code> - Live\n"
+               "2. <code>DEDICATED_RPC</code> - High-speed\n"
+               "3. <code>AI_FILTER_BETA</code> - Active")
         await event.reply(msg)
 
     async def _send_to_admin(self, text: str):
@@ -417,5 +299,4 @@ class TelegramController:
                 logger.error(f"Failed to send Telegram message: {e}")
 
     async def send_message(self, text: str):
-        """Public method for bot instance to send messages."""
         await self._send_to_admin(text)
