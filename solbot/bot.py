@@ -260,6 +260,7 @@ class Solbot:
                 continue
             try:
                 data = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
+                logger.info(f"RAW EVENT: {data}")
                 self._events_count += 1
                 if data.get("txType") in ["sell", "buy"]:
                     await self._handle_trade_event(data)
