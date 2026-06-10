@@ -5,6 +5,7 @@ import signal
 import os
 import sys
 import json
+import logging
 from time import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, List, Any, Set, TYPE_CHECKING
@@ -32,6 +33,7 @@ from solbot.pump_movers import PumpMovers
 from solbot.geckoterminal import GeckoTerminalClient
 from solbot.twitter_agents import TwitterAgentMonitor
 from solbot.core.network import NetworkManager
+from solbot.database import DatabaseManager
 
 logger = get_logger("bot")
 
@@ -58,7 +60,7 @@ class Solbot:
         self._monitor: Optional[PumpFunMonitor] = None
         self._pump_client: Optional[PumpFunClient] = None
         self._jupiter: Optional[JupiterClient] = None
-        self._telegram: Optional["TelegramManager"] = None
+        self._telegram: Any = None
         self._filter: Optional[TokenFilter] = None
         self._twitter: Optional[TwitterMonitor] = None
         self._running = False
@@ -81,6 +83,7 @@ class Solbot:
         self._gecko = GeckoTerminalClient()
         self._agent_monitor = TwitterAgentMonitor(self)
         self._network_manager = NetworkManager(config.proxy_list_path)
+        self._db = DatabaseManager()
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -165,21 +168,18 @@ class Solbot:
         await self._pump_client.start()
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
-        
-        # Determine which Telegram module to use
+
+        # Dynamic Telegram loading for V3 compatibility
         try:
             from telegram_updated import TelegramController
             self._telegram = TelegramController(self._config.telegram, self)
-        except ImportError:
+            logger.info("Using V3 Telethon Telegram Controller")
+        except (ImportError, TypeError) as e:
+            logger.warning(f"Failed to load TelegramController (V3): {e}. Falling back to TelegramManager (V2).")
             from solbot.telegram import TelegramManager
             self._telegram = TelegramManager(self._config.telegram)
-        
-        # Start Telegram
-        if hasattr(self._telegram, 'start'):
-            if 'TelegramController' in str(type(self._telegram)):
-                 await self._telegram.start()
-            else:
-                 await self._telegram.start(self)
+
+        await self._telegram.start()
         
         # New Module Starts
         await self._gecko.start()
@@ -275,7 +275,7 @@ class Solbot:
                         if self._autobuy_enabled:
                              asyncio.create_task(self._execute_snipe(token, size, "Sniper"))
                         else:
-                             await self._telegram.send_message(f"<b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>")
+                             await self._telegram.send_message(f"= <b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>")
                              
             except asyncio.TimeoutError:
                 continue
@@ -302,8 +302,8 @@ class Solbot:
             }
             asyncio.create_task(self._kol_tracker.process_event(kol_event, self))
 
+        sol_price = getattr(self._telegram, "_sol_price", 150.0)
         if mint in self._positions and mcap_sol:
-            sol_price = getattr(self._telegram, '_sol_price', 150.0)
             price_usd = float(mcap_sol) * sol_price
             pos = self._positions[mint]
             pos.current_price = price_usd
@@ -322,7 +322,7 @@ class Solbot:
             asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, f"Copytrade [{alias}]"))
 
     def _parse_token_event(self, data: dict) -> TokenEvent:
-        sol_price = getattr(self._telegram, '_sol_price', 150.0)
+        sol_price = getattr(self._telegram, "_sol_price", 150.0)
         return TokenEvent(
             mint=data.get("mint"),
             name=data.get("name", "Unknown"),
@@ -337,7 +337,7 @@ class Solbot:
         """Specifically used by KOLTracker for coordinated buys."""
         if mint in self._positions: return
         meta = await self._pump_client.get_token_metadata(mint)
-        sol_price = getattr(self._telegram, '_sol_price', 150.0)
+        sol_price = getattr(self._telegram, "_sol_price", 150.0)
         token = TokenEvent(
             mint=mint,
             name=meta.get("name", "Unknown"),
@@ -366,7 +366,7 @@ class Solbot:
             pos.highest_price = token.market_cap_usd
             self._positions[token.mint] = pos
             self._save_state()
-            await self._telegram.send_message(f"<b>BUY ({reason}): {token.symbol}</b>")
+            await self._telegram.send_message(f"  <b>BUY ({reason}): {token.symbol}</b>")
             asyncio.create_task(self._position_manager(pos))
 
     async def _position_manager(self, pos: Position):
@@ -413,12 +413,12 @@ class Solbot:
                 pos.active = False
                 if pos.mint in self._positions: del self._positions[pos.mint]
             self._save_state()
-            await self._telegram.send_message(f"<b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
+            await self._telegram.send_message(f"= <b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
 
     async def _sync_existing_holdings(self):
         try:
             tokens = await self._pump_client.get_all_token_balances()
-            sol_price = getattr(self._telegram, '_sol_price', 150.0)
+            sol_price = getattr(self._telegram, "_sol_price", 150.0)
             for mint, data in tokens.items():
                 if mint not in self._positions and data["balance"] > 0:
                     meta = await self._pump_client.get_token_metadata(mint)
