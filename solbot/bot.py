@@ -181,16 +181,26 @@ class Solbot:
         if self._telegram is None:
             raise RuntimeError("TelegramController not injected")
         
-        # New Module Starts
-        await self._gecko.start()
-        await self._agent_monitor.start()
+        # New Module Starts with Error Handling
+        try:
+            await self._gecko.start()
+        except Exception as e:
+            logger.error(f"Failed to start GeckoTerminalClient: {e}")
+
+        try:
+            await self._agent_monitor.start()
+        except Exception as e:
+            logger.error(f"Failed to start TwitterAgentMonitor: {e}")
         
         # Twitter Monitor Initialization
-        self._twitter = TwitterMonitor(self._config, self)
-        await self._twitter.start()
+        try:
+            self._twitter = TwitterMonitor(self._config, self)
+            await self._twitter.start()
+        except Exception as e:
+            logger.error(f"Failed to start TwitterMonitor: {e}")
         
         self._load_state()
-        await self._sync_existing_holdings()
+        asyncio.create_task(self._sync_existing_holdings())
         
         await self._telegram.send_message("<b>Solbot Sniper (Coordinated KOL Tracking) started!</b>")
 

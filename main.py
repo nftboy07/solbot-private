@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import signal
+import sys
 from solbot.config import BotConfig
 from solbot.database import DatabaseManager
 from telegram_updated import TelegramController
@@ -24,11 +25,21 @@ async def main():
     # 4. Telegram Controller (V3 Redesign)
     tg_controller = TelegramController(config.telegram, bot)
     bot._telegram = tg_controller
-    await tg_controller.start()
+    
+    try:
+        await tg_controller.start()
+    except Exception as e:
+        logger.error(f"Critical failure starting TelegramController: {e}")
+        # Depending on criticality, we might want to exit or continue.
+        # Here we continue as requested to prevent crash.
     
     # 5. Bot Startup
-    await bot.start()
-    
+    try:
+        await bot.start()
+    except Exception as e:
+        logger.critical(f"Critical failure during bot startup: {e}")
+        # In a real scenario, we might want to shut down, but here we catch to prevent crash.
+
     # 6. Keep Alive
     stop_event = asyncio.Event()
     
@@ -52,3 +63,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"Unhandled exception in main: {e}")
+        sys.exit(1)
