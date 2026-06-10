@@ -90,6 +90,7 @@ class Solbot:
         self._events_count = 0
         self._signals_count = 0
         self._ai_rejects_count = 0
+        self._filter_rejects_count = 0
         self._total_buys = 0
         self._executed_trades = 0
 
@@ -262,9 +263,12 @@ class Solbot:
                 data = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
                 logger.info(f"RAW EVENT: {data}")
                 self._events_count += 1
-                if data.get("txType") in ["sell", "buy"]:
+                
+                tx_type = data.get("txType")
+                
+                if tx_type in ["sell", "buy"]:
                     await self._handle_trade_event(data)
-                elif data.get("mint") and "txType" not in data:
+                elif tx_type == "create" or (data.get("mint") and tx_type is None):
                     token = self._parse_token_event(data)
                     
                     # Blacklist check
@@ -290,6 +294,8 @@ class Solbot:
                              asyncio.create_task(self._execute_snipe(token, size, "Sniper"))
                         else:
                              await self._telegram.send_message(f"= <b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>")
+                    else:
+                        self._filter_rejects_count += 1
                              
             except asyncio.TimeoutError:
                 continue
