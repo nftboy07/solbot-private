@@ -383,3 +383,6 @@ class TelegramManager:
             await self.send_message(f"🎯 Min AI Score: {bot._ai_min_score}")
         except:
             pass
+
+# V3 Compatibility Alias
+TelegramController = TelegramManager

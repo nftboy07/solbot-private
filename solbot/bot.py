@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, List, Any, Set, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # from solbot.telegram import TelegramManager
+    from solbot.telegram import TelegramManager
 
 from solbot.config import BotConfig, BotMode
 from solbot.filters import TokenFilter
@@ -19,7 +19,6 @@ from solbot.logger import get_logger, setup_logger
 from solbot.models import TokenEvent, TradeResult
 from solbot.pumpfun import PumpFunMonitor
 from solbot.pumpfun_client import PumpFunClient
-# from solbot.telegram import TelegramManager
 from solbot.wallet import Wallet
 from solbot.twitter import TwitterMonitor
 from solbot.ai_filter import AIFilter
