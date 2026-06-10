@@ -1,0 +1,195 @@
+{
+  "wallet_scores": {
+    "bwamJzztZsepfkteWRChggmXuiiCQvpLqPietdNfSXa": {
+      "address": "bwamJzztZsepfkteWRChggmXuiiCQvpLqPietdNfSXa",
+      "pnl": 5503712.21,
+      "winrate": 33.24,
+      "alias": "SmartWallet_bwam"
+    },
+    "Aqje5DsN4u2PHmQxGF9PKfpsDGwQRCBhWeLKHCFhSMXk": {
+      "address": "Aqje5DsN4u2PHmQxGF9PKfpsDGwQRCBhWeLKHCFhSMXk",
+      "pnl": 1351182.6,
+      "winrate": 91.6,
+      "alias": "SmartWallet_Aqje"
+    },
+    "GpTXmkdvrTajqkzX1fBmC4BUjSboF9dHgfnqPqj8WAc4": {
+      "address": "GpTXmkdvrTajqkzX1fBmC4BUjSboF9dHgfnqPqj8WAc4",
+      "pnl": 2185689.35,
+      "winrate": 90.13,
+      "alias": "SmartWallet_GpTX"
+    },
+    "HdKJM6Lvfp9aV9tvEMC8AD4GnsbFgMUkHLoK923Sn1ET": {
+      "address": "HdKJM6Lvfp9aV9tvEMC8AD4GnsbFgMUkHLoK923Sn1ET",
+      "pnl": 1130736.12,
+      "winrate": 95.26,
+      "alias": "SmartWallet_HdKJ"
+    },
+    "GZVSEAajExLJEvACHHQcujBw7nJq98GWUEZtood9LM9b": {
+      "address": "GZVSEAajExLJEvACHHQcujBw7nJq98GWUEZtood9LM9b",
+      "pnl": 2369244.46,
+      "winrate": 74.66,
+      "alias": "SmartWallet_GZVS"
+    },
+    "8i5U2uNBEuTc4zskYP14zbebDg2RSwrrG8REhEnJb97K": {
+      "address": "8i5U2uNBEuTc4zskYP14zbebDg2RSwrrG8REhEnJb97K",
+      "pnl": 973166.38,
+      "winrate": 78.69,
+      "alias": "SmartWallet_8i5U"
+    },
+    "5zCkbcD74hFPeBHwYdwJLJAoLVgHX45AFeR7RzC8vFiD": {
+      "address": "5zCkbcD74hFPeBHwYdwJLJAoLVgHX45AFeR7RzC8vFiD",
+      "pnl": 1669694.4,
+      "winrate": 86.74,
+      "alias": "SmartWallet_5zCk"
+    },
+    "CAYAFk8PJpZDtukE2NPVRzQaCZm7LnF8Tfe8dYbxa4Cs": {
+      "address": "CAYAFk8PJpZDtukE2NPVRzQaCZm7LnF8Tfe8dYbxa4Cs",
+      "pnl": 508488.33,
+      "winrate": 95.34,
+      "alias": "SmartWallet_CAYA"
+    },
+    "HUgpmqL6r4Z4iEZiVuNZ6J6QnAsSZpsL8giVyVtz3QhT": {
+      "address": "HUgpmqL6r4Z4iEZiVuNZ6J6QnAsSZpsL8giVyVtz3QhT",
+      "pnl": 702596.81,
+      "winrate": 96.39,
+      "alias": "SmartWallet_HUgp"
+    },
+    "HTM87R4mgjDdiF6Yfn8duK9vbDmZxiPCTRbGvm7eCAJY": {
+      "address": "HTM87R4mgjDdiF6Yfn8duK9vbDmZxiPCTRbGvm7eCAJY",
+      "pnl": 1646380.47,
+      "winrate": 85.08,
+      "alias": "SmartWallet_HTM8"
+    },
+    "8HeDT75s5g4CtCimH5B5nySqCiQhtWii8UnZhxBtFo38": {
+      "address": "8HeDT75s5g4CtCimH5B5nySqCiQhtWii8UnZhxBtFo38",
+      "pnl": 1438735.22,
+      "winrate": 88.26,
+      "alias": "SmartWallet_8HeD"
+    },
+    "HiSo5kykqDPs3EG14Fk9QY4B5RvkuEs8oJTiqPX3EDAn": {
+      "address": "HiSo5kykqDPs3EG14Fk9QY4B5RvkuEs8oJTiqPX3EDAn",
+      "pnl": 305297.21,
+      "winrate": 93.5,
+      "alias": "SmartWallet_HiSo"
+    },
+    "Fnz5CaHjX8SBuJAL6cKwLVY6QnAT7o5HNxz47qbYzMMW": {
+      "address": "Fnz5CaHjX8SBuJAL6cKwLVY6QnAT7o5HNxz47qbYzMMW",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_Fnz5"
+    },
+    "AfGiE2ewhDARAaJZgGfoPUfXsG93KPYavjEDbe5vBhrk": {
+      "address": "AfGiE2ewhDARAaJZgGfoPUfXsG93KPYavjEDbe5vBhrk",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_AfGi"
+    },
+    "DMR43Ldd7T7KWPSiFajKPgTSF4UPkVXyZAAB5dEyYsDH": {
+      "address": "DMR43Ldd7T7KWPSiFajKPgTSF4UPkVXyZAAB5dEyYsDH",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_DMR4"
+    },
+    "8Lr7nr1RCQ2PUsKEG5D7djwgvFazsRXVqyhRAi5DMbc7": {
+      "address": "8Lr7nr1RCQ2PUsKEG5D7djwgvFazsRXVqyhRAi5DMbc7",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_8Lr7"
+    },
+    "2BocdyQGg3apZetbQNdPqGDESRMxBsYmTCUCmEcgrejv": {
+      "address": "2BocdyQGg3apZetbQNdPqGDESRMxBsYmTCUCmEcgrejv",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_2Boc"
+    },
+    "DSYPh29JTLhpjq4LzGcep4BK6pqUzoRi2o5Mqve71STU": {
+      "address": "DSYPh29JTLhpjq4LzGcep4BK6pqUzoRi2o5Mqve71STU",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_DSYP"
+    },
+    "4uLDrqss4mcVjJKrqcr4PfyCQmFhNkBLu5Aqb8Sy3yeP": {
+      "address": "4uLDrqss4mcVjJKrqcr4PfyCQmFhNkBLu5Aqb8Sy3yeP",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_4uLD"
+    },
+    "9YGd2uCJj9XuLtrFmyi4jVJb7zqhya7Vbk4KGHpZrYNJ": {
+      "address": "9YGd2uCJj9XuLtrFmyi4jVJb7zqhya7Vbk4KGHpZrYNJ",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_9YGd"
+    },
+    "2uCLpJFrJ5M8tEEys8mPPfoBgEzKQAL55VcMwFfuXFzw": {
+      "address": "2uCLpJFrJ5M8tEEys8mPPfoBgEzKQAL55VcMwFfuXFzw",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_2uCL"
+    },
+    "HJk264CSuNX26PrGHLPjnf7XwXyxDB9WoZFpazTvW21c": {
+      "address": "HJk264CSuNX26PrGHLPjnf7XwXyxDB9WoZFpazTvW21c",
+      "pnl": 0,
+      "winrate": 0,
+      "alias": "VineWallet_HJk2"
+    }
+  },
+  "copy_targets": [
+    "GpTXmkdvrTajqkzX1fBmC4BUjSboF9dHgfnqPqj8WAc4",
+    "HdKJM6Lvfp9aV9tvEMC8AD4GnsbFgMUkHLoK923Sn1ET",
+    "GZVSEAajExLJEvACHHQcujBw7nJq98GWUEZtood9LM9b",
+    "5zCkbcD74hFPeBHwYdwJLJAoLVgHX45AFeR7RzC8vFiD",
+    "CAYAFk8PJpZDtukE2NPVRzQaCZm7LnF8Tfe8dYbxa4Cs",
+    "HUgpmqL6r4Z4iEZiVuNZ6J6QnAsSZpsL8giVyVtz3QhT",
+    "8HeDT75s5g4CtCimH5B5nySqCiQhtWii8UnZhxBtFo38",
+    "HiSo5kykqDPs3EG14Fk9QY4B5RvkuEs8oJTiqPX3EDAn",
+    "Fnz5CaHjX8SBuJAL6cKwLVY6QnAT7o5HNxz47qbYzMMW",
+    "AfGiE2ewhDARAaJZgGfoPUfXsG93KPYavjEDbe5vBhrk",
+    "DMR43Ldd7T7KWPSiFajKPgTSF4UPkVXyZAAB5dEyYsDH",
+    "8Lr7nr1RCQ2PUsKEG5D7djwgvFazsRXVqyhRAi5DMbc7",
+    "2BocdyQGg3apZetbQNdPqGDESRMxBsYmTCUCmEcgrejv",
+    "DSYPh29JTLhpjq4LzGcep4BK6pqUzoRi2o5Mqve71STU",
+    "4uLDrqss4mcVjJKrqcr4PfyCQmFhNkBLu5Aqb8Sy3yeP",
+    "9YGd2uCJj9XuLtrFmyi4jVJb7zqhya7Vbk4KGHpZrYNJ",
+    "2uCLpJFrJ5M8tEEys8mPPfoBgEzKQAL55VcMwFfuXFzw",
+    "HJk264CSuNX26PrGHLPjnf7XwXyxDB9WoZFpazTvW21c",
+    "G9ExLNvMZLoqiFLf4cLS9BLJgu71ovmWXFKYpkux8eHE",
+    "3xeJCvLXFAgLNTEnoUh4c9KEyZqWcQawdV6JZbFgWyqe",
+    "BxRyZfat9hk4cm5C4nxtV6bBQ5pVVbESiBhomunPxDpv",
+    "9KY9TuABitHi1SGeRz6uT71AYGdtMhtopZdQpCiKr4T2",
+    "6PtbqRpaEcufL5VgDBQBj9LfXxxGCa5y41EAGT5yatpq"
+  ],
+  "blacklisted_wallets": [
+    "CthAFCiJmtC4wPdaEimm3rppEtEzEibc5bvGkVkstAg3",
+    "FaQ7iCM5nuz9MPHF4BgYm3F2JefCzqsiX2biZ1d9cMwe",
+    "55zooomEXMda1iyrDd9HSPTH6XKa9BZewV4huoiAZEc3",
+    "DgnVynnLYFCGbYRJ81BnNsgipijVFX8xboxppsqVQozm",
+    "GpdayBuVe8rjXH5KdZMm7WJAKMfcR6WGqHmdt6KFanZg",
+    "2iXf9Qde88BmkA17BTsriK9MuqFXQAiYGNPA5C1xn5WK",
+    "3XAcxTSiw5twRudMFhG7Mmg6h5hGxyB7jjwKVW4Nh4BT",
+    "GzLUEPZHGUrfqPnPErtSiTjxrWUkZdw8tcQoJTQKN2zx",
+    "Ao47TMguxAXCG7CmcQJTnh5fu9tqkeZFo1YsS4hCyryr",
+    "6Q7MLhVJtrZT2Joix5sYzLxh1eRcoj1CxiUTge9QWp8m",
+    "9P2np34H1umoKVGeXMFd5UUpA5m6DHuv5uPDoucGyF9",
+    "Eu8i6rpMPXyg5NaEY23qEbFeMhrs953FdqxYxweXm24J",
+    "ChnMUy4pjXw29mxPTEpGctRwa7Qd3udRFfPnNNwmV86E",
+    "5BdLZq1Cw3FpSrrRXof7oCW4yL2juueb7vtgZSQFsgX9",
+    "BCmNsVBD1vqhcUmx6K3Tk9jvKrB3Vp57jupvxqqyqeD1",
+    "4yscBpfbcB1wmviW4854CYqVz1KgjKoKRpg4uf5XSLe3",
+    "3X9RErem7uNhqdYbJrM5bTvtcsqbbZB15tkXxqcnaqA6",
+    "9ZYq8SL5XPECWqnfYB1F6i7oT4Fakfck8QhzZqo18fHX",
+    "BN5edYKL6tV4ZsTKqJGJBmHjrxW4seK6i5sXSG3fGKwX",
+    "7QquANyvZgpNKdavkdDVjQ5GwwBDck7wMf9ZTTotp8JJ",
+    "EjhN9HgBwhzcpKEJtgiUL41PWKF7u56NpbFjuL7hvn2P",
+    "bwamJzztZsepfkteWRChggmXuiiCQvpLqPietdNfSXa",
+    "7GhWwhaMgbKiRWxF93Bud6HnHMci6NCLTJyTxG8zFH51",
+    "B9Zbs2W9VK22AHnCWiK4PqBueDFzN17RNAFu5uFozLMJ",
+    "HTM87R4mgjDdiF6Yfn8duK9vbDmZxiPCTRbGvm7eCAJY",
+    "D3sovmjANgA8V27e5rnQft8kV3mocSH8gw9zwth3Ba9g",
+    "Aqje5DsN4u2PHmQxGF9PKfpsDGwQRCBhWeLKHCFhSMXk",
+    "9sCcAxe56AuDQfJgU7kB1LpnQEYXDcGpAtXnN49H6SB3",
+    "8i5U2uNBEuTc4zskYP14zbebDg2RSwrrG8REhEnJb97K",
+    "ANAUCDCU3Jfao3mtxBdttjEH7F3Ja7SyjGBKUa9Cruc5",
+    "4dnWLzmdkLeuDe6hwRBpPqrDbQZ59hpoBu8JLztAescf"
+  ],
+  "ai_min_score": 50
+}
