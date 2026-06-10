@@ -85,6 +85,14 @@ class Solbot:
         self._network_manager = NetworkManager(config.proxy_list_path)
         self._db = DatabaseManager()
 
+        # Metrics for Telegram V3 Controller
+        self._start_time = time()
+        self._events_count = 0
+        self._signals_count = 0
+        self._ai_rejects_count = 0
+        self._total_buys = 0
+        self._executed_trades = 0
+
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
         try:
@@ -250,6 +258,7 @@ class Solbot:
                 continue
             try:
                 data = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
+                self._events_count += 1
                 if data.get("txType") in ["sell", "buy"]:
                     await self._handle_trade_event(data)
                 elif data.get("mint") and "txType" not in data:
@@ -262,12 +271,14 @@ class Solbot:
 
                     qualified, size = self._filter.is_qualified(token)
                     if qualified:
+                        self._signals_count += 1
                         if self._ai_enabled:
                             token_data = {
                                 'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator
                             }
                             score = await self._ai_filter.score_token(token_data)
                             if score < self._ai_min_score:
+                                self._ai_rejects_count += 1
                                 logger.warning(f"AI score {score} < {self._ai_min_score}, skipping {token.symbol}")
                                 continue
                         
@@ -356,6 +367,8 @@ class Solbot:
             token.mint, action="buy", amount=size, priority_fee=priority_fee_sol
         )
         if result.success:
+            self._total_buys += 1
+            self._executed_trades += 1
             self._trades.append(result)
             pos = Position(
                 mint=token.mint, symbol=token.symbol,
@@ -408,6 +421,7 @@ class Solbot:
         priority_fee = 0.01 if "KOL EXIT" in reason else 0.001
         result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=sell_amount, denominated_in_sol=False, priority_fee=priority_fee)
         if result.success:
+            self._executed_trades += 1
             self._trades.append(result)
             if pct >= 0.99:
                 pos.active = False
