@@ -31,6 +31,9 @@ class TelegramController:
         # UI State
         self._paper_mode = True
         self._kill_switch = False
+        
+        # Prices (mocked or synced from bot)
+        self._sol_price = 150.0 # Placeholder, should ideally be synced
 
     async def start(self):
         """Initialize and start the Telethon client."""
@@ -58,11 +61,11 @@ class TelegramController:
         async def start_handler(event):
             await self._cmd_start(event)
 
-        @self._client.on(events.NewMessage(pattern='/help'))
+        @self._client.on(events.NewMessage(pattern='/help|/list'))
         async def help_handler(event):
             await self._cmd_help(event)
 
-        @self._client.on(events.NewMessage(pattern='/status'))
+        @self._client.on(events.NewMessage(pattern='/status|/diag'))
         async def status_handler(event):
             await self._cmd_status(event)
 
@@ -89,7 +92,7 @@ class TelegramController:
         async def backtest_handler(event):
             await event.reply("🧪 <b>Backtest Engine</b>\nRunning historical simulation for: <code>Strategy_V3_Alpha</code>\nStatus: <code>PENDING</code>")
 
-        @self._client.on(events.NewMessage(pattern='/model'))
+        @self._client.on(events.NewMessage(pattern='/model|/brain'))
         async def model_handler(event):
             await self._cmd_model(event)
 
@@ -97,7 +100,7 @@ class TelegramController:
         async def creator_handler(event):
             await self._cmd_creator(event)
 
-        @self._client.on(events.NewMessage(pattern='/wallet'))
+        @self._client.on(events.NewMessage(pattern='/wallet|/balance'))
         async def wallet_handler(event):
             await self._cmd_wallet(event)
 
@@ -113,13 +116,17 @@ class TelegramController:
         async def portfolio_handler(event):
             await self._cmd_portfolio(event)
 
-        @self._client.on(events.NewMessage(pattern='/rpc|/proxies|/latency|/telemetry|/queue'))
+        @self._client.on(events.NewMessage(pattern='/rpc|/proxies|/proxy|/latency|/telemetry|/queue'))
         async def execution_handler(event):
             await self._cmd_execution(event)
 
-        @self._client.on(events.NewMessage(pattern='/paper'))
+        @self._client.on(events.NewMessage(pattern='/paper|/mode'))
         async def paper_handler(event):
             await self._cmd_paper(event)
+
+        @self._client.on(events.NewMessage(pattern='/autobuy'))
+        async def autobuy_handler(event):
+            await self._cmd_autobuy(event)
 
         @self._client.on(events.NewMessage(pattern='/risk|/kill|/pause|/resume|/max_position|/max_drawdown'))
         async def risk_handler(event):
@@ -143,21 +150,23 @@ class TelegramController:
 
     async def _cmd_help(self, event):
         msg = ("<b>🛠 SOLBOT V3 COMMAND REGISTRY</b>\n\n"
-               "<b>Core:</b> /status, /health, /version, /ping\n"
-               "<b>Intelligence:</b> /model, /creator, /wallet, /alpha\n"
+               "<b>Core:</b> /status (/diag), /health, /version, /ping\n"
+               "<b>Intelligence:</b> /model (/brain), /creator, /wallet (/balance), /alpha\n"
                "<b>Data:</b> /feature, /signals, /why\n"
-               "<b>Ops:</b> /portfolio, /history, /rpc, /proxies\n"
-               "<b>Control:</b> /risk, /kill, /paper, /replay")
+               "<b>Ops:</b> /portfolio, /history, /rpc, /proxies (/proxy)\n"
+               "<b>Control:</b> /risk, /kill, /paper (/mode), /autobuy, /replay")
         await event.reply(msg)
 
     async def _cmd_status(self, event):
         uptime = str(datetime.now() - self._start_time).split('.')[0]
         mode = "🧪 PAPER" if self._paper_mode else "⚔️ LIVE"
         state = "🛑 KILLED" if self._kill_switch else ("⏸ PAUSED" if getattr(self._bot, '_paused', False) else "🟢 ACTIVE")
+        autobuy = "✅ ON" if getattr(self._bot, '_autobuy_enabled', False) else "❌ OFF"
         
         msg = (f"<b>📊 SYSTEM STATUS</b>\n"
                f"Mode: <code>{mode}</code>\n"
                f"State: <code>{state}</code>\n"
+               f"Autobuy: <code>{autobuy}</code>\n"
                f"Uptime: <code>{uptime}</code>\n"
                f"Active Positions: <code>{len(getattr(self._bot, '_positions', {}))}</code>\n"
                f"Event Bus Latency: <code>0.42ms</code>")
@@ -192,7 +201,7 @@ class TelegramController:
         await event.reply(timeline)
 
     async def _cmd_model(self, event):
-        msg = ("<b>🤖 MODEL INTELLIGENCE</b>\n"
+        msg = ("<b>🤖 MODEL INTELLIGENCE (BRAIN)</b>\n"
                "Active Model: <code>Solbot_V3_Transformer_L4</code>\n"
                "Precision: <code>0.88</code> | Recall: <code>0.74</code>\n"
                "Last Retrain: <code>2026-06-09</code>")
@@ -269,9 +278,26 @@ class TelegramController:
         if len(args) > 1:
             if args[1] == "on": self._paper_mode = True
             elif args[1] == "off": self._paper_mode = False
+        else:
+            # Toggle if no arg
+            self._paper_mode = not self._paper_mode
             
         status = "ENABLED" if self._paper_mode else "DISABLED"
         await event.reply(f"🧪 <b>Paper Trading Mode:</b> <code>{status}</code>")
+
+    async def _cmd_autobuy(self, event):
+        if hasattr(self._bot, '_autobuy_enabled'):
+            args = event.message.text.split()
+            if len(args) > 1:
+                if args[1] == "on": self._bot._autobuy_enabled = True
+                elif args[1] == "off": self._bot._autobuy_enabled = False
+            else:
+                self._bot._autobuy_enabled = not self._bot._autobuy_enabled
+                
+            status = "ENABLED" if self._bot._autobuy_enabled else "DISABLED"
+            await event.reply(f"🤖 <b>Autobuy:</b> <code>{status}</code>")
+        else:
+            await event.reply("❌ <b>Error:</b> Autobuy variable not found in bot instance.")
 
     async def _cmd_risk(self, event):
         cmd = event.message.text.split()[0].lower()
@@ -314,3 +340,7 @@ class TelegramController:
                 await self._client.send_message(int(self._config.chat_id), text, parse_mode='html')
             except Exception as e:
                 logger.error(f"Failed to send Telegram message: {e}")
+
+    async def send_message(self, text: str):
+        """Public method for bot instance to send messages."""
+        await self._send_to_admin(text)
