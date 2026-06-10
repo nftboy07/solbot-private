@@ -135,6 +135,9 @@ class TelegramManager:
             elif cmd == "/exitall": await self._cmd_exitall(bot)
             elif cmd == "/aitoggle": await self._cmd_aitoggle(bot)
             elif cmd == "/aiscore": await self._cmd_aiscore(args, bot)
+            elif cmd == "/gmgn_trending": await self._cmd_gmgn_trending(bot)
+            elif cmd == "/gmgn_smart": await self._cmd_gmgn_smart(bot)
+            elif cmd == "/gmgn_scan": await self._cmd_gmgn_scan(args, bot)
         except Exception as e:
             logger.error(f"Error executing command '{text}': {e}")
             logger.error(traceback.format_exc())
@@ -163,7 +166,10 @@ class TelegramManager:
             "/reload - Restart process\n"
             "/exitall - Liquidate everything\n"
             "/aitoggle - Toggle AI filter\n"
-            "/aiscore <value> - Set min AI score"
+            "/aiscore <value> - Set min AI score\n"
+            "/gmgn_trending - New tokens discovery\n"
+            "/gmgn_smart - Smart money inflow\n"
+            "/gmgn_scan <mint> - Security scan"
         )
         await self.send_message(msg)
 
@@ -445,6 +451,53 @@ class TelegramManager:
             await self.send_message(f"🎯 Min AI Score: {bot._ai_min_score}")
         except:
             pass
+
+    async def _cmd_gmgn_trending(self, bot: Any):
+        await self.send_message("🔍 <b>Fetching GMGN Trending...</b>")
+        tokens = await bot._gmgn_monitor.client.get_new_tokens()
+        if not tokens:
+            await self.send_message("No trending tokens found.")
+            return
+        lines = ["<b>🔥 GMGN New Tokens:</b>"]
+        for t in tokens[:10]:
+            lines.append(f"- {t.get('symbol')}: <code>{t.get('address')}</code> ($ {float(t.get('market_cap', 0)):,.0f})")
+        await self.send_message("\n".join(lines))
+
+    async def _cmd_gmgn_smart(self, bot: Any):
+        await self.send_message("🧠 <b>Fetching Smart Money Inflow...</b>")
+        tokens = await bot._gmgn_monitor.client.get_smart_money_inflow()
+        if not tokens:
+            await self.send_message("No smart money inflow detected.")
+            return
+        lines = ["<b>💎 Smart Money Inflow:</b>"]
+        for t in tokens[:10]:
+            lines.append(f"- {t.get('symbol')}: <code>{t.get('address')}</code>")
+        await self.send_message("\n".join(lines))
+
+    async def _cmd_gmgn_scan(self, args: list, bot: Any):
+        if len(args) < 2:
+            await self.send_message("Usage: /gmgn_scan <mint_address>")
+            return
+        mint = args[1]
+        await self.send_message(f"🛡 <b>Scanning:</b> <code>{mint}</code>")
+        report = await bot._gmgn_monitor.client.get_token_security(mint)
+        if not report:
+            await self.send_message("Could not retrieve security report.")
+            return
+        
+        # Format report (assuming standard fields based on GMGN API)
+        is_honeypot = "YES" if report.get("is_honeypot") else "NO"
+        buy_tax = report.get("buy_tax", "N/A")
+        sell_tax = report.get("sell_tax", "N/A")
+        
+        msg = (
+            f"<b>🛡 GMGN Security Report</b>\n"
+            f"Mint: <code>{mint}</code>\n"
+            f"Honeypot: {is_honeypot}\n"
+            f"Tax: {buy_tax}% / {sell_tax}%\n"
+            f"Renounced: {'✅' if report.get('renounced') else '❌'}"
+        )
+        await self.send_message(msg)
 
 # V3 Compatibility Alias
 TelegramController = TelegramManager
