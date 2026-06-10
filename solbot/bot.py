@@ -30,6 +30,7 @@ from solbot.tungscreener import TungscreenerScraper
 from solbot.kol_tracker import KOLTracker
 from solbot.pump_movers import PumpMovers
 from solbot.geckoterminal import GeckoTerminalClient
+from solbot.gmgn_monitor import GMGNMonitor
 from solbot.twitter_agents import TwitterAgentMonitor
 from solbot.core.network import NetworkManager
 from solbot.database import DatabaseManager
@@ -81,6 +82,7 @@ class Solbot:
         self._pump_movers = PumpMovers(self)
         self._gecko = GeckoTerminalClient()
         self._agent_monitor = TwitterAgentMonitor(self)
+        self._gmgn_monitor = GMGNMonitor(self)
         self._network_manager = NetworkManager(config.proxy_list_path)
         self._db = DatabaseManager()
         
@@ -208,6 +210,7 @@ class Solbot:
 
         # Pump.fun Movers Monitor
         asyncio.create_task(self._pump_movers.start_monitoring())
+        asyncio.create_task(self._gmgn_monitor.start())
 
         self._running = True
         asyncio.create_task(self._process_events())
@@ -232,6 +235,7 @@ class Solbot:
         if self._monitor_scraper: await self._monitor_scraper.stop()
         if self._tungscreener: await self._tungscreener.stop()
         if self._pump_movers: await self._pump_movers.stop()
+        if self._gmgn_monitor: await self._gmgn_monitor.stop()
         logger.info("Solbot stopped")
 
     def is_blacklisted(self, address: str) -> bool:
