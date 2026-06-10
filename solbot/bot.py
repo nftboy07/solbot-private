@@ -37,6 +37,7 @@ from solbot.scoring import Confidence, ScoringEngine, TokenScore
 from solbot.smart_money import SmartMoneyEngine
 from solbot.telegram import TelegramAlert
 from solbot.wallet import Wallet
+from solbot.gmgn_monitor import GMGNMonitor
 
 logger = get_logger("bot")
 
@@ -81,6 +82,7 @@ class Solbot:
         self._birdeye_client: Optional[BirdeyeClient] = None
         self._ipc_server: Optional[IPCServer] = None
         self._smart_money: Optional[SmartMoneyEngine] = None
+        self._gmgn_monitor: Optional[GMGNMonitor] = None
         self._running = False
         self._paused = False   # Pause state (stops new buys, monitoring continues)
         self._killed = False   # Kill switch state
@@ -221,6 +223,10 @@ class Solbot:
         self._smart_money = SmartMoneyEngine(db=self._db)
         await self._smart_money.start()
 
+        # Start GMGN monitor
+        self._gmgn_monitor = GMGNMonitor(self)
+        asyncio.create_task(self._gmgn_monitor.start())
+
         self._running = True
         mode = "PAPER" if self._config.jupiter.paper_trade else "LIVE"
         logger.info(
@@ -277,6 +283,9 @@ class Solbot:
 
         if self._telegram:
             await self._telegram.stop()
+
+        if self._gmgn_monitor:
+            await self._gmgn_monitor.stop()
 
         if self._db:
             await self._db.close()
@@ -850,8 +859,3 @@ async def run_bot():
         loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
 
     await bot.start()
-
-
-# ── HOTFIX: Initialize enrichment queue (must be called in start()) ──
-# This is temporarily appended. The proper integration is in _handle_token.
-# Import and init should happen after self._dex_client is created.
