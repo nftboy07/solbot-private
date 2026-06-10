@@ -7,7 +7,10 @@ import sys
 import json
 from time import time
 from dataclasses import dataclass, field, asdict
-from typing import Optional, Dict, List, Any, Set
+from typing import Optional, Dict, List, Any, Set, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # from solbot.telegram import TelegramManager
 
 from solbot.config import BotConfig, BotMode
 from solbot.filters import TokenFilter
@@ -16,7 +19,7 @@ from solbot.logger import get_logger, setup_logger
 from solbot.models import TokenEvent, TradeResult
 from solbot.pumpfun import PumpFunMonitor
 from solbot.pumpfun_client import PumpFunClient
-from solbot.telegram import TelegramManager
+# from solbot.telegram import TelegramManager
 from solbot.wallet import Wallet
 from solbot.twitter import TwitterMonitor
 from solbot.ai_filter import AIFilter
@@ -29,7 +32,7 @@ from solbot.kol_tracker import KOLTracker
 from solbot.pump_movers import PumpMovers
 from solbot.geckoterminal import GeckoTerminalClient
 from solbot.twitter_agents import TwitterAgentMonitor
-from solbot.telegram_scraper import TelegramScraper
+from solbot.core.network import NetworkManager
 
 logger = get_logger("bot")
 
@@ -56,7 +59,7 @@ class Solbot:
         self._monitor: Optional[PumpFunMonitor] = None
         self._pump_client: Optional[PumpFunClient] = None
         self._jupiter: Optional[JupiterClient] = None
-        self._telegram: Optional[TelegramManager] = None
+        self._telegram: Optional["TelegramManager"] = None
         self._filter: Optional[TokenFilter] = None
         self._twitter: Optional[TwitterMonitor] = None
         self._running = False
@@ -78,7 +81,7 @@ class Solbot:
         self._pump_movers = PumpMovers(self)
         self._gecko = GeckoTerminalClient()
         self._agent_monitor = TwitterAgentMonitor(self)
-        self._telegram_scraper = TelegramScraper(self._config.telegram, self)
+        self._network_manager = NetworkManager(config.proxy_list_path)
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -163,6 +166,7 @@ class Solbot:
         await self._pump_client.start()
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
+        from solbot.telegram import TelegramManager
         self._telegram = TelegramManager(self._config.telegram)
         await self._telegram.start(self)
         
@@ -199,9 +203,6 @@ class Solbot:
 
         # Pump.fun Movers Monitor
         asyncio.create_task(self._pump_movers.start_monitoring())
-        
-        # Telegram Scraper Monitor
-        asyncio.create_task(self._telegram_scraper.start_monitoring())
 
         self._running = True
         asyncio.create_task(self._process_events())
@@ -225,7 +226,6 @@ class Solbot:
         if self._monitor_scraper: await self._monitor_scraper.stop()
         if self._tungscreener: await self._tungscreener.stop()
         if self._pump_movers: await self._pump_movers.stop()
-        if self._telegram_scraper: await self._telegram_scraper.stop()
         logger.info("Solbot stopped")
 
     def is_blacklisted(self, address: str) -> bool:

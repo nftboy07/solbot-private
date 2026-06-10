@@ -1,57 +1,38 @@
-"""Asynchronous monitor for Pump.fun GO bounties using curl_cffi for Cloudflare bypass."""
+"""Asynchronous monitor for Pump.fun GO bounties with Updated API Endpoints."""
 
 import asyncio
-import re
-import json
-from typing import Set, Dict, Any, Optional
-from curl_cffi.requests import AsyncSession
-
+import aiohttp
+from typing import Set, List, Dict, Any, Optional
 from solbot.logger import get_logger
 from solbot.models import TokenEvent
 
 logger = get_logger("go_monitor")
 
 class GoMonitor:
-    """Monitors pump.fun/go for high-reward bounties using impersonated browser requests."""
+    """Monitors pump.fun/go for high-reward bounties and snipes associated tokens."""
 
     def __init__(self, bot, reward_threshold: float = 5.0, poll_interval: int = 15):
         self._bot = bot
         self._reward_threshold = reward_threshold  # in SOL
         self._poll_interval = poll_interval
-        # Using frontend-api which is the standard endpoint for Go Bounties
-        self._api_url = "https://frontend-api.pump.fun/go/bounties"
+        # Updated to use livestream API to bypass Cloudflare 530 issues on frontend API
+        self._api_url = "https://livestream-api.pump.fun/go/bounties"
         self._seen_bounties: Set[str] = set()
         self._running = False
-        self._session: Optional[AsyncSession] = None
-        self._has_failed = False  # Track failure to stop log spam
-
-    def _sanitize_proxy(self, proxy: str) -> str:
-        """Hide password in proxy URL for safe logging."""
-        if not proxy:
-            return "None"
-        return re.sub(r"://.*@", "://***:***@", proxy)
+        self._session: Optional[aiohttp.ClientSession] = None
 
     async def start_monitoring(self):
         """Main loop for tracking new bounties."""
         self._running = True
         logger.info(f"Starting Pump.fun GO Monitor (Threshold: {self._reward_threshold} SOL)")
         
-        async with AsyncSession(impersonate="chrome120") as session:
+        async with aiohttp.ClientSession() as session:
             self._session = session
             while self._running:
-                if self._has_failed:
-                    # If it failed once, we idle to prevent log spam
-                    await asyncio.sleep(3600)
-                    continue
-
                 try:
                     await self._poll_bounties()
                 except Exception as e:
-                    logger.error(f"Unexpected error in GO monitor loop: {e}")
-                    # If it's a connection error or similar, we also treat it as a failure state
-                    self._has_failed = True
-                    logger.warning("Pump.fun GO Monitor entering idle state due to connection error.")
-                
+                    logger.error(f"Error in GO monitor loop: {e}")
                 await asyncio.sleep(self._poll_interval)
 
     async def stop(self):
@@ -60,42 +41,50 @@ class GoMonitor:
         logger.info("Pump.fun GO Monitor stopped")
 
     async def _poll_bounties(self):
-        """Fetch and process active bounties from the pump.fun GO API."""
+        """Fetch and process active bounties from the pump.fun GO API with Cloudflare bypass."""
         params = {
-            "offset": "0",
-            "limit": "20",
+            "offset": 0,
+            "limit": 20,
             "sort": "reward",
             "order": "desc"
         }
         
-        proxy = self._bot._config.proxy_url if self._bot._config.proxy_url else None
-        logger.debug(f"Polling GO bounties. Proxy: {self._sanitize_proxy(proxy)}")
+        # Safe proxy and header injection
+        proxy = getattr(self._bot, "_network_manager", None)
+        proxy_url = proxy.get_proxy() if proxy else None
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": "https://pump.fun/go"
+        }
         
         try:
-            response = await self._session.get(
-                self._api_url, 
-                params=params, 
-                timeout=10, 
-                proxy=proxy
-            )
-            
-            if response.status_code != 200:
-                self._has_failed = True
-                logger.warning(
-                    f"Pump.fun GO Monitor disabled: Endpoint returned HTTP {response.status_code}. "
-                    "Monitor will now idle."
-                )
-                return
-            
-            data = response.json()
-            if not isinstance(data, list):
-                logger.error("Bounty API returned unexpected format")
-                return
+            async with self._session.get(self._api_url, params=params, proxy=proxy_url, headers=headers, timeout=10) as response:
+                if response.status == 530:
+                    logger.error("Cloudflare 530 Error: Request blocked by challenge/firewall. Rotating proxy...")
+                    if proxy and proxy_url:
+                        proxy.report_result(proxy_url, False, 530)
+                    return
+                
+                if response.status != 200:
+                    logger.error(f"Failed to fetch bounties: HTTP {response.status}")
+                    if proxy and proxy_url:
+                        proxy.report_result(proxy_url, False, response.status)
+                    return
+                
+                if proxy and proxy_url:
+                    proxy.report_result(proxy_url, True, response.status)
+                
+                data = await response.json()
+                if not isinstance(data, list):
+                    logger.error("Bounty API returned unexpected format")
+                    return
 
-            for bounty in data:
-                await self._process_bounty(bounty)
+                for bounty in data:
+                    await self._process_bounty(bounty)
         except Exception as e:
-            logger.error(f"Failed to poll bounties: {e}")
+            logger.error(f"Exception in GO bounty poll: {e}")
 
     async def _process_bounty(self, bounty: Dict[str, Any]):
         """Evaluate a single bounty and trigger sniping if it passes filters."""
@@ -110,7 +99,7 @@ class GoMonitor:
         if reward_sol >= self._reward_threshold and token_mint:
             logger.info(f"Found high-reward bounty: {bounty_id} | Reward: {reward_sol} SOL | Mint: {token_mint}")
             
-            # Fetch actual token metadata via bot instance
+            # Fetch actual token metadata to avoid mock valuation
             meta = await self._bot._pump_client.get_token_metadata(token_mint)
             mcap_usd = float(meta.get("market_cap_sol", 0)) * self._bot._telegram._sol_price
 
