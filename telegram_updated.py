@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import uuid
+import traceback
 from datetime import datetime
 from typing import Optional, Any, List, Dict
 
@@ -26,7 +27,7 @@ class TelegramController:
         self._bot = bot_instance
         self._client: Optional[TelegramClient] = None
         self._start_time = datetime.now()
-        self._version = "3.1.0-kol-integration"
+        self._version = "3.1.1-hotfix-autobuy"
         
         # UI State
         self._paper_mode = False
@@ -80,78 +81,140 @@ class TelegramController:
         
         @self._client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
-            await self._cmd_start(event)
+            try:
+                await self._cmd_start(event)
+            except Exception as e:
+                logger.error(f"Handler error /start: {e}\n{traceback.format_exc()}")
 
         @self._client.on(events.NewMessage(pattern='/help|/list'))
         async def help_handler(event):
-            await self._cmd_help(event)
+            try:
+                await self._cmd_help(event)
+            except Exception as e:
+                logger.error(f"Handler error /help: {e}\n{traceback.format_exc()}")
 
         @self._client.on(events.NewMessage(pattern='/status|/diag|/dashboard'))
         async def status_handler(event):
-            await self._cmd_status(event)
+            try:
+                await self._cmd_status(event)
+            except Exception as e:
+                logger.error(f"Handler error /status: {e}\n{traceback.format_exc()}")
 
         @self._client.on(events.NewMessage(pattern='/health'))
         async def health_handler(event):
-            await self._cmd_health(event)
+            try:
+                await self._cmd_health(event)
+            except Exception as e:
+                logger.error(f"Handler error /health: {e}\n{traceback.format_exc()}")
 
         @self._client.on(events.NewMessage(pattern='/version'))
         async def version_handler(event):
-            await event.reply(f"🛰 <b>Solbot V3 Core</b>\nVersion: <code>{self._version}</code>\nBranch: <code>feature/kol-integration</code>")
+            try:
+                await event.reply(f"🛰 <b>Solbot V3 Core</b>\nVersion: <code>{self._version}</code>\nBranch: <code>feature/kol-integration</code>")
+            except Exception as e:
+                logger.error(f"Handler error /version: {e}")
 
         @self._client.on(events.NewMessage(pattern='/ping'))
         async def ping_handler(event):
-            start = time.time()
-            msg = await event.reply("🏓 Pong!")
-            latency = (time.time() - start) * 1000
-            await msg.edit(f"🏓 <b>Pong!</b>\nLatency: <code>{latency:.2f}ms</code>")
+            try:
+                start = time.time()
+                msg = await event.reply("🏓 Pong!")
+                latency = (time.time() - start) * 1000
+                await msg.edit(f"🏓 <b>Pong!</b>\nLatency: <code>{latency:.2f}ms</code>")
+            except Exception as e:
+                logger.error(f"Handler error /ping: {e}")
 
         @self._client.on(events.NewMessage(pattern='/model|/brain'))
         async def model_handler(event):
-            await self._cmd_model(event)
+            try:
+                await self._cmd_model(event)
+            except Exception as e:
+                logger.error(f"Handler error /model: {e}")
 
         @self._client.on(events.NewMessage(pattern='/wallet|/balance'))
         async def wallet_handler(event):
-            await self._cmd_wallet(event)
+            try:
+                await self._cmd_wallet(event)
+            except Exception as e:
+                logger.error(f"Handler error /wallet: {e}")
 
         @self._client.on(events.NewMessage(pattern='/signals'))
         async def signals_handler(event):
-            await self._cmd_signals(event)
+            try:
+                await self._cmd_signals(event)
+            except Exception as e:
+                logger.error(f"Handler error /signals: {e}")
 
         @self._client.on(events.NewMessage(pattern='/portfolio|/positions|/history|/pnl'))
         async def portfolio_handler(event):
-            await self._cmd_portfolio(event)
+            try:
+                await self._cmd_portfolio(event)
+            except Exception as e:
+                logger.error(f"Handler error /portfolio: {e}")
 
         @self._client.on(events.NewMessage(pattern='/rpc|/proxies|/proxy'))
         async def execution_handler(event):
-            await self._cmd_execution(event)
+            try:
+                await self._cmd_execution(event)
+            except Exception as e:
+                logger.error(f"Handler error /execution: {e}")
 
         @self._client.on(events.NewMessage(pattern='/risk|/kill|/pause|/resume|/buy|/drawdown'))
         async def risk_handler(event):
-            await self._cmd_risk(event)
+            try:
+                await self._cmd_risk(event)
+            except Exception as e:
+                logger.error(f"Handler error /risk: {e}")
 
         @self._client.on(events.NewMessage(pattern='/why'))
         async def why_handler(event):
-            await self._cmd_why(event)
+            try:
+                await self._cmd_why(event)
+            except Exception as e:
+                logger.error(f"Handler error /why: {e}")
 
         @self._client.on(events.NewMessage(pattern='/alpha'))
         async def alpha_handler(event):
-            await self._cmd_alpha(event)
+            try:
+                await self._cmd_alpha(event)
+            except Exception as e:
+                logger.error(f"Handler error /alpha: {e}")
             
         @self._client.on(events.NewMessage(pattern='/follow'))
         async def follow_handler(event):
-            await self._cmd_follow(event)
+            try:
+                await self._cmd_follow(event)
+            except Exception as e:
+                logger.error(f"Handler error /follow: {e}")
             
         @self._client.on(events.NewMessage(pattern='/unfollow'))
         async def unfollow_handler(event):
-            await self._cmd_unfollow(event)
+            try:
+                await self._cmd_unfollow(event)
+            except Exception as e:
+                logger.error(f"Handler error /unfollow: {e}")
             
         @self._client.on(events.NewMessage(pattern='/blacklist'))
         async def blacklist_handler(event):
-            await self._cmd_blacklist(event)
+            try:
+                await self._cmd_blacklist(event)
+            except Exception as e:
+                logger.error(f"Handler error /blacklist: {e}")
             
         @self._client.on(events.NewMessage(pattern='/whales'))
         async def whales_handler(event):
-            await self._cmd_whales(event)
+            try:
+                await self._cmd_whales(event)
+            except Exception as e:
+                logger.error(f"Handler error /whales: {e}")
+
+        @self._client.on(events.NewMessage(pattern='/autobuy'))
+        async def autobuy_handler(event):
+            try:
+                await self._cmd_autobuy(event)
+            except Exception as e:
+                logger.error(f"Handler error /autobuy: {e}\n{traceback.format_exc()}")
+                await event.reply(f"❌ <b>Internal Error:</b> <code>{str(e)}</code>")
 
     async def _cmd_start(self, event):
         msg = ("<b>🦅 Solbot V3 | Command Center OS</b>\n"
@@ -165,7 +228,7 @@ class TelegramController:
                "<b>Intelligence:</b> /brain, /wallet (/balance), /alpha\n"
                "<b>Data:</b> /signals, /why\n"
                "<b>Ops:</b> /portfolio, /history, /proxy\n"
-               "<b>Control:</b> /risk, /kill, /buy, /drawdown\n"
+               "<b>Control:</b> /risk, /kill, /buy, /drawdown, /autobuy\n"
                "<b>Tracking:</b> /follow, /unfollow, /blacklist, /whales")
         await event.reply(msg)
 
@@ -218,7 +281,7 @@ class TelegramController:
     async def _cmd_wallet(self, event):
         balance = await self._bot._pump_client.get_sol_balance()
         msg = (f"<b>📁 WALLET INTELLIGENCE</b>\n"
-               f"Address: <code>{self._bot._wallet.public_key if self._bot._wallet else 'N/A'}</code>\n"
+               f"Address: <code>{self._bot._wallet.pubkey_str if self._bot._wallet else 'N/A'}</code>\n"
                f"Balance: <code>{balance:.4f} SOL</code>\n"
                f"SOL Price: <code>${self._sol_price:.2f}</code>")
         await event.reply(msg)
@@ -366,6 +429,19 @@ class TelegramController:
             roi = w['avg_roi'] or 0.0
             lines.append(f"• {alias} | WR: {wr:.1f}% | ROI: {roi:.1f}% | <code>{w['address'][:6]}...</code>")
         await event.reply("\n".join(lines))
+
+    async def _cmd_autobuy(self, event):
+        args = event.message.text.split()
+        if len(args) > 1:
+            val = args[1].lower()
+            if val in ["on", "true", "1", "enable"]:
+                self._bot._autobuy_enabled = True
+            elif val in ["off", "false", "0", "disable"]:
+                self._bot._autobuy_enabled = False
+            if hasattr(self._bot, "_save_state"): self._bot._save_state()
+            
+        status = "✅ ENABLED" if self._bot._autobuy_enabled else "❌ DISABLED"
+        await event.reply(f"🤖 <b>Auto-buy Sniper:</b> <code>{status}</code>")
 
     async def _send_to_admin(self, text: str):
         if self._client and self._config.chat_id:
