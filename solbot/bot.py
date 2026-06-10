@@ -268,7 +268,7 @@ class Solbot:
                 
                 if tx_type in ["sell", "buy"]:
                     await self._handle_trade_event(data)
-                elif tx_type == "create" or (data.get("mint") and tx_type is None):
+                elif data.get("txType") == "create" or (data.get("mint") and "txType" not in data):
                     token = self._parse_token_event(data)
                     
                     # Blacklist check
