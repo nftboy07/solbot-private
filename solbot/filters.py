@@ -37,7 +37,7 @@ class TokenFilter:
             return False, 0.0
         
         # Check liquidity
-        if token.liquidity_sol < self._config.strategy.min_liquidity:
+        if token.liquidity_sol < self._config.pumpfun.min_liquidity_sol:
             return False, 0.0
 
         # Default trade size
