@@ -133,6 +133,22 @@ class TelegramController:
         @self._client.on(events.NewMessage(pattern='/alpha'))
         async def alpha_handler(event):
             await self._cmd_alpha(event)
+            
+        @self._client.on(events.NewMessage(pattern='/follow'))
+        async def follow_handler(event):
+            await self._cmd_follow(event)
+            
+        @self._client.on(events.NewMessage(pattern='/unfollow'))
+        async def unfollow_handler(event):
+            await self._cmd_unfollow(event)
+            
+        @self._client.on(events.NewMessage(pattern='/blacklist'))
+        async def blacklist_handler(event):
+            await self._cmd_blacklist(event)
+            
+        @self._client.on(events.NewMessage(pattern='/whales'))
+        async def whales_handler(event):
+            await self._cmd_whales(event)
 
     async def _cmd_start(self, event):
         msg = ("<b>🦅 Solbot V3 | Command Center OS</b>\n"
@@ -146,7 +162,8 @@ class TelegramController:
                "<b>Intelligence:</b> /brain, /wallet (/balance), /alpha\n"
                "<b>Data:</b> /signals, /why\n"
                "<b>Ops:</b> /portfolio, /history, /proxy\n"
-               "<b>Control:</b> /risk, /kill, /buy, /drawdown")
+               "<b>Control:</b> /risk, /kill, /buy, /drawdown\n"
+               "<b>Tracking:</b> /follow, /unfollow, /blacklist, /whales")
         await event.reply(msg)
 
     async def _cmd_status(self, event):
@@ -290,6 +307,62 @@ class TelegramController:
                "2. <code>DEDICATED_RPC</code> - High-speed\n"
                "3. <code>AI_FILTER_BETA</code> - Active")
         await event.reply(msg)
+        
+    async def _cmd_follow(self, event):
+        args = event.message.text.split()
+        if len(args) < 2:
+            await event.reply("Usage: /follow <addr> <alias>")
+            return
+        addr, alias = args[1], args[2] if len(args) > 2 else None
+        self._bot._db.add_follow(addr, alias)
+        self._bot._filter.add_copy_target(addr)
+        if alias:
+            self._bot._kol_tracker.add_wallet(addr, alias)
+        await event.reply(f"✅ Followed KOL: {alias or addr}")
+        
+    async def _cmd_unfollow(self, event):
+        args = event.message.text.split()
+        if len(args) < 2: return
+        addr = args[1]
+        self._bot._db.remove_follow(addr)
+        if addr in self._bot._filter._copy_targets:
+            self._bot._filter._copy_targets.remove(addr)
+        if addr in self._bot._kol_tracker.wallets:
+            del self._bot._kol_tracker.wallets[addr]
+        await event.reply(f"🗑 Unfollowed: {addr}")
+        
+    async def _cmd_blacklist(self, event):
+        args = event.message.text.split()
+        if len(args) < 2:
+            await event.reply("Usage: /blacklist <add/remove/list> [addr]")
+            return
+        action = args[1].lower()
+        if action == "list":
+            bl = self._bot._db.get_blacklist()
+            msg = "🚫 Blacklist:\n" + "\n".join([f"<code>{a}</code>" for a in bl])
+            await event.reply(msg)
+        elif action in ["add", "remove"]:
+            if len(args) < 3: return
+            addr = args[2]
+            self._bot._db.update_blacklist(addr, action)
+            if action == "add":
+                self._bot._blacklisted_wallets.add(addr)
+            else:
+                self._bot._blacklisted_wallets.discard(addr)
+            await event.reply(f"✅ Blacklist updated: {addr}")
+            
+    async def _cmd_whales(self, event):
+        wallets = self._bot._db.get_whales_and_kols()
+        if not wallets:
+            await event.reply("No whales or KOLs tracked.")
+            return
+        lines = ["<b>🐋 Tracked Whales & KOLs:</b>"]
+        for w in wallets:
+            alias = w['alias'] or "No Alias"
+            wr = w['win_rate'] or 0.0
+            roi = w['avg_roi'] or 0.0
+            lines.append(f"• {alias} | WR: {wr:.1f}% | ROI: {roi:.1f}% | <code>{w['address'][:6]}...</code>")
+        await event.reply("\n".join(lines))
 
     async def _send_to_admin(self, text: str):
         if self._client and self._config.chat_id:

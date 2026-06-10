@@ -32,6 +32,7 @@ from solbot.pump_movers import PumpMovers
 from solbot.geckoterminal import GeckoTerminalClient
 from solbot.twitter_agents import TwitterAgentMonitor
 from solbot.core.network import NetworkManager
+from solbot.database import DatabaseManager
 
 logger = get_logger("bot")
 
@@ -81,6 +82,7 @@ class Solbot:
         self._gecko = GeckoTerminalClient()
         self._agent_monitor = TwitterAgentMonitor(self)
         self._network_manager = NetworkManager(config.proxy_list_path)
+        self._db = DatabaseManager()
         
         # Runtime Metrics
         self._start_time = time()
@@ -114,6 +116,12 @@ class Solbot:
 
     def _load_state(self):
         """Load positions, trades, and intelligence from the JSON file."""
+        # Initial migration check
+        db_path = self._db.db_path
+        if not os.path.exists(db_path) or os.path.getsize(db_path) < 4096:
+            logger.info("New database detected. Running migration...")
+            self._db.migrate_from_json(self._state_file)
+
         if not os.path.exists(self._state_file):
             return
         try:
@@ -128,20 +136,12 @@ class Solbot:
                         data["tp_targets_hit"] = [0.0]
                 self._positions[mint] = Position(**data)
             
-            # Restore intelligence
-            if self._filter:
-                self._filter._copy_targets = set(state.get("copy_targets", []))
-                for addr, score_data in state.get("wallet_scores", {}).items():
-                    from solbot.filters import WalletScore
-                    valid_keys = WalletScore.__dataclass_fields__.keys()
-                    filtered_data = {k: v for k, v in score_data.items() if k in valid_keys}
-                    score_obj = WalletScore(**filtered_data)
-                    self._filter._wallet_scores[addr] = score_obj
-                    
-                    # Also load into KOL Tracker if it matches KOL labels
-                    alias = getattr(score_obj, 'alias', '') or ''
-                    if any(term in alias for term in ["KOL", "VineWallet", "SmartWallet"]):
-                        self._kol_tracker.add_wallet(addr, alias)
+            # Restore intelligence from DB primarily, fallback to state
+            self._blacklisted_wallets = set(self._db.get_blacklist())
+            whales = self._db.get_whales_and_kols()
+            for w in whales:
+                self._filter.add_copy_target(w['address'])
+                self._kol_tracker.add_wallet(w['address'], w['alias'] or w['address'][:8])
             
             # Restore Twitter handles
             if self._twitter:
@@ -158,9 +158,6 @@ class Solbot:
             self._ai_enabled = state.get("ai_enabled", True)
             self._ai_min_score = state.get("ai_min_score", 75)
             self._autobuy_enabled = state.get("autobuy_enabled", False)
-            
-            # Restore Blacklist
-            self._blacklisted_wallets = set(state.get("blacklisted_wallets", []))
             
             logger.info(f"Loaded {len(self._positions)} positions, {len(self._filter._copy_targets)} whales, and {len(self._kol_tracker.wallets)} KOLs")
         except Exception as e:
@@ -301,6 +298,7 @@ class Solbot:
         mint = data.get("mint")
         tx_type = data.get("txType")
         mcap_sol = data.get("marketCapSol")
+        sol_amount = float(data.get("solAmount", 0))
         if not trader or not mint: return
 
         # Blacklist check
@@ -308,13 +306,14 @@ class Solbot:
             logger.warning(f"IGNORING event from blacklisted wallet: {trader}")
             return
 
-        # Feed to KOL Tracker
+        # Feed to KOL Tracker & Log to DB
         if trader in self._kol_tracker.wallets:
+            self._db.log_kol_activity(trader, mint, sol_amount)
             kol_event = {
                 'wallet': trader,
                 'action': tx_type,
                 'token': mint,
-                'amount': float(data.get("solAmount", 0))
+                'amount': sol_amount
             }
             asyncio.create_task(self._kol_tracker.process_event(kol_event, self))
 

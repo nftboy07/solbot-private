@@ -157,6 +157,7 @@ class TelegramManager:
             "/follow <addr> <alias> - Follow wallet\n"
             "/unfollow <addr> - Unfollow wallet\n"
             "/blacklist <add/remove/list> <addr> - Manage blacklist\n"
+            "/whales - View tracked whales/KOLs\n"
             "/pause - Pause sniper\n"
             "/resume - Resume sniper\n"
             "/reload - Restart process\n"
@@ -344,15 +345,17 @@ class TelegramManager:
         await self.send_message("\n".join(lines))
 
     async def _cmd_whales(self, bot: Any):
-        targets = bot._filter._copy_targets
-        if not targets:
-            await self.send_message("No whales tracked.")
+        wallets = bot._db.get_whales_and_kols()
+        if not wallets:
+            await self.send_message("No whales or KOLs tracked.")
             return
-        lines = ["<b>🐋 Tracked Whales:</b>"]
-        for addr in targets:
-            score = bot._filter._wallet_scores.get(addr)
-            alias = score.alias if score and hasattr(score, 'alias') else "No Alias"
-            lines.append(f"- {alias} (<code>{addr[:6]}...</code>)")
+        lines = ["<b>🐋 Tracked Whales & KOLs:</b>"]
+        for w in wallets:
+            alias = w['alias'] or "No Alias"
+            tags = w['tags'] or ""
+            wr = w['win_rate'] or 0.0
+            roi = w['avg_roi'] or 0.0
+            lines.append(f"- {alias} ({tags}) | WR: {wr:.1f}% | ROI: {roi:.1f}% | <code>{w['address'][:6]}...</code>")
         await self.send_message("\n".join(lines))
 
     async def _cmd_follow(self, args: list, bot: Any):
@@ -363,26 +366,27 @@ class TelegramManager:
         if len(addr) < 32 or len(addr) > 44:
             await self.send_message("❌ Invalid Solana address.")
             return
+        
+        bot._db.add_follow(addr, alias)
         bot._filter.add_copy_target(addr)
         if alias:
             from solbot.filters import WalletScore
             score = bot._filter._wallet_scores.get(addr, WalletScore(addr))
             score.alias = alias
             bot._filter._wallet_scores[addr] = score
-            if any(term in alias for term in ["KOL", "VineWallet", "SmartWallet"]):
-                bot._kol_tracker.add_wallet(addr, alias)
-        bot._save_state()
-        await self.send_message(f"✅ Following whale: {alias or addr}")
+            bot._kol_tracker.add_wallet(addr, alias)
+            
+        await self.send_message(f"✅ Following wallet as KOL: {alias or addr}")
 
     async def _cmd_unfollow(self, args: list, bot: Any):
         if len(args) < 2: return
         addr = args[1]
+        bot._db.remove_follow(addr)
         if addr in bot._filter._copy_targets:
             bot._filter._copy_targets.remove(addr)
-            if addr in bot._kol_tracker.wallets:
-                del bot._kol_tracker.wallets[addr]
-            bot._save_state()
-            await self.send_message(f"🗑 Unfollowed: {addr}")
+        if addr in bot._kol_tracker.wallets:
+            del bot._kol_tracker.wallets[addr]
+        await self.send_message(f"🗑 Unfollowed: {addr}")
 
     async def _cmd_blacklist(self, args: List[str], bot: Any):
         if len(args) < 2:
@@ -390,24 +394,21 @@ class TelegramManager:
             return
         action = args[1].lower()
         if action == "list":
-            if not bot._blacklisted_wallets:
+            bl = bot._db.get_blacklist()
+            if not bl:
                 await self.send_message("Blacklist is empty.")
                 return
-            msg = "🚫 Blacklisted Wallets:\n" + "\n".join([f"<code>{a}</code>" for a in bot._blacklisted_wallets])
+            msg = "🚫 Blacklisted Wallets:\n" + "\n".join([f"<code>{a}</code>" for a in bl])
             await self.send_message(msg)
-        elif action == "add":
+        elif action in ["add", "remove"]:
             if len(args) < 3: return
             addr = args[2]
-            bot._blacklisted_wallets.add(addr)
-            bot._save_state()
-            await self.send_message(f"✅ Blacklisted: {addr}")
-        elif action == "remove":
-            if len(args) < 3: return
-            addr = args[2]
-            if addr in bot._blacklisted_wallets:
-                bot._blacklisted_wallets.remove(addr)
-                bot._save_state()
-                await self.send_message(f"🗑 Removed: {addr}")
+            bot._db.update_blacklist(addr, action)
+            if action == "add":
+                bot._blacklisted_wallets.add(addr)
+            else:
+                bot._blacklisted_wallets.discard(addr)
+            await self.send_message(f"✅ Blacklist updated for: {addr}")
 
     async def _cmd_devs(self, bot: Any):
         lines = ["<b>👨‍💻 Active Position Devs:</b>"]
