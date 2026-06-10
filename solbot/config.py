@@ -101,6 +101,8 @@ class BotConfig:
     logging: LogConfig = field(default_factory=LogConfig)
     ai: AIConfig = field(default_factory=AIConfig)
     proxy_url: str = field(default_factory=lambda: os.getenv("PROXY_URL", ""))
+    proxy_list_path: str = field(default_factory=lambda: os.getenv("PROXY_LIST_PATH", "data/proxies.txt"))
+    residential_proxy: str = field(default_factory=lambda: os.getenv("RESIDENTIAL_PROXY", ""))
 
     def validate(self) -> list[str]:
         errors = []
