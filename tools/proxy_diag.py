@@ -21,13 +21,13 @@ TEST_TARGETS = [
 PROXIES = {
     "VPS": None,
     "Webshare": "http://username:password@p.webshare.io:80",
-    "Residential": "http://username:password@res.iproyal.com:12321"
+    "Residential": "http://username:password@geo.iproyal.com:12321"
 }
 
 async def test_httpx(name: str, proxy: str, url: str):
     logger.info(f"Testing {name} with httpx -> {url}")
     try:
-        async with httpx.AsyncClient(proxies=proxy, timeout=10.0) as client:
+        async with httpx.AsyncClient(proxy=proxy, timeout=10.0) as client:
             resp = await client.get(url)
             logger.info(f"[{name}][httpx] Status: {resp.status_code}")
             return resp.status_code
