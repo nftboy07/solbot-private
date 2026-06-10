@@ -7,7 +7,8 @@ for non-blocking integration with the main event loop.
 import asyncio
 import json
 import threading
-from time import time
+import time
+from time import time as current_time
 from typing import Callable, Optional
 
 import websocket
@@ -15,6 +16,7 @@ import websocket
 from solbot.config import PumpFunConfig
 from solbot.logger import get_logger
 from solbot.models import TokenEvent
+from solbot.core.metrics import RuntimeMetrics
 
 logger = get_logger("pumpfun")
 
@@ -35,6 +37,9 @@ class PumpFunMonitor:
         self._running = False
         self._reconnect_delay = 1.0
         self._max_reconnect_delay = 30.0
+        self._last_message_time = current_time()
+        self._metrics = RuntimeMetrics()
+        self._watchdog_task: Optional[asyncio.Task] = None
 
     @property
     def queue(self) -> asyncio.Queue[dict]:
@@ -54,6 +59,12 @@ class PumpFunMonitor:
             daemon=True,
         )
         self._thread.start()
+        
+        # Start the watchdog in the main event loop
+        self._watchdog_task = asyncio.run_coroutine_threadsafe(
+            self._watchdog_loop(), self._loop
+        )
+        
         logger.info(f"PumpFun monitor started | url={self._config.ws_url}")
 
     def stop(self):
@@ -63,7 +74,27 @@ class PumpFunMonitor:
             self._ws.close()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
         logger.info("PumpFun monitor stopped")
+
+    async def _watchdog_loop(self):
+        """Monitor for silence and reconnect if necessary."""
+        while self._running:
+            try:
+                await asyncio.sleep(10)
+                silence_duration = current_time() - self._last_message_time
+                if silence_duration > 60:
+                    logger.warning(f"Watchdog: 60s silence detected ({silence_duration:.1f}s). Reconnecting...")
+                    self._metrics.increment("connection_drops")
+                    if self._ws:
+                        self._ws.close()
+                    # Reconnection is handled by _run_ws_loop
+                    self._last_message_time = current_time() # Reset to avoid double trigger
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Watchdog error: {e}")
 
     def _run_ws_loop(self):
         """Reconnection loop running in the background thread."""
@@ -78,7 +109,7 @@ class PumpFunMonitor:
 
             # Exponential backoff reconnect
             logger.info(f"Reconnecting in {self._reconnect_delay:.1f}s...")
-            threading.Event().wait(self._reconnect_delay)
+            time.sleep(self._reconnect_delay)
             self._reconnect_delay = min(
                 self._reconnect_delay * 2, self._max_reconnect_delay
             )
@@ -106,9 +137,11 @@ class PumpFunMonitor:
         
         # Reset backoff on successful connection
         self._reconnect_delay = 1.0
+        self._last_message_time = current_time()
 
     def _on_message(self, ws, message: str):
         """Parse incoming message and push to async queue."""
+        self._last_message_time = current_time()
         try:
             data = json.loads(message)
             if not isinstance(data, dict):
@@ -134,6 +167,7 @@ class PumpFunMonitor:
 
     def _on_error(self, ws, error):
         logger.error(f"WebSocket error: {error}")
+        self._metrics.increment("connection_drops")
 
     def _on_close(self, ws, close_status_code, close_msg):
         logger.warning(f"WebSocket closed | code={close_status_code} msg={close_msg}")

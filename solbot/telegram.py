@@ -9,6 +9,7 @@ import traceback
 from typing import Optional, Any, List, Dict
 from datetime import datetime
 from solbot.config import TelegramConfig
+from solbot.core.metrics import RuntimeMetrics
 
 logger = logging.getLogger("bot.telegram")
 
@@ -22,6 +23,7 @@ class TelegramManager:
         self._offset = 0
         self._running = False
         self._sol_price = 150.0
+        self._metrics = RuntimeMetrics()
 
     async def start(self, bot_instance: Any):
         if not self._config.token or not self._config.chat_id:
@@ -123,6 +125,7 @@ class TelegramManager:
             elif cmd == "/autobuy": await self._cmd_autobuy(args, bot)
             elif cmd == "/proxy": await self._cmd_proxy(bot)
             elif cmd in ["/risk", "/kill", "/buy", "/max_position", "/drawdown"]: await self._cmd_risk(args, bot)
+            elif cmd == "/metrics": await self._cmd_metrics(bot)
             elif cmd == "/pause":
                 bot._paused = True
                 await self.send_message("⏸ <b>Bot Paused</b>")
@@ -144,6 +147,7 @@ class TelegramManager:
             "<b>📜 Command Registry</b>\n"
             "/list - Show this list\n"
             "/status - Current bot state\n"
+            "/metrics - Live runtime telemetry\n"
             "/balance - SOL balance\n"
             "/portfolio - Active holdings\n"
             "/mode <degen/normal> - Switch mode\n"
@@ -157,7 +161,6 @@ class TelegramManager:
             "/follow <addr> <alias> - Follow wallet\n"
             "/unfollow <addr> - Unfollow wallet\n"
             "/blacklist <add/remove/list> <addr> - Manage blacklist\n"
-            "/whales - View tracked whales/KOLs\n"
             "/pause - Pause sniper\n"
             "/resume - Resume sniper\n"
             "/reload - Restart process\n"
@@ -172,6 +175,10 @@ class TelegramManager:
         ai_state = "ENABLED" if bot._ai_enabled else "DISABLED"
         auto_state = "ON" if getattr(bot, "_autobuy_enabled", False) else "OFF"
         tracked_wallets = len(bot._filter._copy_targets) if bot._filter else 0
+        
+        # Pull live counters from metrics
+        m = self._metrics.get_report()
+        
         msg = (
             f"<b>📊 Solbot Status</b>\n"
             f"State: {state}\n"
@@ -180,7 +187,25 @@ class TelegramManager:
             f"Positions: {len(bot._positions)}\n"
             f"Tracked KOLs: {len(bot._kol_tracker.wallets)}\n"
             f"Tracked Whales: {tracked_wallets}\n"
-            f"Blacklisted: {len(bot._blacklisted_wallets)}"
+            f"Signals (Live): {m['total_signals']}\n"
+            f"Connection: {m['connection_health']}"
+        )
+        await self.send_message(msg)
+
+    async def _cmd_metrics(self, bot: Any):
+        m = self._metrics.get_report()
+        uptime_m = m['uptime_seconds'] / 60
+        err = m['errors']
+        msg = (
+            f"<b>📈 Live Runtime Metrics</b>\n"
+            f"Uptime: {uptime_m:.1f} min\n"
+            f"Total Signals: {m['total_signals']}\n"
+            f"Buy Rate: {m['buy_rate']:.1f}%\n"
+            f"Avg Proc Latency: {m['avg_proc_latency']:.2f}ms\n\n"
+            f"<b>🚨 Fault Telemetry:</b>\n"
+            f"Drops: {err['drops']}\n"
+            f"Rate Limits: {err['rate_limits']}\n"
+            f"CF Blocks: {err['cf_blocks']}"
         )
         await self.send_message(msg)
 
@@ -345,17 +370,15 @@ class TelegramManager:
         await self.send_message("\n".join(lines))
 
     async def _cmd_whales(self, bot: Any):
-        wallets = bot._db.get_whales_and_kols()
-        if not wallets:
-            await self.send_message("No whales or KOLs tracked.")
+        targets = bot._filter._copy_targets
+        if not targets:
+            await self.send_message("No whales tracked.")
             return
-        lines = ["<b>🐋 Tracked Whales & KOLs:</b>"]
-        for w in wallets:
-            alias = w['alias'] or "No Alias"
-            tags = w['tags'] or ""
-            wr = w['win_rate'] or 0.0
-            roi = w['avg_roi'] or 0.0
-            lines.append(f"- {alias} ({tags}) | WR: {wr:.1f}% | ROI: {roi:.1f}% | <code>{w['address'][:6]}...</code>")
+        lines = ["<b>🐋 Tracked Whales:</b>"]
+        for addr in targets:
+            score = bot._filter._wallet_scores.get(addr)
+            alias = score.alias if score and hasattr(score, 'alias') else "No Alias"
+            lines.append(f"- {alias} (<code>{addr[:6]}...</code>)")
         await self.send_message("\n".join(lines))
 
     async def _cmd_follow(self, args: list, bot: Any):
@@ -366,27 +389,26 @@ class TelegramManager:
         if len(addr) < 32 or len(addr) > 44:
             await self.send_message("❌ Invalid Solana address.")
             return
-        
-        bot._db.add_follow(addr, alias)
         bot._filter.add_copy_target(addr)
         if alias:
             from solbot.filters import WalletScore
             score = bot._filter._wallet_scores.get(addr, WalletScore(addr))
             score.alias = alias
             bot._filter._wallet_scores[addr] = score
-            bot._kol_tracker.add_wallet(addr, alias)
-            
-        await self.send_message(f"✅ Following wallet as KOL: {alias or addr}")
+            if any(term in alias for term in ["KOL", "VineWallet", "SmartWallet"]):
+                bot._kol_tracker.add_wallet(addr, alias)
+        bot._save_state()
+        await self.send_message(f"✅ Following whale: {alias or addr}")
 
     async def _cmd_unfollow(self, args: list, bot: Any):
         if len(args) < 2: return
         addr = args[1]
-        bot._db.remove_follow(addr)
         if addr in bot._filter._copy_targets:
             bot._filter._copy_targets.remove(addr)
-        if addr in bot._kol_tracker.wallets:
-            del bot._kol_tracker.wallets[addr]
-        await self.send_message(f"🗑 Unfollowed: {addr}")
+            if addr in bot._kol_tracker.wallets:
+                del bot._kol_tracker.wallets[addr]
+            bot._save_state()
+            await self.send_message(f"🗑 Unfollowed: {addr}")
 
     async def _cmd_blacklist(self, args: List[str], bot: Any):
         if len(args) < 2:
@@ -394,21 +416,24 @@ class TelegramManager:
             return
         action = args[1].lower()
         if action == "list":
-            bl = bot._db.get_blacklist()
-            if not bl:
+            if not bot._blacklisted_wallets:
                 await self.send_message("Blacklist is empty.")
                 return
-            msg = "🚫 Blacklisted Wallets:\n" + "\n".join([f"<code>{a}</code>" for a in bl])
+            msg = "🚫 Blacklisted Wallets:\n" + "\n".join([f"<code>{a}</code>" for a in bot._blacklisted_wallets])
             await self.send_message(msg)
-        elif action in ["add", "remove"]:
+        elif action == "add":
             if len(args) < 3: return
             addr = args[2]
-            bot._db.update_blacklist(addr, action)
-            if action == "add":
-                bot._blacklisted_wallets.add(addr)
-            else:
-                bot._blacklisted_wallets.discard(addr)
-            await self.send_message(f"✅ Blacklist updated for: {addr}")
+            bot._blacklisted_wallets.add(addr)
+            bot._save_state()
+            await self.send_message(f"✅ Blacklisted: {addr}")
+        elif action == "remove":
+            if len(args) < 3: return
+            addr = args[2]
+            if addr in bot._blacklisted_wallets:
+                bot._blacklisted_wallets.remove(addr)
+                bot._save_state()
+                await self.send_message(f"🗑 Removed: {addr}")
 
     async def _cmd_devs(self, bot: Any):
         lines = ["<b>👨‍💻 Active Position Devs:</b>"]
