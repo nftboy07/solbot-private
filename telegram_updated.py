@@ -19,9 +19,9 @@ from solbot.config import TelegramConfig
 logger = logging.getLogger("solbot.ui.telegram")
 
 class TelegramController:
-    """V3 Command-Center Telegram Controller."""
+    \"\"\"V3 Command-Center Telegram Controller.\"\"\"
 
-    def __init__(self, config: TelegramConfig, bot_instance: Any):
+    def __init__(self, config: TelegramConfig, bot_instance: Any = None):
         self._config = config
         self._bot = bot_instance
         self._client: Optional[TelegramClient] = None
@@ -33,8 +33,11 @@ class TelegramController:
         self._kill_switch = False
         self._sol_price = 150.0
 
-    async def start(self):
-        """Initialize and start the Telethon client."""
+    async def start(self, bot_instance: Any = None):
+        \"\"\"Initialize and start the Telethon client.\"\"\"
+        if bot_instance:
+            self._bot = bot_instance
+
         if not self._config.token or not self._config.api_id or not self._config.api_hash:
             logger.error("Telegram credentials missing in config.")
             return
@@ -47,12 +50,12 @@ class TelegramController:
         
         asyncio.create_task(self._update_sol_price())
         
-        await self._send_to_admin("⚡️ <b>Solbot V3 Command Center Online</b>\n"
-                                f"Build: <code>{self._version}</code>\n"
+        await self._send_to_admin("⚡️ <b>Solbot V3 Command Center Online</b>\\n"
+                                f"Build: <code>{self._version}</code>\\n"
                                 "Status: <code>READY</code>")
 
     async def stop(self):
-        """Stop the Telegram client."""
+        \"\"\"Stop the Telegram client.\"\"\"
         if self._client:
             await self._client.disconnect()
 
@@ -73,7 +76,7 @@ class TelegramController:
             await asyncio.sleep(60)
 
     def _register_handlers(self):
-        """Register all V3 command handlers."""
+        \"\"\"Register all V3 command handlers.\"\"\"
         
         @self._client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
@@ -93,14 +96,14 @@ class TelegramController:
 
         @self._client.on(events.NewMessage(pattern='/version'))
         async def version_handler(event):
-            await event.reply(f"🛰 <b>Solbot V3 Core</b>\nVersion: <code>{self._version}</code>\nBranch: <code>feature/kol-integration</code>")
+            await event.reply(f"🛰 <b>Solbot V3 Core</b>\\nVersion: <code>{self._version}</code>\\nBranch: <code>feature/kol-integration</code>")
 
         @self._client.on(events.NewMessage(pattern='/ping'))
         async def ping_handler(event):
             start = time.time()
             msg = await event.reply("🏓 Pong!")
             latency = (time.time() - start) * 1000
-            await msg.edit(f"🏓 <b>Pong!</b>\nLatency: <code>{latency:.2f}ms</code>")
+            await msg.edit(f"🏓 <b>Pong!</b>\\nLatency: <code>{latency:.2f}ms</code>")
 
         @self._client.on(events.NewMessage(pattern='/model|/brain'))
         async def model_handler(event):
@@ -151,18 +154,18 @@ class TelegramController:
             await self._cmd_whales(event)
 
     async def _cmd_start(self, event):
-        msg = ("<b>🦅 Solbot V3 | Command Center OS</b>\n"
-               "The ultimate asynchronous terminal for Solana dominance.\n\n"
+        msg = ("<b>🦅 Solbot V3 | Command Center OS</b>\\n"
+               "The ultimate asynchronous terminal for Solana dominance.\\n\\n"
                "Type /help to see all systems.")
         await event.reply(msg)
 
     async def _cmd_help(self, event):
-        msg = ("<b>🛠 SOLBOT V3 COMMAND REGISTRY</b>\n\n"
-               "<b>Core:</b> /status (/dashboard), /health, /version, /ping\n"
-               "<b>Intelligence:</b> /brain, /wallet (/balance), /alpha\n"
-               "<b>Data:</b> /signals, /why\n"
-               "<b>Ops:</b> /portfolio, /history, /proxy\n"
-               "<b>Control:</b> /risk, /kill, /buy, /drawdown\n"
+        msg = ("<b>🛠 SOLBOT V3 COMMAND REGISTRY</b>\\n\\n"
+               "<b>Core:</b> /status (/dashboard), /health, /version, /ping\\n"
+               "<b>Intelligence:</b> /brain, /wallet (/balance), /alpha\\n"
+               "<b>Data:</b> /signals, /why\\n"
+               "<b>Ops:</b> /portfolio, /history, /proxy\\n"
+               "<b>Control:</b> /risk, /kill, /buy, /drawdown\\n"
                "<b>Tracking:</b> /follow, /unfollow, /blacklist, /whales")
         await event.reply(msg)
 
@@ -176,17 +179,17 @@ class TelegramController:
         epm = (self._bot._events_count / (uptime_sec / 60)) if uptime_sec > 0 else 0
         spm = (self._bot._signals_count / (uptime_sec / 60)) if uptime_sec > 0 else 0
         
-        msg = (f"<b>📊 LIVE DASHBOARD</b>\n"
-               f"Mode: <code>{mode}</code> | State: <code>{state}</code>\n"
-               f"Autobuy: <code>{autobuy}</code> | Uptime: <code>{uptime_str}</code>\n\n"
-               f"<b>📈 Pipeline Metrics:</b>\n"
-               f"Events/min (EPM): <code>{epm:.1f}</code>\n"
-               f"Signals/min (SPM): <code>{spm:.2f}</code>\n"
-               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\n"
-               f"Total Events: <code>{self._bot._events_count}</code>\n\n"
-               f"<b>💰 Trading Stats:</b>\n"
-               f"Total Buys: <code>{self._bot._total_buys}</code>\n"
-               f"Executed Trades: <code>{self._bot._executed_trades}</code>\n"
+        msg = (f"<b>📊 LIVE DASHBOARD</b>\\n"
+               f"Mode: <code>{mode}</code> | State: <code>{state}</code>\\n"
+               f"Autobuy: <code>{autobuy}</code> | Uptime: <code>{uptime_str}</code>\\n\\n"
+               f"<b>📈 Pipeline Metrics:</b>\\n"
+               f"Events/min (EPM): <code>{epm:.1f}</code>\\n"
+               f"Signals/min (SPM): <code>{spm:.2f}</code>\\n"
+               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\\n"
+               f"Total Events: <code>{self._bot._events_count}</code>\\n\\n"
+               f"<b>💰 Trading Stats:</b>\\n"
+               f"Total Buys: <code>{self._bot._total_buys}</code>\\n"
+               f"Executed Trades: <code>{self._bot._executed_trades}</code>\\n"
                f"Active Positions: <code>{len(self._bot._positions)}</code>")
         await event.reply(msg)
 
@@ -195,57 +198,57 @@ class TelegramController:
         if hasattr(self._bot, '_rpc_pool'):
             rpc_url = await self._bot._rpc_pool.get_best_node()
             
-        msg = (f"<b>🏥 SYSTEM HEALTH</b>\n"
-               f"RPC Pool: <code>OK</code>\n"
-               f"Event Store: <code>CONNECTED</code>\n"
-               f"Network Manager: <code>STABLE</code>\n"
-               f"Primary RPC: <code>{rpc_url[-12:] if rpc_url != 'N/A' else 'N/A'}</code>\n"
+        msg = (f"<b>🏥 SYSTEM HEALTH</b>\\n"
+               f"RPC Pool: <code>OK</code>\\n"
+               f"Event Store: <code>CONNECTED</code>\\n"
+               f"Network Manager: <code>STABLE</code>\\n"
+               f"Primary RPC: <code>{rpc_url[-12:] if rpc_url != 'N/A' else 'N/A'}</code>\\n"
                f"SOL Price: <code>${self._sol_price:.2f}</code>")
         await event.reply(msg)
 
     async def _cmd_model(self, event):
         # AI Filter Metrics
-        msg = ("<b>🤖 MODEL INTELLIGENCE (BRAIN)</b>\n"
-               "Active Model: <code>Solbot_V3_Transformer_L4</code>\n"
-               f"Min AI Score: <code>{self._bot._ai_min_score}</code>\n"
-               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\n"
+        msg = ("<b>🤖 MODEL INTELLIGENCE (BRAIN)</b>\\n"
+               "Active Model: <code>Solbot_V3_Transformer_L4</code>\\n"
+               f"Min AI Score: <code>{self._bot._ai_min_score}</code>\\n"
+               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\\n"
                "Status: <code>OPTIMIZED</code>")
         await event.reply(msg)
 
     async def _cmd_wallet(self, event):
         balance = await self._bot._pump_client.get_sol_balance()
-        msg = (f"<b>📁 WALLET INTELLIGENCE</b>\n"
-               f"Address: <code>{self._bot._wallet.public_key if self._bot._wallet else 'N/A'}</code>\n"
-               f"Balance: <code>{balance:.4f} SOL</code>\n"
+        msg = (f"<b>📁 WALLET INTELLIGENCE</b>\\n"
+               f"Address: <code>{self._bot._wallet.public_key if self._bot._wallet else 'N/A'}</code>\\n"
+               f"Balance: <code>{balance:.4f} SOL</code>\\n"
                f"SOL Price: <code>${self._sol_price:.2f}</code>")
         await event.reply(msg)
 
     async def _cmd_signals(self, event):
         uptime_sec = time.time() - self._bot._start_time
         spm = (self._bot._signals_count / (uptime_sec / 60)) if uptime_sec > 0 else 0
-        msg = (f"<b>📡 SIGNAL ENGINE</b>\n"
-               f"Total Signals: <code>{self._bot._signals_count}</code>\n"
-               f"Signals/min: <code>{spm:.2f}</code>\n"
-               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\n"
+        msg = (f"<b>📡 SIGNAL ENGINE</b>\\n"
+               f"Total Signals: <code>{self._bot._signals_count}</code>\\n"
+               f"Signals/min: <code>{spm:.2f}</code>\\n"
+               f"AI Rejects: <code>{self._bot._ai_rejects_count}</code>\\n"
                f"Top KOL Match: <code>$PEPE_V3</code>")
         await event.reply(msg)
 
     async def _cmd_portfolio(self, event):
         positions = self._bot._positions
         if not positions:
-            await event.reply("<b>📍 PORTFOLIO</b>\nNo active positions.")
+            await event.reply("<b>📍 PORTFOLIO</b>\\nNo active positions.")
             return
             
         lines = ["<b>📍 ACTIVE PORTFOLIO</b>"]
         for mint, pos in positions.items():
             gain = (pos.current_price / pos.entry_price - 1) * 100 if pos.entry_price > 0 else 0
             lines.append(f"• <code>{pos.symbol}</code> | ROI: <code>{gain:+.2f}%</code>")
-        await event.reply("\n".join(lines))
+        await event.reply("\\n".join(lines))
 
     async def _cmd_execution(self, event):
-        msg = (f"<b>⚡️ EXECUTION METRICS</b>\n"
-               f"Total Buys: <code>{self._bot._total_buys}</code>\n"
-               f"Executed Trades: <code>{self._bot._executed_trades}</code>\n"
+        msg = (f"<b>⚡️ EXECUTION METRICS</b>\\n"
+               f"Total Buys: <code>{self._bot._total_buys}</code>\\n"
+               f"Executed Trades: <code>{self._bot._executed_trades}</code>\\n"
                f"Queue Depth: <code>{self._bot._monitor.queue.qsize() if self._bot._monitor else 0}</code>")
         await event.reply(msg)
 
@@ -254,9 +257,9 @@ class TelegramController:
         cmd = args[0].lower()
         
         def save():
-            if hasattr(self._bot, "_save_state"): self._bot._save_state()
+            if hasattr(self._bot, \"_save_state\"): self._bot._save_state()
 
-        if cmd == "/kill":
+        if cmd == \"/kill\":
             self._kill_switch = not self._kill_switch
             if self._kill_switch:
                 self._bot._paused = True
@@ -266,7 +269,7 @@ class TelegramController:
                 await event.reply("✅ <b>KILL SWITCH DEACTIVATED</b>")
             return
 
-        if cmd == "/buy":
+        if cmd == \"/buy\":
             if len(args) > 1:
                 try:
                     val = float(args[1])
@@ -277,7 +280,7 @@ class TelegramController:
                     await event.reply("❌ Invalid value")
             return
 
-        if cmd == "/drawdown":
+        if cmd == \"/drawdown\":
             if len(args) > 1:
                 try:
                     val = float(args[1]) / 100.0
@@ -288,23 +291,23 @@ class TelegramController:
                     await event.reply("❌ Invalid value")
             return
 
-        msg = (f"<b>🛡 RISK ENGINE</b>\n"
-               f"Buy Amount: <code>{self._bot._config.jupiter.buy_amount_sol} SOL</code>\n"
-               f"Drawdown: <code>{self._bot._config.strategy.trailing_stop_pct*100:.1f}%</code>\n"
+        msg = (f"<b>🛡 RISK ENGINE</b>\\n"
+               f"Buy Amount: <code>{self._bot._config.jupiter.buy_amount_sol} SOL</code>\\n"
+               f"Drawdown: <code>{self._bot._config.strategy.trailing_stop_pct*100:.1f}%</code>\\n"
                f"Kill Switch: <code>{'ON' if self._kill_switch else 'OFF'}</code>")
         await event.reply(msg)
 
     async def _cmd_why(self, event):
-        msg = ("<b>🤔 WHY ENGINE</b>\n"
-               "Status: <code>OPERATIONAL</code>\n"
-               "Logic: <code>KOL_CONVERGENCE_V2</code>\n"
+        msg = ("<b>🤔 WHY ENGINE</b>\\n"
+               "Status: <code>OPERATIONAL</code>\\n"
+               "Logic: <code>KOL_CONVERGENCE_V2</code>\\n"
                "Primary Factor: <code>Social_Velocity</code>")
         await event.reply(msg)
 
     async def _cmd_alpha(self, event):
-        msg = ("<b>💎 TOP CONVICTION ALPHA</b>\n"
-               "1. <code>KOL_TRACKER_V3</code> - Live\n"
-               "2. <code>DEDICATED_RPC</code> - High-speed\n"
+        msg = ("<b>💎 TOP CONVICTION ALPHA</b>\\n"
+               "1. <code>KOL_TRACKER_V3</code> - Live\\n"
+               "2. <code>DEDICATED_RPC</code> - High-speed\\n"
                "3. <code>AI_FILTER_BETA</code> - Active")
         await event.reply(msg)
         
@@ -337,39 +340,39 @@ class TelegramController:
             await event.reply("Usage: /blacklist <add/remove/list> [addr]")
             return
         action = args[1].lower()
-        if action == "list":
+        if action == \"list\":
             bl = self._bot._db.get_blacklist()
-            msg = "🚫 Blacklist:\n" + "\n".join([f"<code>{a}</code>" for a in bl])
+            msg = \"🚫 Blacklist:\\n\" + \"\\n\".join([f\"<code>{a}</code>\" for a in bl])
             await event.reply(msg)
-        elif action in ["add", "remove"]:
+        elif action in [\"add\", \"remove\"]:
             if len(args) < 3: return
             addr = args[2]
             self._bot._db.update_blacklist(addr, action)
-            if action == "add":
+            if action == \"add\":
                 self._bot._blacklisted_wallets.add(addr)
             else:
                 self._bot._blacklisted_wallets.discard(addr)
-            await event.reply(f"✅ Blacklist updated: {addr}")
+            await event.reply(f\"✅ Blacklist updated: {addr}\")
             
     async def _cmd_whales(self, event):
         wallets = self._bot._db.get_whales_and_kols()
         if not wallets:
-            await event.reply("No whales or KOLs tracked.")
+            await event.reply(\"No whales or KOLs tracked.\")
             return
-        lines = ["<b>🐋 Tracked Whales & KOLs:</b>"]
+        lines = [\"<b>🐋 Tracked Whales & KOLs:</b>\"]
         for w in wallets:
-            alias = w['alias'] or "No Alias"
+            alias = w['alias'] or \"No Alias\"
             wr = w['win_rate'] or 0.0
             roi = w['avg_roi'] or 0.0
-            lines.append(f"• {alias} | WR: {wr:.1f}% | ROI: {roi:.1f}% | <code>{w['address'][:6]}...</code>")
-        await event.reply("\n".join(lines))
+            lines.append(f\"• {alias} | WR: {wr:.1f}% | ROI: {roi:.1f}% | <code>{w['address'][:6]}...</code>\")
+        await event.reply(\"\\n\".join(lines))
 
     async def _send_to_admin(self, text: str):
         if self._client and self._config.chat_id:
             try:
                 await self._client.send_message(int(self._config.chat_id), text, parse_mode='html')
             except Exception as e:
-                logger.error(f"Failed to send Telegram message: {e}")
+                logger.error(f\"Failed to send Telegram message: {e}\")
 
     async def send_message(self, text: str):
         await self._send_to_admin(text)
