@@ -22,7 +22,7 @@ class TelegramManager:
         self._base_url = f"https://api.telegram.org/bot{self._config.token}"
         self._offset = 0
         self._running = False
-        self._sol_price = 150.0  # Initial placeholder until fetch succeeds
+        self._sol_price = 150.0
         self._metrics = RuntimeMetrics()
 
     async def start(self, bot_instance: Any):
@@ -37,69 +37,45 @@ class TelegramManager:
                 if resp.status == 200:
                     data = await resp.json()
                     results = data.get("result", [])
-                    if results:
-                        self._offset = results[0]["update_id"] + 1
-        except Exception as e:
-            logger.error(f"Failed to flush Telegram updates: {e}")
-        
+                    if results: self._offset = results[0]["update_id"] + 1
+        except Exception as e: logger.error(f"Failed to flush Telegram updates: {e}")
         self._running = True
-        
-        # Priority: Fetch SOL price BEFORE starting other loops to ensure valid pricing on startup
         logger.info("Performing initial SOL price fetch...")
         await self._update_sol_price(once=True)
-        
         asyncio.create_task(self._poll_loop(bot_instance))
         asyncio.create_task(self._price_update_loop())
         logger.info("Telegram command listener started.")
 
     async def stop(self):
         self._running = False
-        if self._session:
-            await self._session.close()
-            self._session = None
+        if self._session: await self._session.close(); self._session = None
 
     async def _update_sol_price(self, once: bool = False):
-        """Fetch SOL price from Jupiter v2 with multi-source fallback."""
         sol_mint = "So11111111111111111111111111111111111111112"
         sources = [
             {"name": "Jupiter", "url": f"https://api.jup.ag/price/v2?ids={sol_mint}", "path": ["data", sol_mint, "price"]},
             {"name": "DexScreener", "url": f"https://api.dexscreener.com/latest/dex/tokens/{sol_mint}", "path": ["pairs", 0, "priceUsd"]},
             {"name": "Birdeye", "url": f"https://public-api.birdeye.so/public/price?address={sol_mint}", "path": ["data", "value"]}
         ]
-        
         if not self._session: return
-
         for source in sources:
             try:
                 async with self._session.get(source["url"], timeout=5) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
-                        price = data
+                        data = await resp.json(); price = data
                         for key in source["path"]:
-                            if isinstance(price, list) and isinstance(key, int):
-                                price = price[key] if len(price) > key else None
-                            elif isinstance(price, dict):
-                                price = price.get(key)
-                            else:
-                                price = None
+                            if isinstance(price, list) and isinstance(key, int): price = price[key] if len(price) > key else None
+                            elif isinstance(price, dict): price = price.get(key)
+                            else: price = None
                             if price is None: break
-                        
                         if price:
                             new_price = float(price)
-                            if new_price > 0:
-                                self._sol_price = new_price
-                                logger.info(f"SOL Price updated from {source['name']}: ${self._sol_price:.2f}")
-                                return
-            except Exception as e:
-                logger.debug(f"Failed to fetch price from {source['name']}: {e}")
-        
-        if self._sol_price == 150.0:
-            logger.error("Critical: All SOL price sources failed on startup. Using default fallback.")
+                            if new_price > 0: self._sol_price = new_price; logger.info(f"SOL Price updated from {source['name']}: ${self._sol_price:.2f}"); return
+            except Exception as e: logger.debug(f"Failed to fetch price from {source['name']}: {e}")
+        if self._sol_price == 150.0: logger.error("Critical: All SOL price sources failed. Using fallback.")
 
     async def _price_update_loop(self):
-        while self._running:
-            await self._update_sol_price()
-            await asyncio.sleep(60)
+        while self._running: await self._update_sol_price(); await asyncio.sleep(60)
 
     async def send_message(self, text: str):
         if not self._session: return
@@ -107,10 +83,8 @@ class TelegramManager:
         payload = {"chat_id": self._config.chat_id, "text": text, "parse_mode": "HTML"}
         try:
             async with self._session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    logger.error(f"Telegram send error: {await resp.text()}")
-        except Exception as e:
-            logger.error(f"Telegram exception: {e}")
+                if resp.status != 200: logger.error(f"Telegram send error: {await resp.text()}")
+        except Exception as e: logger.error(f"Telegram exception: {e}")
 
     async def _poll_loop(self, bot_instance: Any):
         while self._running:
@@ -118,33 +92,33 @@ class TelegramManager:
                 params = {"offset": self._offset, "timeout": 20}
                 async with self._session.get(f"{self._base_url}/getUpdates", params=params) as resp:
                     if resp.status == 200:
-                        data = await resp.json()
-                        updates = data.get("result", [])
+                        data = await resp.json(); updates = data.get("result", [])
                         if updates: await self._handle_updates(updates, bot_instance)
-            except Exception as e:
-                logger.error(f"Telegram error: {e}")
-                await asyncio.sleep(5)
+            except Exception as e: logger.error(f"Telegram error: {e}"); await asyncio.sleep(5)
 
     async def _handle_updates(self, updates: list, bot: Any):
         for update in updates:
             self._offset = update["update_id"] + 1
             msg = update.get("message")
-            if not msg or str(msg.get("chat", {}).get("id", "")) != str(self._config.chat_id):
-                continue
+            if not msg or str(msg.get("chat", {}).get("id", "")) != str(self._config.chat_id): continue
             text = msg.get("text", "")
             if text: asyncio.create_task(self._execute_command(text, bot))
 
     async def _execute_command(self, text: str, bot: Any):
         try:
-            args = text.split()
+            args = text.split(); 
             if not args: return
             cmd = args[0].lower()
-            
-            # Protected Command Execution
             if cmd in ["/list", "/help"]: await self._cmd_list()
             elif cmd == "/status": await self._cmd_status(bot)
+            elif cmd == "/dashboard": await self._cmd_status(bot)
             elif cmd in ["/balance", "/wallet"]: await self._cmd_balance(bot)
             elif cmd in ["/portfolio", "/positions"]: await self._cmd_portfolio(bot)
+            elif cmd == "/metrics": await self._cmd_metrics(bot)
+            elif cmd == "/pipeline": await self._cmd_pipeline(bot)
+            elif cmd == "/brain": await self._cmd_brain(bot)
+            elif cmd == "/version": await self.send_message("<b>Solbot v3.1.2-Hotfix</b>\nBuild: 20260611-PROD")
+            elif cmd == "/selftest": await self._cmd_selftest(bot)
             elif cmd == "/history": await self._cmd_history(bot)
             elif cmd in ["/whales", "/smart"]: await self._cmd_whales(bot)
             elif cmd == "/kols": await self._cmd_kols(bot)
@@ -153,412 +127,143 @@ class TelegramManager:
             elif cmd == "/unfollow": await self._cmd_unfollow(args, bot)
             elif cmd == "/blacklist": await self._cmd_blacklist(args, bot)
             elif cmd == "/devs": await self._cmd_devs(bot)
-            elif cmd == "/followtwitter": await self._cmd_follow_twitter(args, bot)
-            elif cmd == "/unfollowtwitter": await self._cmd_unfollow_twitter(args, bot)
             elif cmd == "/mode": await self._cmd_mode(args, bot)
             elif cmd == "/autobuy": await self._cmd_autobuy(args, bot)
             elif cmd == "/proxy": await self._cmd_proxy(bot)
             elif cmd in ["/risk", "/kill", "/buy", "/max_position", "/drawdown"]: await self._cmd_risk(args, bot)
-            elif cmd == "/metrics": await self._cmd_metrics(bot)
-            elif cmd == "/pause":
-                bot._paused = True
-                await self.send_message("⏸ <b>Bot Paused</b>")
-            elif cmd == "/resume":
-                bot._paused = False
-                await self.send_message("▶️ <b>Bot Resumed</b>")
-            elif cmd in ["/reload", "/restart"]:
-                await self.send_message("🔄 <b>Restarting...</b>")
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+            elif cmd == "/pause": bot._paused = True; await self.send_message("⏸ <b>Bot Paused</b>")
+            elif cmd == "/resume": bot._paused = False; await self.send_message("▶️ <b>Bot Resumed</b>")
+            elif cmd in ["/reload", "/restart"]: await self.send_message("🔄 <b>Restarting...</b>"); os.execv(sys.executable, [sys.executable] + sys.argv)
             elif cmd == "/exitall": await self._cmd_exitall(bot)
             elif cmd == "/aitoggle": await self._cmd_aitoggle(bot)
             elif cmd == "/aiscore": await self._cmd_aiscore(args, bot)
-            elif cmd == "/gmgn_trending": await self._cmd_gmgn_trending(bot)
-            elif cmd == "/gmgn_smart": await self._cmd_gmgn_smart(bot)
-            elif cmd == "/gmgn_scan": await self._cmd_gmgn_scan(args, bot)
-        except Exception as e:
-            logger.error(f"Error executing command '{text}': {e}")
-            logger.error(traceback.format_exc())
+        except Exception as e: logger.error(f"Error executing command '{text}': {e}"); logger.error(traceback.format_exc())
 
     async def _cmd_list(self):
-        msg = (
-            "<b>📜 Command Registry</b>\n"
-            "/list - Show this list\n"
-            "/status - Current bot state\n"
-            "/metrics - Live runtime telemetry\n"
-            "/balance - SOL balance\n"
-            "/portfolio - Active holdings\n"
-            "/mode <degen/normal> - Switch mode\n"
-            "/autobuy <on/off> - Toggle auto-buy\n"
-            "/buy <val> - Set buy amount\n"
-            "/drawdown <val> - Set trailing stop %\n"
-            "/risk <safe/normal/degen> - Presets/Status\n"
-            "/kill <on/off> - Global halt\n"
-            "/proxy - Network health telemetry\n"
-            "/profit - Daily PnL report\n"
-            "/follow <addr> <alias> - Follow wallet\n"
-            "/unfollow <addr> - Unfollow wallet\n"
-            "/blacklist <add/remove/list> <addr> - Manage blacklist\n"
-            "/pause - Pause sniper\n"
-            "/resume - Resume sniper\n"
-            "/reload - Restart process\n"
-            "/exitall - Liquidate everything\n"
-            "/aitoggle - Toggle AI filter\n"
-            "/aiscore <value> - Set min AI score\n"
-            "/gmgn_trending - New tokens discovery\n"
-            "/gmgn_smart - Smart money inflow\n"
-            "/gmgn_scan <mint> - Security scan"
-        )
+        msg = ("<b>📜 Command Registry</b>\n/list - Commands\n/status - Bot state\n/dashboard - Status\n/metrics - Telemetry\n/pipeline - Filter/Audit\n/brain - AI Config\n/balance - SOL\n/portfolio - Active\n/risk - Profile\n/kill - Halt\n/version - Build\n/selftest - Diagnostic")
         await self.send_message(msg)
 
     async def _cmd_status(self, bot: Any):
         state = "PAUSED" if bot._paused else "ACTIVE"
         ai_state = "ENABLED" if bot._ai_enabled else "DISABLED"
         auto_state = "ON" if getattr(bot, "_autobuy_enabled", False) else "OFF"
-        tracked_wallets = len(bot._filter._copy_targets) if bot._filter else 0
-        
-        # Pull live counters from metrics
         m = self._metrics.get_report()
-        
-        msg = (
-            f"<b>📊 Solbot Status</b>\n"
-            f"State: {state}\n"
-            f"Auto-buy: {auto_state}\n"
-            f"AI Filter: {ai_state} (Min: {bot._ai_min_score})\n"
-            f"Positions: {len(bot._positions)}\n"
-            f"Tracked KOLs: {len(bot._kol_tracker.wallets)}\n"
-            f"Tracked Whales: {tracked_wallets}\n"
-            f"SOL Price: ${self._sol_price:.2f}\n"
-            f"Signals (Live): {m['total_signals']}\n"
-            f"Connection: {m['connection_health']}"
-        )
+        msg = (f"<b>📊 Solbot Status</b>\nState: {state}\nAuto-buy: {auto_state}\nAI Filter: {ai_state} (Min: {bot._ai_min_score})\nPositions: {len(bot._positions)}\nSOL Price: ${self._sol_price:.2f}\nSignals: {m['total_signals']}")
+        await self.send_message(msg)
+
+    async def _cmd_brain(self, bot: Any):
+        await self.send_message(f"🧠 <b>AI Configuration</b>\nThreshold: <code>{bot._ai_min_score}</code>\nEnabled: <code>{bot._ai_enabled}</code>")
+
+    async def _cmd_pipeline(self, bot: Any):
+        msg = (f"<b>🛠 Pipeline Telemetry</b>\nEvents: {bot._events_count}\nSignals: {bot._signals_count}\nAI Rejects: {bot._ai_rejects_count}\nFilter Rejects: {bot._filter_rejects_count}")
         await self.send_message(msg)
 
     async def _cmd_metrics(self, bot: Any):
-        m = self._metrics.get_report()
-        uptime_m = m['uptime_seconds'] / 60
-        err = m['errors']
-        msg = (
-            f"<b>📈 Live Runtime Metrics</b>\n"
-            f"Uptime: {uptime_m:.1f} min\n"
-            f"SOL Price: ${self._sol_price:.2f}\n"
-            f"Total Signals: {m['total_signals']}\n"
-            f"Buy Rate: {m['buy_rate']:.1f}%\n"
-            f"Avg Proc Latency: {m['avg_proc_latency']:.2f}ms\n\n"
-            f"<b>🚨 Fault Telemetry:</b>\n"
-            f"Drops: {err['drops']}\n"
-            f"Rate Limits: {err['rate_limits']}\n"
-            f"CF Blocks: {err['cf_blocks']}"
-        )
+        m = self._metrics.get_report(); rm = getattr(bot, '_reject_metrics', {})
+        msg = (f"<b>📈 Live Metrics</b>\nSOL Price: ${self._sol_price:.2f}\nTotal Signals: {m['total_signals']}\nBuy Rate: {m['buy_rate']:.1f}%\n\n<b>🚫 Rejects:</b>\nBlacklist: {rm.get('blacklist', 0)}\nFilter: {rm.get('filter', 0)}\nAI: {rm.get('ai', 0)}\nPos: {rm.get('positions', 0)}")
         await self.send_message(msg)
 
+    async def _cmd_selftest(self, bot: Any):
+        await self.send_message("🧪 <b>Diagnostic Self-Test...</b>")
+        results = []
+        try:
+            score = await bot._ai_filter.score_token({"mint": "test", "symbol": "TEST"})
+            results.append(f"AI: ✅ ({score})"); bal = await bot._pump_client.get_sol_balance()
+            results.append(f"RPC: ✅ ({bal:.4f} SOL)"); bot._save_state(); results.append("State: ✅")
+        except Exception as e: results.append(f"Fault: {e}")
+        await self.send_message("\n".join(results))
+
+    async def _cmd_balance(self, bot: Any):
+        balance = await bot._pump_client.get_sol_balance()
+        await self.send_message(f"<b>🔍 Balance</b>\n<code>{balance:.4f} SOL</code> (${balance * self._sol_price:,.2f})")
+
+    async def _cmd_profit(self, bot: Any):
+        now = datetime.now()
+        today_trades = [t for t in bot._trades if hasattr(t, 'timestamp') and datetime.fromtimestamp(t.timestamp).date() == now.date()]
+        total_pnl = sum([getattr(t, 'pnl_sol', 0) for t in today_trades])
+        await self.send_message(f"<b>💰 Daily PnL</b>\nRealized: <code>{total_pnl:.4f} SOL</code> (${total_pnl * self._sol_price:,.2f})")
+
+    async def _cmd_portfolio(self, bot: Any):
+        if not bot._positions: await self.send_message("No positions."); return
+        lines = ["<b>📍 Portfolio:</b>"]
+        for mint, pos in bot._positions.items(): lines.append(f"- {pos.symbol}: ${pos.current_price:,.0f} MC")
+        await self.send_message("\n".join(lines))
+
     async def _cmd_mode(self, args: list, bot: Any):
-        if len(args) < 2:
-            current = getattr(bot._config.strategy, "mode", "unknown")
-            await self.send_message(f"<b>Current Mode:</b> {current}")
-            return
-        
+        if len(args) < 2: return
         mode = args[1].lower()
         if mode in ["degen", "normal"]:
             from solbot.config import BotMode
             object.__setattr__(bot._config.strategy, "mode", BotMode.DEGEN if mode == "degen" else BotMode.NORMAL)
-            await self.send_message(f"✅ <b>Mode switched to:</b> {mode.upper()}")
-        else:
-            await self.send_message("❌ Invalid mode. Use /mode degen or /mode normal")
+            await self.send_message(f"✅ Mode: {mode.upper()}")
 
     async def _cmd_autobuy(self, args: list, bot: Any):
         if len(args) > 1:
             val = args[1].lower()
             if val == "on": bot._autobuy_enabled = True
             elif val == "off": bot._autobuy_enabled = False
-        else:
-            bot._autobuy_enabled = not getattr(bot, "_autobuy_enabled", False)
-        
-        if hasattr(bot, "_save_state"): bot._save_state()
-        state_text = "ON" if bot._autobuy_enabled else "OFF"
-        await self.send_message(f"🤖 <b>Auto-buy:</b> {state_text}")
+        else: bot._autobuy_enabled = not bot._autobuy_enabled
+        bot._save_state(); await self.send_message(f"🤖 Auto-buy: {'ON' if bot._autobuy_enabled else 'OFF'}")
 
     async def _cmd_risk(self, args: list, bot: Any):
         cmd = args[0].lower()
-        
-        def save():
-            if hasattr(bot, "_save_state"): bot._save_state()
-
-        if cmd == "/kill":
-            kill = True
-            if len(args) > 1:
-                kill = (args[1].lower() == "on")
-            else:
-                kill = not bot._paused
-            
-            bot._paused = kill
-            save()
-            status = "ACTIVATED" if kill else "DEACTIVATED"
-            await self.send_message(f"🚨 <b>KILL SWITCH {status}</b>")
-            return
-
-        if cmd == "/buy" or cmd == "/max_position":
-            if len(args) > 1:
-                try:
-                    val = float(args[1])
-                    object.__setattr__(bot._config.jupiter, "buy_amount_sol", val)
-                    save()
-                    await self.send_message(f"💰 <b>Buy Amount:</b> <code>{val} SOL</code>")
-                except:
-                    await self.send_message("❌ Invalid number")
-            else:
-                await self.send_message(f"💰 <b>Current Buy:</b> <code>{bot._config.jupiter.buy_amount_sol} SOL</code>")
-            return
-
-        if cmd == "/drawdown":
-            if len(args) > 1:
-                try:
-                    val = float(args[1]) / 100.0
-                    object.__setattr__(bot._config.strategy, "trailing_stop_pct", val)
-                    save()
-                    await self.send_message(f"📉 <b>Trailing Stop:</b> <code>{val*100:.1f}%</code>")
-                except:
-                    await self.send_message("❌ Invalid number")
-            else:
-                await self.send_message(f"📉 <b>Current Drawdown:</b> <code>{bot._config.strategy.trailing_stop_pct*100:.1f}%</code>")
-            return
-
-        if cmd == "/risk" and len(args) > 1:
-            preset = args[1].lower()
-            if preset == "safe":
-                object.__setattr__(bot._config.jupiter, "buy_amount_sol", 0.01)
-                object.__setattr__(bot._config.strategy, "trailing_stop_pct", 0.05)
-                await self.send_message("🛡 <b>SAFE PRESET</b>\nPos: 0.01 SOL | Drawdown: 5%")
-            elif preset == "normal":
-                object.__setattr__(bot._config.jupiter, "buy_amount_sol", 0.10)
-                object.__setattr__(bot._config.strategy, "trailing_stop_pct", 0.10)
-                await self.send_message("⚖️ <b>NORMAL PRESET</b>\nPos: 0.10 SOL | Drawdown: 10%")
-            elif preset == "degen":
-                object.__setattr__(bot._config.jupiter, "buy_amount_sol", 0.50)
-                object.__setattr__(bot._config.strategy, "trailing_stop_pct", 0.20)
-                await self.send_message("🌋 <b>DEGEN PRESET</b>\nPos: 0.50 SOL | Drawdown: 20%")
-            save()
-            return
-
-        msg = ("<b>🛡 RISK PROFILE</b>\n"
-               f"Max Pos: <code>{bot._config.jupiter.buy_amount_sol} SOL</code>\n"
-               f"Drawdown: <code>{bot._config.strategy.trailing_stop_pct*100:.1f}%</code>\n"
-               f"Autobuy: <code>{'ON' if bot._autobuy_enabled else 'OFF'}</code>\n"
-               f"Halt: <code>{'ON' if bot._paused else 'OFF'}</code>")
+        if cmd == "/kill": bot._paused = True; bot._save_state(); await self.send_message("🚨 <b>KILL SWITCH ON</b>"); return
+        if cmd == "/buy" and len(args) > 1:
+            try: val = float(args[1]); object.__setattr__(bot._config.jupiter, "buy_amount_sol", val); bot._save_state(); await self.send_message(f"💰 Buy: {val} SOL")
+            except: pass
+        msg = (f"<b>🛡 RISK</b>\nMax Pos: {bot._config.jupiter.buy_amount_sol} SOL\nDrawdown: {bot._config.strategy.trailing_stop_pct*100:.1f}%")
         await self.send_message(msg)
 
     async def _cmd_proxy(self, bot: Any):
-        nm = getattr(bot, "_network_manager", None)
-        if not nm:
-            await self.send_message("❌ <b>NetworkManager not initialized.</b>")
-            return
-        stats = await nm.get_stats()
-        err = stats["errors"]
-        msg = (
-            f"<b>🌐 Proxy Health Report</b>\n"
-            f"Total Proxies: {stats['total_proxies']}\n"
-            f"Total Requests: {stats['total_requests']}\n"
-            f"Success Rate: {stats['success_rate']:.1f}%\n"
-            f"Avg Latency: {stats['avg_latency']:.2f}ms\n"
-            f"Health Score: {stats['health_score']:.1f}/100\n\n"
-            f"<b>🚫 Error Breakdown:</b>\n"
-            f"403 (Forbidden): {err[403]}\n"
-            f"407 (Auth Req): {err[407]}\n"
-            f"429 (Rate Limit): {err[429]}\n"
-            f"530 (Cloudflare): {err[530]}"
-        )
-        await self.send_message(msg)
-
-    async def _cmd_kols(self, bot: Any):
-        if not bot._kol_tracker or not bot._kol_tracker.wallets:
-            await self.send_message("No KOLs currently tracked. Tip: Add 'KOL' to an alias when using /follow.")
-            return
-        lines = ["<b>🔥 Active KOL Tracklist:</b>"]
-        for addr, alias in bot._kol_tracker.wallets.items():
-            lines.append(f"- {alias} (<code>{addr[:6]}...{addr[-4:]}</code>)")
-        await self.send_message("\n".join(lines))
-
-    async def _cmd_profit(self, bot: Any):
-        now = datetime.now()
-        today_trades = [t for t in bot._trades if hasattr(t, 'timestamp') and datetime.fromtimestamp(t.timestamp).date() == now.date()]
-        total_trades = len(today_trades)
-        wins = len([t for t in today_trades if t.success and getattr(t, 'pnl_sol', 0) > 0])
-        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
-        total_pnl = sum([getattr(t, 'pnl_sol', 0) for t in today_trades])
-        lines = [
-            "<b>💰 Daily Profit Report</b>",
-            f"Date: {now.strftime('%A, %b %d, %Y')}",
-            f"Total Trades: {total_trades}",
-            f"Win Rate: {win_rate:.1f}%",
-            f"Realized PnL: <code>{total_pnl:.4f} SOL</code> (${total_pnl * self._sol_price:,.2f})",
-            "",
-            f"<b>📍 Active Positions ({len(bot._positions)}):</b>"
-        ]
-        for mint, pos in bot._positions.items():
-            gain = (pos.current_price / pos.entry_price - 1) * 100 if pos.entry_price > 0 else 0
-            lines.append(f"- {pos.symbol}: {gain:+.2f}% (${pos.current_price:,.0f} MC)")
-        await self.send_message("\n".join(lines))
-
-    async def _cmd_balance(self, bot: Any):
-        balance = await bot._pump_client.get_sol_balance()
-        await self.send_message(f"<b>🔍 Balance</b>\n<code>{balance:.4f} SOL</code> (${balance * self._sol_price:,.2f})")
-
-    async def _cmd_portfolio(self, bot: Any):
-        if not bot._positions:
-            await self.send_message("No active positions.")
-            return
-        lines = ["<b>📍 Current Portfolio:</b>"]
-        for mint, pos in bot._positions.items():
-            lines.append(f"- {pos.symbol}: ${pos.current_price:,.0f} MC")
-        await self.send_message("\n".join(lines))
-
-    async def _cmd_whales(self, bot: Any):
-        targets = bot._filter._copy_targets
-        if not targets:
-            await self.send_message("No whales tracked.")
-            return
-        lines = ["<b>🐋 Tracked Whales:</b>"]
-        for addr in targets:
-            score = bot._filter._wallet_scores.get(addr)
-            alias = score.alias if score and hasattr(score, 'alias') else "No Alias"
-            lines.append(f"- {alias} (<code>{addr[:6]}...</code>)")
-        await self.send_message("\n".join(lines))
-
-    async def _cmd_follow(self, args: list, bot: Any):
-        if len(args) < 2:
-            await self.send_message("Usage: /follow <address> [alias]")
-            return
-        addr, alias = args[1], args[2] if len(args) > 2 else None
-        if len(addr) < 32 or len(addr) > 44:
-            await self.send_message("❌ Invalid Solana address.")
-            return
-        bot._filter.add_copy_target(addr)
-        if alias:
-            from solbot.filters import WalletScore
-            score = bot._filter._wallet_scores.get(addr, WalletScore(addr))
-            score.alias = alias
-            bot._filter._wallet_scores[addr] = score
-            if any(term in alias for term in ["KOL", "VineWallet", "SmartWallet"]):
-                bot._kol_tracker.add_wallet(addr, alias)
-        bot._save_state()
-        await self.send_message(f"✅ Following whale: {alias or addr}")
-
-    async def _cmd_unfollow(self, args: list, bot: Any):
-        if len(args) < 2: return
-        addr = args[1]
-        if addr in bot._filter._copy_targets:
-            bot._filter._copy_targets.remove(addr)
-            if addr in bot._kol_tracker.wallets:
-                del bot._kol_tracker.wallets[addr]
-            bot._save_state()
-            await self.send_message(f"🗑 Unfollowed: {addr}")
-
-    async def _cmd_blacklist(self, args: List[str], bot: Any):
-        if len(args) < 2:
-            await self.send_message("Usage: /blacklist <add/remove/list> [address]")
-            return
-        action = args[1].lower()
-        if action == "list":
-            if not bot._blacklisted_wallets:
-                await self.send_message("Blacklist is empty.")
-                return
-            msg = "🚫 Blacklisted Wallets:\n" + "\n".join([f"<code>{a}</code>" for a in bot._blacklisted_wallets])
-            await self.send_message(msg)
-        elif action == "add":
-            if len(args) < 3: return
-            addr = args[2]
-            bot._blacklisted_wallets.add(addr)
-            bot._save_state()
-            await self.send_message(f"✅ Blacklisted: {addr}")
-        elif action == "remove":
-            if len(args) < 3: return
-            addr = args[2]
-            if addr in bot._blacklisted_wallets:
-                bot._blacklisted_wallets.remove(addr)
-                bot._save_state()
-                await self.send_message(f"🗑 Removed: {addr}")
-
-    async def _cmd_devs(self, bot: Any):
-        lines = ["<b>👨‍💻 Active Position Devs:</b>"]
-        for mint, pos in bot._positions.items():
-            lines.append(f"- {pos.symbol}: <code>{pos.creator}</code>")
-        await self.send_message("\n".join(lines))
-
-    async def _cmd_history(self, bot: Any):
-        if not bot._trades:
-            await self.send_message("No trades.")
-            return
-        lines = ["<b>🕒 Recent History:</b>"]
-        for t in bot._trades[-10:]:
-            lines.append(f"{'✅' if t.success else '❌'} {t.token_mint[:8]}")
-        await self.send_message("\n".join(lines))
-
-    async def _cmd_exitall(self, bot: Any):
-        await self.send_message("🚨 Liquidating all positions...")
-        for mint in list(bot._positions.keys()):
-            asyncio.create_task(bot._exit_position(bot._positions[mint], "Manual Exit", 1.0))
-
-    async def _cmd_aitoggle(self, bot: Any):
-        bot._ai_enabled = not bot._ai_enabled
-        bot._save_state()
-        state = "ENABLED" if bot._ai_enabled else "DISABLED"
-        await self.send_message(f"🤖 AI Filter: {state}")
+        if not bot._network_manager: return
+        stats = await bot._network_manager.get_stats()
+        await self.send_message(f"<b>🌐 Proxy Health</b>\nScore: {stats['health_score']:.1f}/100\nSuccess: {stats['success_rate']:.1f}%")
 
     async def _cmd_aiscore(self, args: list, bot: Any):
         if len(args) < 2: return
-        try:
-            score = int(args[1])
-            bot._ai_min_score = max(0, min(100, score))
-            bot._save_state()
-            await self.send_message(f"🎯 Min AI Score: {bot._ai_min_score}")
-        except:
-            pass
+        try: score = int(args[1]); bot._ai_min_score = max(0, min(100, score)); bot._save_state(); await self.send_message(f"🎯 Min AI Score: {bot._ai_min_score}")
+        except: pass
 
-    async def _cmd_gmgn_trending(self, bot: Any):
-        await self.send_message("🔍 <b>Fetching GMGN Trending...</b>")
-        tokens = await bot._gmgn_monitor.client.get_new_tokens()
-        if not tokens:
-            await self.send_message("No trending tokens found.")
-            return
-        lines = ["<b>🔥 GMGN New Tokens:</b>"]
-        for t in tokens[:10]:
-            lines.append(f"- {t.get('symbol')}: <code>{t.get('address')}</code> ($ {float(t.get('market_cap', 0)):,.0f})")
+    async def _cmd_history(self, bot: Any):
+        if not bot._trades: await self.send_message("No trades."); return
+        lines = ["<b>🕒 Recent:</b>"]
+        for t in bot._trades[-5:]: lines.append(f"{'✅' if t.success else '❌'} {t.token_mint[:6]}")
         await self.send_message("\n".join(lines))
 
-    async def _cmd_gmgn_smart(self, bot: Any):
-        await self.send_message("🧠 <b>Fetching Smart Money Inflow...</b>")
-        tokens = await bot._gmgn_monitor.client.get_smart_money_inflow()
-        if not tokens:
-            await self.send_message("No smart money inflow detected.")
-            return
-        lines = ["<b>💎 Smart Money Inflow:</b>"]
-        for t in tokens[:10]:
-            lines.append(f"- {t.get('symbol')}: <code>{t.get('address')}</code>")
+    async def _cmd_exitall(self, bot: Any):
+        await self.send_message("🚨 Liquidating..."); [asyncio.create_task(bot._exit_position(bot._positions[m], "Manual", 1.0)) for m in list(bot._positions.keys())]
+
+    async def _cmd_aitoggle(self, bot: Any):
+        bot._ai_enabled = not bot._ai_enabled; bot._save_state(); await self.send_message(f"🤖 AI: {'ENABLED' if bot._ai_enabled else 'DISABLED'}")
+
+    async def _cmd_whales(self, bot: Any):
+        if not bot._filter._copy_targets: await self.send_message("No whales."); return
+        lines = ["<b>🐋 Whales:</b>"]
+        for addr in list(bot._filter._copy_targets)[:10]: lines.append(f"- <code>{addr[:8]}...</code>")
         await self.send_message("\n".join(lines))
 
-    async def _cmd_gmgn_scan(self, args: list, bot: Any):
-        if len(args) < 2:
-            await self.send_message("Usage: /gmgn_scan <mint_address>")
-            return
-        mint = args[1]
-        await self.send_message(f"🛡 <b>Scanning:</b> <code>{mint}</code>")
-        report = await bot._gmgn_monitor.client.get_token_security(mint)
-        if not report:
-            await self.send_message("Could not retrieve security report.")
-            return
-        
-        # Format report (assuming standard fields based on GMGN API)
-        is_honeypot = "YES" if report.get("is_honeypot") else "NO"
-        buy_tax = report.get("buy_tax", "N/A")
-        sell_tax = report.get("sell_tax", "N/A")
-        
-        msg = (
-            f"<b>🛡 GMGN Security Report</b>\n"
-            f"Mint: <code>{mint}</code>\n"
-            f"Honeypot: {is_honeypot}\n"
-            f"Tax: {buy_tax}% / {sell_tax}%\n"
-            f"Renounced: {'✅' if report.get('renounced') else '❌'}"
-        )
-        await self.send_message(msg)
+    async def _cmd_kols(self, bot: Any):
+        if not bot._kol_tracker.wallets: await self.send_message("No KOLs."); return
+        lines = ["<b>🔥 KOLs:</b>"]
+        for a, l in list(bot._kol_tracker.wallets.items())[:10]: lines.append(f"- {l} (<code>{a[:6]}</code>)")
+        await self.send_message("\n".join(lines))
 
-# V3 Compatibility Alias
+    async def _cmd_follow(self, args: list, bot: Any):
+        if len(args) < 2: return
+        addr = args[1]; bot._filter.add_copy_target(addr); bot._save_state(); await self.send_message(f"✅ Following: {addr[:8]}")
+
+    async def _cmd_unfollow(self, args: list, bot: Any):
+        if len(args) < 2: return
+        addr = args[1]; [bot._filter._copy_targets.remove(addr) if addr in bot._filter._copy_targets else None]; bot._save_state(); await self.send_message(f"🗑 Unfollowed")
+
+    async def _cmd_blacklist(self, args: list, bot: Any):
+        if len(args) < 3: return
+        action, addr = args[1].lower(), args[2]
+        if action == "add": bot._blacklisted_wallets.add(addr); bot._save_state(); await self.send_message(f"🚫 Blacklisted")
+
+    async def _cmd_devs(self, bot: Any):
+        lines = ["<b>👨‍💻 Devs:</b>"]
+        for m, p in bot._positions.items(): lines.append(f"- {p.symbol}: <code>{p.creator[:8]}</code>")
+        await self.send_message("\n".join(lines))
+
 TelegramController = TelegramManager
