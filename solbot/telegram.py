@@ -22,7 +22,7 @@ class TelegramManager:
         self._base_url = f"https://api.telegram.org/bot{self._config.token}"
         self._offset = 0
         self._running = False
-        self._sol_price = 150.0
+        self._sol_price = 150.0  # Initial placeholder until fetch succeeds
         self._metrics = RuntimeMetrics()
 
     async def start(self, bot_instance: Any):
@@ -41,9 +41,15 @@ class TelegramManager:
                         self._offset = results[0]["update_id"] + 1
         except Exception as e:
             logger.error(f"Failed to flush Telegram updates: {e}")
+        
         self._running = True
+        
+        # Priority: Fetch SOL price BEFORE starting other loops to ensure valid pricing on startup
+        logger.info("Performing initial SOL price fetch...")
+        await self._update_sol_price(once=True)
+        
         asyncio.create_task(self._poll_loop(bot_instance))
-        asyncio.create_task(self._update_sol_price())
+        asyncio.create_task(self._price_update_loop())
         logger.info("Telegram command listener started.")
 
     async def stop(self):
@@ -52,19 +58,47 @@ class TelegramManager:
             await self._session.close()
             self._session = None
 
-    async def _update_sol_price(self):
+    async def _update_sol_price(self, once: bool = False):
+        """Fetch SOL price from Jupiter v2 with multi-source fallback."""
         sol_mint = "So11111111111111111111111111111111111111112"
-        url = f"https://api.jup.ag/price/v2?ids={sol_mint}"
-        while self._running:
+        sources = [
+            {"name": "Jupiter", "url": f"https://api.jup.ag/price/v2?ids={sol_mint}", "path": ["data", sol_mint, "price"]},
+            {"name": "DexScreener", "url": f"https://api.dexscreener.com/latest/dex/tokens/{sol_mint}", "path": ["pairs", 0, "priceUsd"]},
+            {"name": "Birdeye", "url": f"https://public-api.birdeye.so/public/price?address={sol_mint}", "path": ["data", "value"]}
+        ]
+        
+        if not self._session: return
+
+        for source in sources:
             try:
-                if self._session:
-                    async with self._session.get(url) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            price = data.get("data", {}).get(sol_mint, {}).get("price")
-                            if price: self._sol_price = float(price)
+                async with self._session.get(source["url"], timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        price = data
+                        for key in source["path"]:
+                            if isinstance(price, list) and isinstance(key, int):
+                                price = price[key] if len(price) > key else None
+                            elif isinstance(price, dict):
+                                price = price.get(key)
+                            else:
+                                price = None
+                            if price is None: break
+                        
+                        if price:
+                            new_price = float(price)
+                            if new_price > 0:
+                                self._sol_price = new_price
+                                logger.info(f"SOL Price updated from {source['name']}: ${self._sol_price:.2f}")
+                                return
             except Exception as e:
-                logger.error(f"Failed to fetch SOL price: {e}")
+                logger.debug(f"Failed to fetch price from {source['name']}: {e}")
+        
+        if self._sol_price == 150.0:
+            logger.error("Critical: All SOL price sources failed on startup. Using default fallback.")
+
+    async def _price_update_loop(self):
+        while self._running:
+            await self._update_sol_price()
             await asyncio.sleep(60)
 
     async def send_message(self, text: str):
@@ -193,6 +227,7 @@ class TelegramManager:
             f"Positions: {len(bot._positions)}\n"
             f"Tracked KOLs: {len(bot._kol_tracker.wallets)}\n"
             f"Tracked Whales: {tracked_wallets}\n"
+            f"SOL Price: ${self._sol_price:.2f}\n"
             f"Signals (Live): {m['total_signals']}\n"
             f"Connection: {m['connection_health']}"
         )
@@ -205,6 +240,7 @@ class TelegramManager:
         msg = (
             f"<b>📈 Live Runtime Metrics</b>\n"
             f"Uptime: {uptime_m:.1f} min\n"
+            f"SOL Price: ${self._sol_price:.2f}\n"
             f"Total Signals: {m['total_signals']}\n"
             f"Buy Rate: {m['buy_rate']:.1f}%\n"
             f"Avg Proc Latency: {m['avg_proc_latency']:.2f}ms\n\n"
@@ -353,7 +389,7 @@ class TelegramManager:
             f"Date: {now.strftime('%A, %b %d, %Y')}",
             f"Total Trades: {total_trades}",
             f"Win Rate: {win_rate:.1f}%",
-            f"Realized PnL: <code>{total_pnl:.4f} SOL</code>",
+            f"Realized PnL: <code>{total_pnl:.4f} SOL</code> (${total_pnl * self._sol_price:,.2f})",
             "",
             f"<b>📍 Active Positions ({len(bot._positions)}):</b>"
         ]
@@ -364,7 +400,7 @@ class TelegramManager:
 
     async def _cmd_balance(self, bot: Any):
         balance = await bot._pump_client.get_sol_balance()
-        await self.send_message(f"<b>🔍 Balance</b>\n<code>{balance:.4f} SOL</code>")
+        await self.send_message(f"<b>🔍 Balance</b>\n<code>{balance:.4f} SOL</code> (${balance * self._sol_price:,.2f})")
 
     async def _cmd_portfolio(self, bot: Any):
         if not bot._positions:
