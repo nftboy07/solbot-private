@@ -1,0 +1,43 @@
+name: VPS Telemetry Diagnostics
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnostics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Telemetry Commands
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            echo "--- PROCESS STATUS ---"
+            ps aux | grep "[m]ain.py" || echo "Bot process not found!"
+            
+            echo -e "\n--- SYSTEMD STATUS ---"
+            sudo systemctl status solbot --no-pager || echo "Systemd service not found."
+            
+            echo -e "\n--- STATE.JSON CONFIG ---"
+            if [ -f "$HOME/solbot-production/data/state.json" ]; then
+              cat "$HOME/solbot-production/data/state.json" | grep -E "ai_enabled|ai_min_score|autobuy_enabled"
+            else
+              echo "state.json not found in $HOME/solbot-production/data/"
+            fi
+            
+            echo -e "\n--- LOG TAIL (Last 50 lines) ---"
+            if [ -f "$HOME/solbot-production/solbot.log" ]; then
+              tail -n 50 "$HOME/solbot-production/solbot.log"
+            else
+              echo "solbot.log not found."
+            fi
+            
+            echo -e "\n--- TRADE DATABASE SUMMARY ---"
+            if [ -f "$HOME/solbot-production/data/solbot.db" ]; then
+              sqlite3 "$HOME/solbot-production/data/solbot.db" "SELECT count(*) as total_trades FROM trades;" || echo "Could not query database."
+            else
+              echo "solbot.db not found."
+            fi
