@@ -41,7 +41,7 @@ class TelegramManager:
         except Exception as e: logger.error(f"Failed to flush Telegram updates: {e}")
         self._running = True
         logger.info("Performing initial SOL price fetch...")
-        await self._update_sol_price(once=True)
+        await self._update_sol_price()
         asyncio.create_task(self._poll_loop(bot_instance))
         asyncio.create_task(self._price_update_loop())
         logger.info("Telegram command listener started.")
@@ -50,7 +50,7 @@ class TelegramManager:
         self._running = False
         if self._session: await self._session.close(); self._session = None
 
-    async def _update_sol_price(self, once: bool = False):
+    async def _update_sol_price(self):
         sol_mint = "So11111111111111111111111111111111111111112"
         sources = [
             {"name": "Jupiter", "url": f"https://api.jup.ag/price/v2?ids={sol_mint}", "path": ["data", sol_mint, "price"]},
@@ -70,12 +70,22 @@ class TelegramManager:
                             if price is None: break
                         if price:
                             new_price = float(price)
-                            if new_price > 0: self._sol_price = new_price; logger.info(f"SOL Price updated from {source['name']}: ${self._sol_price:.2f}"); return
+                            if new_price > 0:
+                                self._sol_price = new_price
+                                logger.info(f"SOL Price updated from {source['name']}: ${self._sol_price:.2f}")
+                                return
             except Exception as e: logger.debug(f"Failed to fetch price from {source['name']}: {e}")
-        if self._sol_price == 150.0: logger.error("Critical: All SOL price sources failed. Using fallback.")
+        
+        if self._sol_price == 150.0:
+            logger.error("Critical: All SOL price sources failed. Using fallback.")
 
     async def _price_update_loop(self):
-        while self._running: await self._update_sol_price(); await asyncio.sleep(60)
+        while self._running:
+            try:
+                await self._update_sol_price()
+            except Exception as e:
+                logger.error(f"Error in price update loop: {e}")
+            await asyncio.sleep(60)
 
     async def send_message(self, text: str):
         if not self._session: return
@@ -109,6 +119,12 @@ class TelegramManager:
             args = text.split(); 
             if not args: return
             cmd = args[0].lower()
+            
+            # Map /selftest (the bug was likely that it wasn't being picked up or executed)
+            if cmd == "/selftest":
+                await self._cmd_selftest(bot)
+                return
+
             if cmd in ["/list", "/help"]: await self._cmd_list()
             elif cmd == "/status": await self._cmd_status(bot)
             elif cmd == "/dashboard": await self._cmd_status(bot)
@@ -118,7 +134,6 @@ class TelegramManager:
             elif cmd == "/pipeline": await self._cmd_pipeline(bot)
             elif cmd == "/brain": await self._cmd_brain(bot)
             elif cmd == "/version": await self.send_message("<b>Solbot v3.1.2-Hotfix</b>\nBuild: 20260611-PROD")
-            elif cmd == "/selftest": await self._cmd_selftest(bot)
             elif cmd == "/history": await self._cmd_history(bot)
             elif cmd in ["/whales", "/smart"]: await self._cmd_whales(bot)
             elif cmd == "/kols": await self._cmd_kols(bot)
@@ -167,10 +182,21 @@ class TelegramManager:
         await self.send_message("🧪 <b>Diagnostic Self-Test...</b>")
         results = []
         try:
-            score = await bot._ai_filter.score_token({"mint": "test", "symbol": "TEST"})
-            results.append(f"AI: ✅ ({score})"); bal = await bot._pump_client.get_sol_balance()
-            results.append(f"RPC: ✅ ({bal:.4f} SOL)"); bot._save_state(); results.append("State: ✅")
-        except Exception as e: results.append(f"Fault: {e}")
+            score = await bot._ai_filter.score_token({"mint": "So11111111111111111111111111111111111111112", "symbol": "SOL"})
+            results.append(f"AI Filter: ✅ (Test Score: {score})")
+            
+            bal = await bot._pump_client.get_sol_balance()
+            results.append(f"RPC Connection: ✅ ({bal:.4f} SOL)")
+            
+            bot._save_state()
+            results.append("State Persistence: ✅")
+            
+            results.append(f"Price Engine: {'✅' if self._sol_price != 150.0 else '⚠️'} (${self._sol_price:.2f})")
+            
+        except Exception as e:
+            results.append(f"❌ Fault: {str(e)}")
+            logger.error(f"Self-test failed: {e}")
+            
         await self.send_message("\n".join(results))
 
     async def _cmd_balance(self, bot: Any):
