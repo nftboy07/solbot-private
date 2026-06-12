@@ -133,31 +133,12 @@ class TwitterMonitor:
                         break
             
             if mint:
-                logger.info(f"🐦 Twitter Match (@{handle}): Found Mint {mint}")
-                # AI Filter integration
-                if self._bot._ai_enabled:
-                    token_data = {
-                        "mint": mint,
-                        "symbol": "TWEET",
-                        "name": f"Twitter: @{handle}",
-                        "creator": "twitter",
-                        "sentiment_text": text
-                    }
-                    score = await self._bot._ai_filter.score_token(token_data)
-                    logger.info(f"🤖 AI Score for {mint}: {score}")
-                    if score < self._bot._ai_min_score:
-                        logger.warning(f"❌ AI score {score} < {self._bot._ai_min_score}, skipping {mint}")
-                        await self._bot._telegram.send_message(f"🚫 <b>AI Filtered: {mint}</b> (Score: {score})")
-                        continue
-
-                # Trigger sniping logic directly
-                token = TokenEvent(
-                    mint=mint,
-                    name=f"Twitter: @{handle}",
-                    symbol="TWEET",
-                    creator="twitter",
-                    market_cap_usd=0, # Unknown at this stage
-                    liquidity_sol=0,
-                    timestamp=time.time()
+                logger.info(f"🐦 Twitter Match (@{handle}): Found Mint {mint}. Forwarding to KOL mention handler.")
+                # Route to sentiment aggregator
+                asyncio.create_task(
+                    self._bot._handle_kol_mention(
+                        mint, 
+                        f"Twitter: @{handle}", 
+                        text
+                    )
                 )
-                asyncio.create_task(self._bot._execute_snipe(token, self._config.jupiter.buy_amount_sol, f"Twitter (@{handle})"))

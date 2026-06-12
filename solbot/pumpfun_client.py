@@ -214,7 +214,8 @@ class PumpFunClient:
         slippage: Optional[int] = None,
         priority_fee: Optional[float] = None,
         use_jito: bool = True,
-        denominated_in_sol: bool = True
+        denominated_in_sol: bool = True,
+        jito_tip: Optional[float] = None
     ) -> TradeResult:
         start_time = time.perf_counter()
         
@@ -263,12 +264,15 @@ class PumpFunClient:
                 if not recent_blockhash:
                     return TradeResult(success=False, token_mint=mint, error="Failed to fetch recent blockhash for Jito tip")
 
-                # Dynamically set tip size based on buy size
-                tip_sol = 0.001
-                if amount >= 0.02:
-                    tip_sol = 0.002
-                elif amount <= 0.001:
-                    tip_sol = 0.0005
+                # Dynamically set tip size based on buy size or congestion override
+                if jito_tip is not None:
+                    tip_sol = jito_tip
+                else:
+                    tip_sol = 0.001
+                    if amount >= 0.02:
+                        tip_sol = 0.002
+                    elif amount <= 0.001:
+                        tip_sol = 0.0005
 
                 tip_account = Pubkey.from_string("ADaUMid9yfUytqMBB6f7JSt39zG9u4L9J6vCjW2H96Mh")
                 tip_lamports = int(tip_sol * 1e9)

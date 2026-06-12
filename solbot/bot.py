@@ -98,6 +98,13 @@ class Solbot:
         # Daily runners tracking state
         self._daily_runner_buys: Dict[str, Dict] = {}
         self._daily_runners: Dict[str, Dict] = {}
+        # KOL Alpha & Sentiment Aggregator State
+        self._kol_mentions: Dict[str, Dict] = {}
+        self._kol_threshold = 2
+        # Dynamic priority fee & Jito tip auto-scaling state
+        self._congestion_level = "low"
+        self._dynamic_priority_fee = 0.00001
+        self._dynamic_jito_tip = 0.001
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -112,7 +119,8 @@ class Solbot:
                 "ai_enabled": self._ai_enabled,
                 "ai_min_score": self._ai_min_score,
                 "autobuy_enabled": self._autobuy_enabled,
-                "blacklisted_wallets": list(self._blacklisted_wallets)
+                "blacklisted_wallets": list(self._blacklisted_wallets),
+                "kol_threshold": self._kol_threshold
             }
             with open(self._state_file, "w") as f:
                 json.dump(state, f, indent=2)
@@ -164,6 +172,7 @@ class Solbot:
             self._ai_enabled = state.get("ai_enabled", True)
             self._ai_min_score = state.get("ai_min_score", 75)
             self._autobuy_enabled = state.get("autobuy_enabled", False)
+            self._kol_threshold = state.get("kol_threshold", 2)
             
             # Restore Blacklist
             self._blacklisted_wallets = set(state.get("blacklisted_wallets", []))
@@ -249,6 +258,7 @@ class Solbot:
         self._wallet_scanner = asyncio.create_task(self._daily_wallet_scanner_loop())
         self._sentiment_adapter = asyncio.create_task(self._market_sentiment_adapter_loop())
         self._missed_tracker = asyncio.create_task(self._missed_entry_tracker_loop())
+        self._congestion_poller = asyncio.create_task(self._poll_network_congestion())
         
         for pos in self._positions.values():
             if pos.active:
@@ -603,10 +613,66 @@ class Solbot:
         self._active_buys.add(token.mint)
         self._processed_mints.add(token.mint)
         try:
-            priority_fee_sol = self._filter.get_dynamic_fee(token.mint) / 1_000_000_000
-            logger.info(f"Initiating snipe for {token.symbol} ({token.mint}) | Size: {size} SOL | Reason: {reason}")
+            # Advanced AI Safety & Honeypot Screen
+            if self._ai_enabled:
+                holders = []
+                try:
+                    rpc_url = await self._pump_client._get_rpc_url()
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getTokenLargestAccounts",
+                        "params": [token.mint]
+                    }
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(rpc_url, json=payload, timeout=5) as resp:
+                            if resp.status == 200:
+                                res = await resp.json()
+                                accounts = res.get("result", {}).get("value", [])
+                                # Default supply for pump.fun tokens is 1B
+                                total_supply = 1_000_000_000
+                                holders = [
+                                    {
+                                        'account': acc.get("address"),
+                                        'share_pct': (float(acc.get("amount", 0)) / (total_supply * 1e6)) * 100.0 if "amount" in acc else 0.0
+                                    }
+                                    for acc in accounts
+                                ]
+                except Exception as e:
+                    logger.error(f"Failed to fetch largest accounts for safety screen: {e}")
+
+                creator_history = []
+                try:
+                    rows = await self._db._execute_read(
+                        "SELECT mint, peak_mcap_usd, rugged FROM positions WHERE creator = ? LIMIT 5",
+                        (token.creator,)
+                    )
+                    creator_history = [dict(r) for r in rows]
+                except Exception as e:
+                    logger.error(f"Failed to fetch creator history for safety screen: {e}")
+
+                analysis = await self._ai_filter.detect_rug_risks(
+                    token.mint, token.creator, holders, creator_history
+                )
+                
+                if analysis.get("score", 80) < self._ai_min_score or analysis.get("is_honeypot") or analysis.get("is_premine"):
+                    logger.warning(f"❌ AI SAFETY SCREEN FAILED for {token.symbol}: Score={analysis.get('score')} | Honeypot={analysis.get('is_honeypot')} | Premine={analysis.get('is_premine')} | Reason: {analysis.get('reason')}")
+                    if self._telegram:
+                        await self._telegram.send_message(
+                            f"🚫 <b>AI Safety Filtered Rug/Honeypot:</b> {token.symbol}\n"
+                            f"Reason: <i>{analysis.get('reason')}</i>\n"
+                            f"Score: <code>{analysis.get('score')}/100</code>"
+                        )
+                    self._processed_mints.discard(token.mint)
+                    self._active_buys.discard(token.mint)
+                    return
+
+            priority_fee_sol = self._dynamic_priority_fee
+            jito_tip_sol = self._dynamic_jito_tip
+            logger.info(f"Initiating snipe for {token.symbol} ({token.mint}) | Size: {size} SOL | Dynamic Fee: {priority_fee_sol:.6f} SOL | Jito Tip: {jito_tip_sol:.5f} SOL | Reason: {reason}")
             result = await self._pump_client.execute_trade(
-                token.mint, action="buy", amount=size, priority_fee=priority_fee_sol
+                token.mint, action="buy", amount=size, priority_fee=priority_fee_sol, jito_tip=jito_tip_sol
             )
             if result.success:
                 self._trades.append(result)
@@ -1347,9 +1413,160 @@ class Solbot:
                     f"Processed Trades: <code>{len(trades)}</code>\n"
                     f"Win Rate: <code>{win_rate*100:.1f}%</code>\n"
                     f"AI Threshold: <code>{old_ai_threshold}</code> ➔ <code>{self._ai_min_score}</code>"
-                )
+                 )
         except Exception as e:
             logger.error(f"Error retraining brain weights: {e}")
+
+    async def _poll_network_congestion(self):
+        """Polls network congestion and Jito tips to dynamically scale transaction fees."""
+        import aiohttp
+        while self._running:
+            try:
+                # 1. Fetch Jito tip estimation
+                url = "https://mainnet.block-engine.jito.wtf/api/v1/tips"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=5) as resp:
+                        if resp.status == 200:
+                            tips_data = await resp.json()
+                            if isinstance(tips_data, list) and len(tips_data) > 0:
+                                tip_info = tips_data[0]
+                                p50 = float(tip_info.get("landed_tips_50th_percentile", 0.001))
+                                p75 = float(tip_info.get("landed_tips_75th_percentile", 0.002))
+                                p95 = float(tip_info.get("landed_tips_95th_percentile", 0.005))
+                                
+                                # Scale tip size based on congestion bands
+                                if p95 > 0.008:
+                                    self._congestion_level = "high"
+                                    self._dynamic_jito_tip = max(0.003, min(0.01, p75))
+                                elif p95 > 0.003:
+                                    self._congestion_level = "medium"
+                                    self._dynamic_jito_tip = max(0.0015, min(0.004, p50))
+                                else:
+                                    self._congestion_level = "low"
+                                    self._dynamic_jito_tip = max(0.0005, min(0.002, p50))
+                            else:
+                                logger.warning("Invalid Jito tips payload format.")
+                        else:
+                            logger.warning(f"Jito tips API returned status {resp.status}")
+                
+                # 2. Fetch RPC prioritized fee
+                rpc_url = await self._pump_client._get_rpc_url()
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getRecentPrioritizationFees",
+                    "params": [[]]
+                }
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(rpc_url, json=payload, timeout=5) as resp:
+                        if resp.status == 200:
+                            res = await resp.json()
+                            fees = res.get("result", [])
+                            if fees:
+                                # Use median of recent fees
+                                recent_fees = [f.get("prioritizationFee", 0) for f in fees[-20:]]
+                                recent_fees.sort()
+                                median_fee = recent_fees[len(recent_fees)//2]
+                                # Convert micro-lamports per compute unit to dynamic fee in SOL (assuming 200,000 CU limit)
+                                calculated_fee_sol = (median_fee * 200000) / 1e15
+                                self._dynamic_priority_fee = max(0.00001, min(0.002, calculated_fee_sol))
+                                
+                logger.info(f"⚡ Congestion Poller: Level={self._congestion_level.upper()} | Dynamic Jito Tip={self._dynamic_jito_tip:.5f} SOL | Priority Fee={self._dynamic_priority_fee:.5f} SOL")
+            except Exception as e:
+                logger.error(f"Error in network congestion polling: {e}")
+            await asyncio.sleep(15)
+
+    async def _handle_kol_mention(self, mint: str, source_name: str, text: str):
+        """Aggregates mentions from various KOL sources (channels/Twitter handles) before buying."""
+        if not mint or len(mint) < 32 or len(mint) > 44:
+            return
+        
+        now = time()
+        
+        # Initialize token tracker
+        if mint not in self._kol_mentions:
+            self._kol_mentions[mint] = {
+                'sources': set(),
+                'mentions': [],
+                'notified': False
+            }
+            
+        # Clean expired mentions (older than 3 hours / 10800s)
+        self._kol_mentions[mint]['mentions'] = [
+            m for m in self._kol_mentions[mint]['mentions']
+            if now - m['timestamp'] < 10800
+        ]
+        
+        # Rebuild sources set based on active mentions
+        self._kol_mentions[mint]['sources'] = {m['source'] for m in self._kol_mentions[mint]['mentions']}
+        
+        # Add new mention
+        if source_name not in self._kol_mentions[mint]['sources']:
+            self._kol_mentions[mint]['mentions'].append({
+                'source': source_name,
+                'timestamp': now,
+                'text': text
+            })
+            self._kol_mentions[mint]['sources'].add(source_name)
+            
+        unique_sources_count = len(self._kol_mentions[mint]['sources'])
+        logger.info(f"📢 KOL Mention: {mint} mentioned by {source_name}. Total unique sources in 3h: {unique_sources_count}/{self._kol_threshold}")
+        
+        # Check if threshold reached and not yet notified/acted
+        if unique_sources_count >= self._kol_threshold and not self._kol_mentions[mint]['notified']:
+            self._kol_mentions[mint]['notified'] = True
+            
+            try:
+                meta = await self._pump_client.get_token_metadata(mint)
+                symbol = meta.get("symbol", "KOL_PICK")
+                name = meta.get("name", "KOL Coordinated Token")
+                creator = meta.get("creator", "unknown")
+                mcap_sol = float(meta.get("market_cap_sol", 0.0) or 0.0)
+                sol_price = getattr(self._telegram, '_sol_price', 150.0)
+                mcap_usd = mcap_sol * sol_price
+                
+                token = TokenEvent(
+                    mint=mint,
+                    name=name,
+                    symbol=symbol,
+                    creator=creator,
+                    market_cap_usd=mcap_usd,
+                    liquidity_sol=float(meta.get("liquidity_sol", 0.0) or 0.0),
+                    timestamp=now
+                )
+                
+                mentions_list = ", ".join(self._kol_mentions[mint]['sources'])
+                reason = f"Coordinated KOL Mentions ({unique_sources_count} sources: {mentions_list})"
+                
+                logger.warning(f"🔥 COORDINATED KOL SENTIMENT TRIGGERED for {symbol} ({mint}) with {unique_sources_count} sources.")
+                
+                if self._autobuy_enabled:
+                    asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, reason))
+                else:
+                    from telethon import Button
+                    buttons = [
+                        [
+                            Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{mint}"),
+                            Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{mint}")
+                        ],
+                        [
+                            Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{mint}"),
+                            Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{mint}")
+                        ]
+                    ]
+                    alert_msg = (
+                        f"📢 <b>COORDINATED KOL SENTIMENT DETECTED!</b> 📢\n\n"
+                        f"Token: <b>{symbol}</b> ({name})\n"
+                        f"Mint: <code>{mint}</code>\n"
+                        f"Market Cap: <code>{mcap_sol:.1f} SOL</code> (${mcap_usd:,.0f})\n"
+                        f"Sources: <i>{mentions_list}</i>\n\n"
+                        f"👉 <a href='https://pump.fun/{mint}'>Buy on pump.fun</a>"
+                    )
+                    if self._telegram:
+                        await self._telegram.send_message(alert_msg, buttons=buttons)
+                        
+            except Exception as e:
+                logger.error(f"Error handling coordinated KOL mention trigger: {e}")
 
 async def run_bot():
     config = BotConfig()

@@ -228,6 +228,10 @@ class TelegramController:
         async def dailyrunner_handler(event):
             await self._cmd_dailyrunner(event)
 
+        @self._client.on(events.NewMessage(pattern='/kolthreshold'))
+        async def kolthreshold_handler(event):
+            await self._cmd_kolthreshold(event)
+
         @self._client.on(events.CallbackQuery)
         async def callback_handler(event):
             data = event.data.decode("utf-8")
@@ -303,6 +307,7 @@ class TelegramController:
             "  /kollist — View all tracked KOL wallets\n"
             "  /addkol <addr> <alias> — Add a KOL wallet\n"
             "  /removekol <addr> — Remove a KOL wallet\n"
+            "  /kolthreshold <num> — Set coordinated KOL mention threshold\n"
             "  /blacklist — View all blacklisted deployers\n"
             "  /blacklistdeployer <addr> — Manually blacklist deployer\n"
             "  /removeblacklist <addr> — Remove deployer from blacklist\n"
@@ -456,6 +461,13 @@ class TelegramController:
         blacklisted_count = len(getattr(self._bot, '_blacklisted_wallets', []))
         missed_count = len(getattr(self._bot, '_missed_runners', {}))
         
+        # Scaling stats
+        congestion_level = getattr(self._bot, '_congestion_level', 'low')
+        dynamic_jito_tip = getattr(self._bot, '_dynamic_jito_tip', 0.001)
+        dynamic_priority_fee = getattr(self._bot, '_dynamic_priority_fee', 0.00001)
+        kol_threshold = getattr(self._bot, '_kol_threshold', 2)
+        active_kol_mentions_count = len(getattr(self._bot, '_kol_mentions', {}))
+        
         # Sizing and stop parameters
         buy_amount = self._bot._config.jupiter.buy_amount_sol
         stop_pct = self._bot._config.strategy.trailing_stop_pct * 100.0
@@ -480,6 +492,11 @@ class TelegramController:
             f"  Recent Launch Success Rate: <code>{success_rate:.1f}%</code> (Sample: {scanned_count})\n"
             f"  Default Buy Size: <code>{buy_amount:.3f} SOL</code>\n"
             f"  Trailing Stop-Loss: <code>{stop_pct:.1f}%</code>\n\n"
+            "⚡ <b>NETWORK & SENTIMENT SCALING</b>\n"
+            f"  Solana Congestion: <code>{congestion_level.upper()}</code>\n"
+            f"  Dynamic Jito Tip: <code>{dynamic_jito_tip:.5f} SOL</code>\n"
+            f"  Priority Fee: <code>{dynamic_priority_fee:.5f} SOL</code>\n"
+            f"  KOL Aggregator Cache: <code>{active_kol_mentions_count} tokens</code> (Threshold: <code>{kol_threshold}</code>)\n\n"
             "🎓 <b>AUTONOMOUS LEARNING & MEMORY</b>\n"
             f"  Total Cognitive Events: <code>{total_events}</code>\n"
             f"  Smart Wallet Copy Targets: <code>{smart_count}</code>\n"
@@ -1375,6 +1392,24 @@ class TelegramController:
                 
         await event.reply("\n".join(lines), parse_mode='html', link_preview=False)
 
+    async def _cmd_kolthreshold(self, event):
+        await self.log_brain_event('kolthreshold', 'Adjusted KOL threshold')
+        args = event.message.message.split()
+        if len(args) < 2:
+            current = getattr(self._bot, '_kol_threshold', 2)
+            await event.reply(f"📢 <b>KOL Sentiment Threshold</b>\nCurrent setting: <code>{current} unique sources</code>\nTo change it, use <code>/kolthreshold [number]</code> (e.g. <code>/kolthreshold 3</code>).")
+            return
+            
+        try:
+            val = int(args[1])
+            if val < 1:
+                await event.reply("❌ Threshold must be at least 1.")
+                return
+            self._bot._kol_threshold = val
+            self._bot._save_state()
+            await event.reply(f"🟢 <b>KOL Sentiment Threshold Updated</b>\nNew setting: <code>{val} unique sources</code>.")
+        except Exception as e:
+            await event.reply(f"❌ Invalid argument. Error: {e}")
 
     async def log_brain_event(self, command: str, details: str):
         """Log user command execution to AGI brain event log."""

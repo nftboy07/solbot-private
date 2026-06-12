@@ -202,3 +202,74 @@ class AIFilter:
         
         logger.warning("AI scoring failed (API keys invalid or service down). Falling back to passing score 80.")
         return 80
+
+    async def detect_rug_risks(self, token_mint: str, creator: str, holders: list, creator_history: list) -> dict:
+        """
+        Analyze Solana token distribution, dev history, and freeze authority for rug pull risks.
+        Returns a dict: {"score": int (0-100), "is_premine": bool, "is_honeypot": bool, "reason": str}
+        """
+        api_key = self._config.ai.gemini_api_key
+        if not api_key:
+            return {"score": 80, "is_premine": False, "is_honeypot": False, "reason": "No Gemini API Key available for safety scan."}
+
+        # Format holders & creator history for prompt
+        holders_str = "\n".join([f"- Account: {h.get('account', 'unknown')[:8]}... | Share: {h.get('share_pct', 0.0):.2f}%" for h in holders[:10]])
+        history_str = "\n".join([f"- Token: {h.get('mint', 'unknown')[:8]}... | Peak Mcap: ${h.get('peak_mcap_usd', 0.0):,.0f} | Rugged: {h.get('rugged', False)}" for h in creator_history[:5]])
+
+        prompt = f"""
+        Analyze the following Solana token metrics for rugpull, supply split, and honeypot risks:
+        - Mint: {token_mint}
+        - Creator: {creator}
+        
+        TOP HOLDERS:
+        {holders_str or 'No holder data provided.'}
+        
+        CREATOR LAUNCH HISTORY:
+        {history_str or 'No history data provided.'}
+        
+        Strict Evaluation Criteria:
+        1. Premine / Supply Split: If top 10 holders (excluding raydium/bonding curve pool) own > 50% combined, or a single wallet holds > 20%, flag is_premine = true.
+        2. Honeypot: If freeze authority exists or any indicator of locked trading is present, flag is_honeypot = true.
+        3. Rug History: If the creator has rugged previous launches, score must be below 40.
+        
+        Respond with a valid JSON object only. No markdown code blocks, no other text.
+        Structure:
+        {{
+            "score": <0-100 integer representing safety score. 0-30: High risk, 31-70: Medium risk, 71-100: Safe>,
+            "is_premine": <true/false>,
+            "is_honeypot": <true/false>,
+            "reason": "<one sentence explanation of risk factors>"
+        }}
+        """
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        }
+        headers = {"Content-Type": "application/json"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        # Extract JSON block
+                        json_match = re.search(r"\{.*\}", text, re.DOTALL)
+                        if json_match:
+                            res = json.loads(json_match.group())
+                            logger.info(f"Gemini Safety Analysis for {token_mint}: {res}")
+                            return {
+                                "score": int(res.get("score", 80)),
+                                "is_premine": bool(res.get("is_premine", False)),
+                                "is_honeypot": bool(res.get("is_honeypot", False)),
+                                "reason": str(res.get("reason", "Analyzed successfully."))
+                            }
+                    else:
+                        error_text = await resp.text()
+                        logger.error(f"Gemini Safety API error: {resp.status} - {error_text}")
+        except Exception as e:
+            logger.error(f"Gemini Safety API failed: {e}")
+        
+        return {"score": 80, "is_premine": False, "is_honeypot": False, "reason": "Safety scan failed, using default safe parameters."}

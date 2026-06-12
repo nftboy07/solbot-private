@@ -65,25 +65,14 @@ class TelegramScraper:
             if mint:
                 sender = await event.get_sender()
                 sender_name = getattr(sender, 'title', getattr(sender, 'username', 'Unknown'))
-                logger.info(f"📱 Telegram Match from {sender_name}: Found Mint {mint}")
+                logger.info(f"📱 Telegram Match from {sender_name}: Found Mint {mint}. Forwarding to KOL mention handler.")
                 
-                # Create token event and trigger snipe
-                token = TokenEvent(
-                    mint=mint,
-                    name=f"TG: {sender_name}",
-                    symbol="TG_SCRAPE",
-                    creator="telegram_scraper",
-                    market_cap_usd=0,
-                    liquidity_sol=0,
-                    timestamp=time.time()
-                )
-                
-                # Execute snipe via bot instance
+                # Route to sentiment aggregator
                 asyncio.create_task(
-                    self._bot._execute_snipe(
-                        token, 
-                        self._bot._config.jupiter.buy_amount_sol, 
-                        f"Telegram Scraper ({sender_name})"
+                    self._bot._handle_kol_mention(
+                        mint, 
+                        f"TG: {sender_name}", 
+                        text
                     )
                 )
 
