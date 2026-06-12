@@ -34,20 +34,20 @@ class RiskManager:
     
     def __init__(self, bankroll_sol: float = 10.0):
         # Phase 1 Canary Limits
-        self.MAX_POSITION_SOL = 0.15  # Default per instruction
-        self.MAX_CONCURRENT_POSITIONS = 2
-        self.MAX_DAILY_LOSS_SOL = 1.0
-        self.MAX_EXPOSURE_SOL = 2.0
+        self.MAX_POSITION_SOL = 1.0  # Increased for dynamic sizes
+        self.MAX_CONCURRENT_POSITIONS = 100 # Increased as requested
+        self.MAX_DAILY_LOSS_SOL = 5.0
+        self.MAX_EXPOSURE_SOL = 10.0 # Increased exposure cap
         
         # Circuit Breaker Thresholds
         self.MAX_RPC_LATENCY_MS = 250
         self.MAX_CONSECUTIVE_FAILURES = 3
-        self.MAX_DAILY_PNL_PCT_LOSS = 0.05  # 5% of bankroll
+        self.MAX_DAILY_PNL_PCT_LOSS = 0.10  # 10% of bankroll
         self.OFFLINE_TIMEOUT_SECONDS = 30
         
         # Position Limits
         self.MAX_TRADE_PCT_BANKROLL = 0.20
-        self.MAX_EXPOSURE_PCT_BANKROLL = 0.50
+        self.MAX_EXPOSURE_PCT_BANKROLL = 0.80 # Allow up to 80% exposure
         
         self.bankroll_sol = bankroll_sol
         self.state = RiskState()
@@ -98,7 +98,33 @@ class RiskManager:
             await self._check_daily_reset()
             self.state.daily_pnl_sol += pnl_sol
 
-    async def can_trade(self, token_address: str, size_sol: float) -> tuple[bool, str]:
+    def calculate_position_size(self, ai_score: float, wallet_balance: float) -> float:
+        """
+        Calculates position size based on AI Score:
+        - 90+ = Full position: 0.02 SOL
+        - 80-89 = Normal position: 0.01 SOL
+        - 70-79 = Half position: 0.005 SOL
+        - Below 70 = Skip (0.0 SOL)
+        
+        Never risk more than 2% of wallet per trade.
+        """
+        if ai_score >= 90:
+            base_size = 0.02
+        elif ai_score >= 80:
+            base_size = 0.01
+        elif ai_score >= 70:
+            base_size = 0.005
+        else:
+            return 0.0
+            
+        # Max risk is 2% of current wallet balance
+        max_risk_sol = wallet_balance * 0.02
+        
+        # Clamp size to max_risk_sol
+        final_size = min(base_size, max_risk_sol)
+        return max(0.0, final_size)
+
+    async def can_trade(self, token_address: str, size_sol: float, wallet_balance: Optional[float] = None) -> tuple[bool, str]:
         """
         Validates if a new trade can be entered based on all Phase 1 guardrails.
         Returns (is_allowed, reason).
@@ -137,9 +163,11 @@ class RiskManager:
             if size_sol > self.MAX_POSITION_SOL:
                 return False, f"Position size {size_sol} exceeds canary limit {self.MAX_POSITION_SOL}"
 
-            # 8. Position Limits: Max % of Bankroll
-            if size_sol > (self.bankroll_sol * self.MAX_TRADE_PCT_BANKROLL):
-                return False, "Single trade size exceeds 20% of bankroll"
+            # 8. Single trade size exceeds 2% of wallet balance
+            if wallet_balance is not None:
+                max_risk_sol = wallet_balance * 0.02
+                if size_sol > max_risk_sol + 1e-6:
+                    return False, f"Position size {size_sol} exceeds 2% of wallet balance ({max_risk_sol:.6f} SOL)"
 
             # 9. Canary Limits: Max Total Exposure
             current_exposure = sum(self.state.active_positions.values())
@@ -148,7 +176,7 @@ class RiskManager:
 
             # 10. Total Exposure % of Bankroll
             if (current_exposure + size_sol) > (self.bankroll_sol * self.MAX_EXPOSURE_PCT_BANKROLL):
-                return False, "Total exposure exceeds 50% of bankroll"
+                return False, "Total exposure exceeds 80% of bankroll"
 
             return True, "Passed all risk checks"
 

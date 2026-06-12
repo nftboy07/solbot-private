@@ -7,7 +7,7 @@ from typing import List, Any
 logger = logging.getLogger("bot.fomo")
 
 class FomoTracker:
-    \"\"\"Scraper/Tracker for fomo.fund top traders and activity.\"\"\"
+    """Scraper/Tracker for fomo.fund top traders and activity."""
 
     def __init__(self, bot: Any):
         self.bot = bot
@@ -32,7 +32,7 @@ class FomoTracker:
         self._running = False
 
     async def _fetch_leaderboard(self):
-        \"\"\"Fetch top traders from fomo.fund leaderboard and add as tracked KOLs.\"\"\"
+        """Fetch top traders from fomo.fund leaderboard and add as tracked KOLs."""
         url = f"{self._api_url}/leaderboard"
         async with aiohttp.ClientSession(headers=self._headers) as session:
             try:
@@ -65,7 +65,7 @@ class FomoTracker:
                 await self._scrape_main_page(session)
 
     async def _scrape_main_page(self, session: aiohttp.ClientSession):
-        \"\"\"Fallback: Scrape the main page for embedded state or trader addresses.\"\"\"
+        """Fallback: Scrape the main page for embedded state or trader addresses."""
         async with session.get(self._base_url, timeout=10) as resp:
             if resp.status == 200:
                 html = await resp.text()

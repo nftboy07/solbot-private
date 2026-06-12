@@ -52,8 +52,14 @@ class Position:
 class Solbot:
     """High-speed DEGEN Sniper with Dev Dump Protection & KOL Coordinated Trading."""
 
-    def __init__(self, config: BotConfig):
+    def __init__(self, config: BotConfig, event_store=None, telemetry=None, creator_genome=None, wallet_graph=None, feature_store=None, rpc_pool=None):
         self._config = config
+        self._event_store = event_store
+        self._telemetry = telemetry
+        self._creator_genome = creator_genome
+        self._wallet_graph = wallet_graph
+        self._feature_store = feature_store
+        self._rpc_pool = rpc_pool
         self._wallet: Optional[Wallet] = None
         self._monitor: Optional[PumpFunMonitor] = None
         self._pump_client: Optional[PumpFunClient] = None
@@ -64,11 +70,13 @@ class Solbot:
         self._running = False
         self._trades: List[TradeResult] = []
         self._positions: Dict[str, Position] = {}
+        self._active_buys: Set[str] = set()
+        self._processed_mints: Set[str] = set()
         self._paused = False
         self._state_file = "data/state.json"
         self._ai_enabled = True
         self._ai_min_score = 75
-        self._autobuy_enabled = False
+        self._autobuy_enabled = True
         self._ai_filter = AIFilter()
         self._go_monitor = None
         self._raydium = None
@@ -81,6 +89,12 @@ class Solbot:
         self._gecko = GeckoTerminalClient()
         self._agent_monitor = TwitterAgentMonitor(self)
         self._network_manager = NetworkManager(config.proxy_list_path)
+        from solbot.db import Database
+        from solbot.engines.risk_manager import RiskManager
+        self._db = Database()
+        self._risk_manager = RiskManager()
+        # Missed entry tracker: mint -> {symbol, alert_price_usd, alert_time, notified_milestones}
+        self._missed_runners: Dict[str, Dict] = {}
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -159,12 +173,26 @@ class Solbot:
         setup_logger(self._config.logging)
         logger.info("SOLBOT DEGEN SNIPER STARTING")
 
+        await self._db.connect()
         self._wallet = Wallet(self._config.solana)
         self._filter = TokenFilter(self._config)
         self._pump_client = PumpFunClient(self._config, self._wallet)
+        if self._rpc_pool:
+            self._pump_client._rpc_pool = self._rpc_pool
         await self._pump_client.start()
+        try:
+            bal = await self._pump_client.get_sol_balance()
+            self._risk_manager.bankroll_sol = max(1.0, bal)
+            logger.info(f"Initialized RiskManager bankroll to {bal:.4f} SOL")
+        except Exception as e:
+            logger.error(f"Failed to fetch initial wallet balance for RiskManager: {e}")
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
+        
+        # Inject bot reference into WalletGraphEngine if available
+        if self._wallet_graph:
+            self._wallet_graph.bot = self
+            
         from solbot.telegram import TelegramManager
         self._telegram = TelegramManager(self._config.telegram)
         await self._telegram.start(self)
@@ -178,6 +206,15 @@ class Solbot:
         await self._twitter.start()
         
         self._load_state()
+        self._processed_mints.update(self._positions.keys())
+        try:
+            rows = await self._db._execute_read("SELECT mint FROM positions")
+            for r in rows:
+                self._processed_mints.add(r['mint'])
+            logger.info(f"Loaded {len(self._processed_mints)} historically traded mints into memory.")
+        except Exception as e:
+            logger.error(f"Failed to load historically traded mints: {e}")
+            
         await self._sync_existing_holdings()
         
         await self._telegram.send_message("<b>Solbot Sniper (Coordinated KOL Tracking) started!</b>")
@@ -205,6 +242,10 @@ class Solbot:
 
         self._running = True
         asyncio.create_task(self._process_events())
+        self._brain_tracker = asyncio.create_task(self._brain_tracker_loop())
+        self._wallet_scanner = asyncio.create_task(self._daily_wallet_scanner_loop())
+        self._sentiment_adapter = asyncio.create_task(self._market_sentiment_adapter_loop())
+        self._missed_tracker = asyncio.create_task(self._missed_entry_tracker_loop())
         
         for pos in self._positions.values():
             if pos.active:
@@ -225,6 +266,14 @@ class Solbot:
         if self._monitor_scraper: await self._monitor_scraper.stop()
         if self._tungscreener: await self._tungscreener.stop()
         if self._pump_movers: await self._pump_movers.stop()
+        if hasattr(self, '_brain_tracker') and self._brain_tracker:
+            self._brain_tracker.cancel()
+        if hasattr(self, '_wallet_scanner') and self._wallet_scanner:
+            self._wallet_scanner.cancel()
+        if hasattr(self, '_sentiment_adapter') and self._sentiment_adapter:
+            self._sentiment_adapter.cancel()
+        if hasattr(self, '_missed_tracker') and self._missed_tracker:
+            self._missed_tracker.cancel()
         logger.info("Solbot stopped")
 
     def is_blacklisted(self, address: str) -> bool:
@@ -238,32 +287,119 @@ class Solbot:
                 continue
             try:
                 data = await asyncio.wait_for(self._monitor.queue.get(), timeout=1.0)
-                if data.get("txType") in ["sell", "buy"]:
+                tx_type = data.get("txType")
+                if tx_type in ["sell", "buy"]:
                     await self._handle_trade_event(data)
-                elif data.get("mint") and "txType" not in data:
+                elif data.get("mint") and (tx_type == "create" or tx_type is None):
                     token = self._parse_token_event(data)
-                    
+                    asyncio.create_task(self._db_log_launch(token))
+
+                    # Duplicate check
+                    if token.mint in self._processed_mints or token.mint in self._active_buys:
+                        continue
+
+                    # Active positions limit check
+                    max_active_positions = getattr(self._config.strategy, "max_active_positions", 100)
+                    active_count = sum(1 for p in self._positions.values() if p.active)
+                    if max_active_positions > 0 and active_count >= max_active_positions:
+                        logger.warning(f"SKIPPING {token.symbol}: Active positions limit ({active_count}/{max_active_positions}) reached.")
+                        continue
+
                     # Blacklist check
                     if self.is_blacklisted(token.creator):
                         logger.warning(f"SKIPPING {token.symbol}: Creator {token.creator} is blacklisted")
                         continue
 
-                    qualified, size = self._filter.is_qualified(token)
-                    if qualified:
-                        if self._ai_enabled:
-                            token_data = {
-                                'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator
-                            }
-                            score = await self._ai_filter.score_token(token_data)
-                            if score < self._ai_min_score:
-                                logger.warning(f"AI score {score} < {self._ai_min_score}, skipping {token.symbol}")
+                    # 1. Fetch Creator Score
+                    c_score = 50.0
+                    if hasattr(self, '_creator_genome') and self._creator_genome:
+                        genome = await self._creator_genome.get_genome(token.creator)
+                        if genome:
+                            c_score = genome.get("creator_score", 50.0)
+                            if c_score < 40.0:
+                                logger.warning(f"Creator Genome Score {c_score} < 40, skipping {token.symbol}")
                                 continue
+
+                    # 2. Fetch AI score
+                    ai_score = 80.0
+                    if self._ai_enabled:
+                        token_data = {
+                            'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator, 'uri': token.uri
+                        }
+                        ai_score = await self._ai_filter.score_token(token_data)
+
+                    # 3. Check V4 Buy Strategy
+                    qualified, default_size, confidence_score = await self._filter.is_qualified(
+                        token, sol_price=self._telegram._sol_price, ai_score=ai_score, creator_score=c_score
+                    )
+                    
+                    if qualified:
+                        # 4. Fetch Wallet SOL Balance for Sizing and Risk Checks
+                        wallet_balance = await self._pump_client.get_sol_balance()
                         
+                        # 5. Calculate position size using V4 sizing rules (0.02, 0.01, 0.005 capped at 2% wallet)
+                        size = self._risk_manager.calculate_position_size(confidence_score, wallet_balance)
+                        if size <= 0.0:
+                            logger.info(f"Skipping {token.symbol}: Size calculated to 0.0 SOL (Confidence: {confidence_score:.1f})")
+                            continue
+                            
+                        # 6. Risk Check
+                        allowed, reason = await self._risk_manager.can_trade(token.mint, size, wallet_balance)
+                        if not allowed:
+                            logger.warning(f"SKIPPING {token.symbol}: Risk check failed: {reason}")
+                            continue
+
+                        # 7. 10x/100x Potential Runner Alert Trigger with inline buttons
+                        if c_score >= 85 and confidence_score >= 85:
+                            from telethon import Button
+                            buttons = [
+                                [Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{token.mint}")],
+                                [Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{token.mint}")],
+                                [Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{token.mint}")],
+                                [Button.inline("Buy 5.0 SOL 🔥", f"buy_5.0_{token.mint}")]
+                            ]
+                            market_cap_sol = token.market_cap_usd / self._telegram._sol_price if (self._telegram and self._telegram._sol_price > 0) else float(data.get("marketCapSol", 0) or 0.0)
+                            alert_msg = (
+                                f"🚨 <b>10x/100x POTENTIAL RUNNER DETECTED!</b> 🚨\n\n"
+                                f"Token: <b>{token.symbol}</b> ({token.name})\n"
+                                f"Mint: <code>{token.mint}</code>\n"
+                                f"Market Cap: <code>{market_cap_sol:.1f} SOL</code> (${token.market_cap_usd:,.0f})\n"
+                                f"Creator Genome Score: <code>{c_score:.1f}/100</code>\n"
+                                f"Confidence: <code>{confidence_score:.1f}%</code>\n"
+                                f"Reason: <i>High-quality developer profile (Avg ATH: {genome.get('avg_ath', 0.0):.1f}x)</i>\n\n"
+                                f"👉 <a href='https://pump.fun/{token.mint}'>Buy on pump.fun</a>"
+                            )
+                            asyncio.create_task(self._telegram.send_message(alert_msg, buttons=buttons))
+                            # Track as missed entry if NOT autobought — bot will regret-alert later
+                            if not self._autobuy_enabled:
+                                self._missed_runners[token.mint] = {
+                                    'symbol': token.symbol,
+                                    'name': token.name,
+                                    'alert_price_usd': token.market_cap_usd,
+                                    'alert_time': time(),
+                                    'notified_milestones': set(),
+                                    'c_score': c_score,
+                                    'confidence': confidence_score,
+                                }
+
                         # Snipe only if autobuy is enabled
                         if self._autobuy_enabled:
-                             asyncio.create_task(self._execute_snipe(token, size, "Sniper"))
+                             self._active_buys.add(token.mint)
+                             asyncio.create_task(self._execute_snipe(token, size, f"Sniper (Conf: {confidence_score:.1f}%)"))
                         else:
-                             await self._telegram.send_message(f"= <b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>")
+                             if not (c_score >= 85 and confidence_score >= 85):
+                                 # Standard qualified notifications
+                                 await self._telegram.send_message(f"🔔 <b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>\nConfidence: <code>{confidence_score:.1f}%</code>")
+                                 # Track all qualified tokens as potential missed entries too
+                                 self._missed_runners.setdefault(token.mint, {
+                                     'symbol': token.symbol,
+                                     'name': token.name,
+                                     'alert_price_usd': token.market_cap_usd,
+                                     'alert_time': time(),
+                                     'notified_milestones': set(),
+                                     'c_score': c_score,
+                                     'confidence': confidence_score,
+                                 })
                              
             except asyncio.TimeoutError:
                 continue
@@ -273,6 +409,7 @@ class Solbot:
         mint = data.get("mint")
         tx_type = data.get("txType")
         mcap_sol = data.get("marketCapSol")
+        sol_amount = float(data.get("solAmount", 0) or 0.0)
         if not trader or not mint: return
 
         # Blacklist check
@@ -280,13 +417,34 @@ class Solbot:
             logger.warning(f"IGNORING event from blacklisted wallet: {trader}")
             return
 
+        # Feed to Wallet Graph
+        if tx_type == "buy" and hasattr(self, '_wallet_graph') and self._wallet_graph:
+            asyncio.create_task(self._wallet_graph.record_activity(trader, mint, data))
+
+        # Track PnL for Daily Smart Wallet Scanner
+        if tx_type == "buy":
+            if not hasattr(self, '_active_trader_buys'):
+                self._active_trader_buys = {}
+            if trader not in self._active_trader_buys:
+                self._active_trader_buys[trader] = {}
+            self._active_trader_buys[trader][mint] = sol_amount
+        elif tx_type == "sell":
+            if hasattr(self, '_active_trader_buys') and trader in self._active_trader_buys and mint in self._active_trader_buys[trader]:
+                entry_sol = self._active_trader_buys[trader][mint]
+                pnl_sol = sol_amount - entry_sol
+                is_win = 1 if pnl_sol > 0 else 0
+                asyncio.create_task(self._db_update_wallet_pnl(trader, pnl_sol, is_win))
+                del self._active_trader_buys[trader][mint]
+                if not self._active_trader_buys[trader]:
+                    del self._active_trader_buys[trader]
+
         # Feed to KOL Tracker
         if trader in self._kol_tracker.wallets:
             kol_event = {
                 'wallet': trader,
                 'action': tx_type,
                 'token': mint,
-                'amount': float(data.get("solAmount", 0))
+                'amount': sol_amount
             }
             asyncio.create_task(self._kol_tracker.process_event(kol_event, self))
 
@@ -303,80 +461,280 @@ class Solbot:
             if trader == pos.creator:
                 asyncio.create_task(self._exit_position(pos, "DEV DUMP", 1.0))
 
+        # Copytrade Sniping (with race condition protection)
         if tx_type == "buy" and self._filter.is_copy_target(trader):
-            token = self._parse_token_event(data)
-            alias = self._filter._wallet_scores.get(trader, {}).alias or trader[:8]
-            asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, f"Copytrade [{alias}]"))
+            if mint not in self._processed_mints and mint not in self._active_buys:
+                self._active_buys.add(mint)
+                token = self._parse_token_event(data)
+                alias = self._filter._wallet_scores.get(trader, {}).alias or trader[:8]
+                asyncio.create_task(self._execute_snipe(token, self._config.jupiter.buy_amount_sol, f"Copytrade [{alias}]"))
+
+        # V4: Sniper only triggers on creation events, 100k trade event sniping deactivated.
+        pass
 
     def _parse_token_event(self, data: dict) -> TokenEvent:
+        v_sol = float(data.get("vSolInBondingCurve", 0))
+        if v_sol > 1e6:
+            v_sol = v_sol / 1e9
+        initial_buy = float(data.get("initialBuy", 0) or data.get("solAmount", 0) or 0.0)
+        if initial_buy > 1e6:
+            initial_buy = initial_buy / 1e9
         return TokenEvent(
             mint=data.get("mint"),
             name=data.get("name", "Unknown"),
             symbol=data.get("symbol", "???"),
+            uri=data.get("uri"),
             creator=data.get("traderPublicKey") or data.get("creator"),
+            initial_buy_sol=initial_buy,
             market_cap_usd=float(data.get("marketCapSol", 0)) * self._telegram._sol_price,
-            liquidity_sol=float(data.get("vSolInBondingCurve", 0)) / 1e9,
+            liquidity_sol=v_sol if v_sol > 0 else float(data.get("liquidity_sol", 0)),
             timestamp=time(),
         )
 
     async def execute_kol_snipe(self, mint: str, reason: str):
         """Specifically used by KOLTracker for coordinated buys."""
-        if mint in self._positions: return
-        meta = await self._pump_client.get_token_metadata(mint)
-        token = TokenEvent(
-            mint=mint,
-            name=meta.get("name", "Unknown"),
-            symbol=meta.get("symbol", "KOL_PICK"),
-            creator=meta.get("creator", ""),
-            market_cap_usd=float(meta.get("market_cap_sol", 0)) * self._telegram._sol_price,
-            liquidity_sol=float(meta.get("liquidity_sol", 0)),
-            timestamp=time()
-        )
-        await self._execute_snipe(token, self._config.jupiter.buy_amount_sol, reason)
+        if mint in self._positions or mint in self._processed_mints or mint in self._active_buys: return
+        self._active_buys.add(mint)
+        try:
+            meta = await self._pump_client.get_token_metadata(mint)
+            token = TokenEvent(
+                mint=mint,
+                name=meta.get("name", "Unknown"),
+                symbol=meta.get("symbol", "KOL_PICK"),
+                creator=meta.get("creator", ""),
+                market_cap_usd=float(meta.get("market_cap_sol", 0)) * self._telegram._sol_price,
+                liquidity_sol=float(meta.get("liquidity_sol", 0)),
+                timestamp=time()
+            )
+            await self._execute_snipe(token, self._config.jupiter.buy_amount_sol, reason)
+        finally:
+            self._active_buys.discard(mint)
+
+    async def _evaluate_and_snipe_from_trade(self, token: TokenEvent, size: float, reason: str):
+        try:
+            # Active positions limit check
+            max_active_positions = getattr(self._config.strategy, "max_active_positions", 100)
+            active_count = sum(1 for p in self._positions.values() if p.active)
+            if max_active_positions > 0 and active_count >= max_active_positions:
+                logger.warning(f"SKIPPING {token.symbol}: Active positions limit ({active_count}/{max_active_positions}) reached.")
+                return
+
+            # Blacklist check
+            if self.is_blacklisted(token.creator):
+                logger.warning(f"SKIPPING {token.symbol}: Creator {token.creator} is blacklisted")
+                return
+
+            # Check Creator Genome Score and adjust size/eligibility
+            c_score = 50.0
+            genome = None
+            if hasattr(self, '_creator_genome') and self._creator_genome:
+                genome = await self._creator_genome.get_genome(token.creator)
+                if genome:
+                    c_score = genome.get("creator_score", 50.0)
+                    if c_score < 40.0:
+                        logger.warning(f"Creator Genome Score {c_score} < 40, skipping {token.symbol}")
+                        return
+                    elif c_score >= 80.0:
+                        logger.info(f"High Creator Genome Score {c_score}! Scaling up trade size.")
+                        size = size * 1.5
+
+            if self._ai_enabled:
+                token_data = {
+                    'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator
+                }
+                score = await self._ai_filter.score_token(token_data)
+                if score < self._ai_min_score:
+                    logger.warning(f"AI score {score} < {self._ai_min_score}, skipping {token.symbol}")
+                    return
+
+            # 10x/100x Potential Runner Alert Trigger
+            if c_score >= 85 and genome:
+                from telethon import Button
+                buttons = [
+                    [Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{token.mint}")],
+                    [Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{token.mint}")],
+                    [Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{token.mint}")],
+                    [Button.inline("Buy 5.0 SOL 🔥", f"buy_5.0_{token.mint}")]
+                ]
+                market_cap_sol = token.market_cap_usd / self._telegram._sol_price if (self._telegram and self._telegram._sol_price > 0) else 0.0
+                alert_msg = (
+                    f"🚨 <b>10x/100x POTENTIAL RUNNER DETECTED!</b> 🚨\n\n"
+                    f"Token: <b>{token.symbol}</b> ({token.name})\n"
+                    f"Mint: <code>{token.mint}</code>\n"
+                    f"Market Cap: <code>{market_cap_sol:.1f} SOL</code> (${token.market_cap_usd:,.0f})\n"
+                    f"Creator Genome Score: <code>{c_score:.1f}/100</code>\n"
+                    f"Reason: <i>High-quality developer profile (Avg ATH of past launches: {genome.get('avg_ath', 0.0):.1f}x)</i>\n\n"
+                    f"👉 <a href='https://pump.fun/{token.mint}'>Buy on pump.fun</a>"
+                )
+                asyncio.create_task(self._telegram.send_message(alert_msg, buttons=buttons))
+
+            # Snipe only if autobuy is enabled
+            if self._autobuy_enabled:
+                self._processed_mints.add(token.mint)
+                await self._execute_snipe(token, size, reason)
+            else:
+                await self._telegram.send_message(f"🔔 <b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>\nMCAP: <code>${token.market_cap_usd:,.0f}</code>")
+        except Exception as e:
+            logger.error(f"Error in _evaluate_and_snipe_from_trade: {e}")
+        finally:
+            self._active_buys.discard(token.mint)
 
     async def _execute_snipe(self, token: TokenEvent, size: float, reason: str):
-        if token.mint in self._positions: return
-        priority_fee_sol = self._filter.get_dynamic_fee(token.mint) / 1_000_000_000
-        result = await self._pump_client.execute_trade(
-            token.mint, action="buy", amount=size, priority_fee=priority_fee_sol
-        )
-        if result.success:
-            self._trades.append(result)
-            pos = Position(
-                mint=token.mint, symbol=token.symbol,
-                entry_price=token.market_cap_usd, entry_liq=token.liquidity_sol,
-                creator=token.creator, size=size
+        if token.mint in self._positions:
+            self._active_buys.discard(token.mint)
+            return
+        self._active_buys.add(token.mint)
+        self._processed_mints.add(token.mint)
+        try:
+            priority_fee_sol = self._filter.get_dynamic_fee(token.mint) / 1_000_000_000
+            logger.info(f"Initiating snipe for {token.symbol} ({token.mint}) | Size: {size} SOL | Reason: {reason}")
+            result = await self._pump_client.execute_trade(
+                token.mint, action="buy", amount=size, priority_fee=priority_fee_sol
             )
-            pos.current_price = token.market_cap_usd
-            pos.highest_price = token.market_cap_usd
-            self._positions[token.mint] = pos
-            self._save_state()
-            await self._telegram.send_message(f"  <b>BUY ({reason}): {token.symbol}</b>")
-            asyncio.create_task(self._position_manager(pos))
+            if result.success:
+                self._trades.append(result)
+                pos = Position(
+                    mint=token.mint, symbol=token.symbol,
+                    entry_price=token.market_cap_usd, entry_liq=token.liquidity_sol,
+                    creator=token.creator, size=size
+                )
+                pos.current_price = token.market_cap_usd
+                pos.highest_price = token.market_cap_usd
+                self._positions[token.mint] = pos
+                
+                # Save position in SQLite DB
+                asyncio.create_task(self._db.save_position(token.mint, token.market_cap_usd, size, "open"))
+                
+                # Track in RiskManager
+                await self._risk_manager.on_position_opened(token.mint, size)
+                
+                # Record process launch in Creator Genome Engine
+                if hasattr(self, '_creator_genome') and self._creator_genome:
+                    asyncio.create_task(self._creator_genome.process_launch(token.creator, {
+                        'mint': token.mint,
+                        'initial_liquidity': token.liquidity_sol
+                    }))
+
+                self._save_state()
+                await self._telegram.send_message(f"📡 <b>BUY ({reason}): {token.symbol}</b>\nMCAP: <code>${token.market_cap_usd:,.0f}</code>")
+                asyncio.create_task(self._position_manager(pos))
+            else:
+                logger.error(f"Snipe failed for {token.symbol} ({token.mint}): {result.error}")
+                self._processed_mints.discard(token.mint)
+                if self._telegram:
+                    await self._telegram.send_message(f"❌ <b>Snipe Failed ({reason}): {token.symbol}</b>\nError: <code>{result.error}</code>")
+        except Exception as e:
+            logger.error(f"Error in _execute_snipe: {e}")
+            self._processed_mints.discard(token.mint)
+        finally:
+            self._active_buys.discard(token.mint)
 
     async def _position_manager(self, pos: Position):
         strat = self._config.strategy
+        last_poll_time = 0
+        last_moonbag_check_time = 0
+        
+        # Add dynamic flag attributes if not exists
+        if not hasattr(pos, 'is_moonbag'):
+            pos.is_moonbag = False
+        if not hasattr(pos, 'trailing_stop_activated'):
+            pos.trailing_stop_activated = None
+            
         while self._running and pos.active:
+            now_ts = time()
+            # Poll real-time price from RPC every 15 seconds
+            if now_ts - last_poll_time >= 15:
+                last_poll_time = now_ts
+                try:
+                    price_usd = await self._pump_client.get_bonding_curve_mcap(pos.mint, self._telegram._sol_price)
+                    if price_usd <= 0:
+                        metrics = await self._dexscreener.get_price_metrics(pos.mint)
+                        if metrics:
+                            price_usd = float(metrics.get("market_cap_usd") or 0.0)
+                    
+                    if price_usd > 0:
+                        pos.current_price = price_usd
+                        if price_usd > pos.highest_price:
+                            pos.highest_price = price_usd
+                            self._save_state()
+                except Exception as e:
+                    logger.error(f"Error polling price for {pos.symbol}: {e}")
+
             if pos.current_price == 0:
                 await asyncio.sleep(1)
                 continue
-            if hasattr(self._config.strategy, "mcap_tp_target_usd") and pos.current_price >= self._config.strategy.mcap_tp_target_usd:
-                await self._exit_position(pos, f"MCAP TP @ {pos.current_price:.0f}", 1.0)
-                return
+
             gain = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
             drawdown = (pos.highest_price - pos.current_price) / pos.highest_price if pos.highest_price > 0 else 0.0
-            for tp in strat.tp_targets:
-                mult = tp["multiplier"]
-                if gain >= mult and mult not in pos.tp_targets_hit:
-                    await self._exit_position(pos, f"TP {mult}x", tp["sell_pct"])
-                    pos.tp_targets_hit.append(mult)
-                    self._save_state()
-            if gain <= (1.0 - strat.stop_loss_pct):
-                await self._exit_position(pos, "STOP LOSS", 1.0)
-                break
-            if drawdown >= strat.trailing_stop_pct:
-                await self._exit_position(pos, "TRAILING STOP", 1.0)
-                break
+
+            # V4 exit logic: check if it is already a moonbag or not
+            if pos.is_moonbag:
+                # Trailing stop for moonbags
+                # After 5x: activate 25% trailing stop. After 10x: activate 20% trailing stop.
+                if gain >= 10.0:
+                    pos.trailing_stop_activated = 0.20
+                elif gain >= 5.0 and pos.trailing_stop_activated is None:
+                    pos.trailing_stop_activated = 0.25
+                
+                # Check trailing stop hit
+                if pos.trailing_stop_activated is not None and drawdown >= pos.trailing_stop_activated:
+                    await self._exit_position(pos, f"Moonbag Trailing Stop ({pos.trailing_stop_activated*100:.0f}% hit)", 1.0)
+                    break
+                    
+                # Periodic checks: AI trend reverses or distribution changes
+                if now_ts - last_moonbag_check_time >= 60:
+                    last_moonbag_check_time = now_ts
+                    token_data = {'mint': pos.mint, 'symbol': pos.symbol}
+                    current_score = await self._ai_filter.score_token(token_data)
+                    if current_score < 50:
+                        await self._exit_position(pos, f"Moonbag exit: AI Trend Reverse ({current_score})", 1.0)
+                        break
+            else:
+                # Not a moonbag yet. Check TP Presets (Aggressive by default, or Conservative)
+                preset = getattr(strat, "tp_preset", "aggressive")
+                
+                if preset == "conservative":
+                    # Conservative: 2x (sell 25%), 3x (sell 25%), 5x (sell 25%), leave 25% moonbag
+                    if gain >= 2.0 and 2.0 not in pos.tp_targets_hit:
+                        await self._exit_position(pos, "Conservative TP 2x (Sell 25% of initial)", 0.25)
+                        pos.tp_targets_hit.append(2.0)
+                        self._save_state()
+                    elif gain >= 3.0 and 3.0 not in pos.tp_targets_hit:
+                        # 25% of initial = 33.3% of remaining 75%
+                        await self._exit_position(pos, "Conservative TP 3x (Sell 25% of initial)", 0.3333)
+                        pos.tp_targets_hit.append(3.0)
+                        self._save_state()
+                    elif gain >= 5.0 and 5.0 not in pos.tp_targets_hit:
+                        # 25% of initial = 50% of remaining 50%
+                        await self._exit_position(pos, "Conservative TP 5x (Sell 25% of initial, entering Moonbag)", 0.50)
+                        pos.tp_targets_hit.append(5.0)
+                        pos.is_moonbag = True
+                        pos.trailing_stop_activated = 0.25
+                        self._save_state()
+                else:
+                    # Aggressive: 3x (sell 20%), 5x (sell 30%), 10x (sell 20%), leave 30% moonbag
+                    if gain >= 3.0 and 3.0 not in pos.tp_targets_hit:
+                        await self._exit_position(pos, "Aggressive TP 3x (Sell 20% of initial)", 0.20)
+                        pos.tp_targets_hit.append(3.0)
+                        self._save_state()
+                    elif gain >= 5.0 and 5.0 not in pos.tp_targets_hit:
+                        # 30% of initial = 37.5% of remaining 80%
+                        await self._exit_position(pos, "Aggressive TP 5x (Sell 30% of initial)", 0.375)
+                        pos.tp_targets_hit.append(5.0)
+                        self._save_state()
+                    elif gain >= 10.0 and 10.0 not in pos.tp_targets_hit:
+                        # 20% of initial = 40% of remaining 50%
+                        await self._exit_position(pos, "Aggressive TP 10x (Sell 20% of initial, entering Moonbag)", 0.40)
+                        pos.tp_targets_hit.append(10.0)
+                        pos.is_moonbag = True
+                        pos.trailing_stop_activated = 0.20
+                        self._save_state()
+
+                # Stop loss check for non-moonbag
+                if gain <= (1.0 - strat.stop_loss_pct):
+                    await self._exit_position(pos, f"STOP LOSS ({strat.stop_loss_pct*100:.0f}% reached)", 1.0)
+                    break
+                    
             await asyncio.sleep(5)
 
     async def _exit_position(self, pos: Position, reason: str, pct: float):
@@ -388,15 +746,37 @@ class Solbot:
             self._save_state()
             return
         sell_amount = token_balance * pct
-        # User requested selling before them / aggressive frontrunning
         # We increase priority fee for exits triggered by KOL sales
         priority_fee = 0.01 if "KOL EXIT" in reason else 0.001
         result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=sell_amount, denominated_in_sol=False, priority_fee=priority_fee)
         if result.success:
             self._trades.append(result)
-            if pct >= 0.99:
+            # Update active position size in RiskManager for partial sells
+            if pos.active:
+                self._risk_manager.state.active_positions[pos.mint] = pos.size * (1.0 - pct)
+            if pct >= 0.99 or "moonbag" in reason.lower() or "stop" in reason.lower():
                 pos.active = False
                 if pos.mint in self._positions: del self._positions[pos.mint]
+                
+                # Update Creator Genome outcome!
+                if hasattr(self, '_creator_genome') and self._creator_genome:
+                    roi = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
+                    ath = pos.highest_price / pos.entry_price if pos.entry_price > 0 else 1.0
+                    survival_time = time() - pos.start_time
+                    asyncio.create_task(self._creator_genome.track_trade_outcome(pos.creator, roi, ath, survival_time))
+                
+                # Update position status in DB
+                roi = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
+                pnl = roi - 1.0
+                asyncio.create_task(self._db.update_position_pnl(pos.mint, pnl, "closed"))
+                
+                # Track closed position in RiskManager
+                pnl_sol = pos.size * (roi - 1.0)
+                await self._risk_manager.on_position_closed(pos.mint, pnl_sol)
+                
+                # Check for 100 trades retraining
+                if len(self._trades) > 0 and len(self._trades) % 100 == 0:
+                    asyncio.create_task(self._retrain_brain_weights())
             self._save_state()
             await self._telegram.send_message(f"= <b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
 
@@ -420,6 +800,495 @@ class Solbot:
             self._save_state()
         except Exception as e:
             logger.error(f"Failed to sync holdings: {e}")
+
+    async def _db_log_launch(self, token: TokenEvent):
+        """Log the launch of a new token to the ticks database and update creator launch stats."""
+        try:
+            # Check if token already exists to avoid duplicate logic
+            existing = await self._db.get_tick(token.mint)
+            if existing:
+                return
+
+            # Add to ticks
+            await self._db.add_tick({
+                'mint': token.mint,
+                'creator': token.creator,
+                'initial_liquidity': token.liquidity_sol,
+                'max_marketcap': token.market_cap_usd or 10000.0,
+                'exit_marketcap': token.market_cap_usd or 10000.0,
+                'roi': 1.0,
+                'timestamp': int(token.timestamp),
+                'holder_data': {}
+            })
+            
+            # Update creator profile in the creators table
+            creator_profile = await self._db.get_creator(token.creator)
+            if not creator_profile:
+                await self._db.update_creator(
+                    token.creator,
+                    token_count=1,
+                    avg_ath=token.market_cap_usd or 10000.0,
+                    rug_count=0,
+                    blacklist_score=0.0
+                )
+            else:
+                new_count = (creator_profile.get('token_count') or 0) + 1
+                new_ath = ((creator_profile.get('avg_ath') or 0.0) * (new_count - 1) + (token.market_cap_usd or 10000.0)) / new_count
+                await self._db.update_creator(
+                    token.creator,
+                    token_count=new_count,
+                    avg_ath=new_ath
+                )
+        except Exception as e:
+            logger.error(f"Failed to log launch in DB: {e}")
+
+    async def _brain_tracker_loop(self):
+        """Autonomous Performance Tracker Loop (Central Powerhouse / Brain).
+        Periodically checks token metrics on DexScreener/GeckoTerminal, classifies deployers,
+        and auto-configures blacklist/smart wallets dynamically.
+        """
+        logger.info("Brain Performance Tracker Loop started.")
+        while self._running:
+            try:
+                # Wait 5 minutes between checks to avoid rate limits
+                await asyncio.sleep(300)
+                
+                # Fetch recent unresolved ticks (e.g. launched between 10 minutes and 2 hours ago)
+                from time import time
+                now = int(time())
+                ten_mins_ago = now - 600
+                two_hours_ago = now - 7200
+                
+                # Query ticks that are still pending check
+                rows = await self._db._execute_read(
+                    "SELECT mint, creator, max_marketcap, timestamp FROM ticks WHERE timestamp BETWEEN ? AND ?",
+                    (two_hours_ago, ten_mins_ago)
+                )
+                
+                for row in rows:
+                    mint = row['mint']
+                    creator = row['creator']
+                    initial_cap = row['max_marketcap'] or 10000.0
+                    
+                    # Fetch current metrics from DexScreener
+                    metrics = await self._dexscreener.get_price_metrics(mint)
+                    
+                    # If not indexed on DexScreener, try GeckoTerminal
+                    if not metrics:
+                        gecko_info = await self._gecko.get_token_info(mint)
+                        if gecko_info:
+                            fdv = gecko_info.get("fdv_usd")
+                            if fdv:
+                                metrics = {
+                                    "market_cap_usd": float(fdv),
+                                    "price_usd": float(gecko_info.get("price_usd", 0))
+                                }
+                                
+                    # If metrics are available, classify the token
+                    if metrics:
+                        mcap = float(metrics.get("market_cap_usd") or 0.0)
+                        if mcap > 0:
+                            roi = mcap / initial_cap
+                            
+                            # Update tick performance
+                            await self._db._execute_write(
+                                "UPDATE ticks SET exit_marketcap = ?, roi = ? WHERE mint = ?",
+                                (mcap, roi, mint)
+                            )
+                            
+                            # Classification Logic
+                            if mcap < 15000.0:
+                                # Classify as RUG
+                                await self._handle_detected_rug(creator, mint)
+                            elif mcap >= 100000.0:
+                                # Classify as RUNNER
+                                await self._handle_detected_runner(creator, mint, mcap)
+                    else:
+                        # Fallback: If no metrics are available after 10 minutes, the token likely died/rugged immediately
+                        await self._handle_detected_rug(creator, mint)
+                        
+            except Exception as e:
+                logger.error(f"Error in brain tracker loop: {e}")
+
+    async def _handle_detected_rug(self, creator: str, mint: str):
+        """Update creator profile for a rug and auto-blacklist if threshold met."""
+        if not creator or creator == "unknown": return
+        try:
+            profile = await self._db.get_creator(creator)
+            rug_count = 1
+            if profile:
+                rug_count = (profile.get('rug_count') or 0) + 1
+                await self._db.update_creator(creator, rug_count=rug_count)
+            else:
+                await self._db.update_creator(creator, token_count=1, avg_ath=10000.0, rug_count=1, blacklist_score=1.0)
+                
+            # If creator has rugged MORE than 4 times, auto-blacklist!
+            if rug_count > 4:
+                if creator not in self._blacklisted_wallets:
+                    self._blacklisted_wallets.add(creator)
+                    self._save_state()
+                    logger.warning(f"🚨 BRAIN AUTO-BLACKLISTED RUGGER DEPLOYER: {creator} (Rugs: {rug_count})")
+                    if self._telegram:
+                        await self._telegram.send_message(
+                            f"🚨 <b>Brain Auto-Blacklist</b>\n"
+                            f"Deployer <code>{creator}</code> has rugged <code>{rug_count}</code> times.\n"
+                            f"Future launches from this creator will be ignored."
+                        )
+        except Exception as e:
+            logger.error(f"Error handling detected rug: {e}")
+
+    async def _handle_detected_runner(self, creator: str, mint: str, peak_mcap: float):
+        """Update creator profile for a successful launch and auto-add to smart wallets."""
+        if not creator or creator == "unknown": return
+        try:
+            profile = await self._db.get_creator(creator)
+            if profile:
+                rug_count = profile.get('rug_count') or 0
+                token_count = profile.get('token_count') or 1
+                # If they have a successful launch and no rugs, add as copy target / smart wallet!
+                if rug_count == 0:
+                    if self._filter and creator not in self._filter._copy_targets:
+                        self._filter.add_copy_target(creator)
+                        # Initialize wallet score
+                        from solbot.filters import WalletScore
+                        score = WalletScore(address=creator, alias=f"Smart_Maker_{creator[:4]}", score=90, total_trades=token_count, win_rate=1.0)
+                        self._filter._wallet_scores[creator] = score
+                        if hasattr(self, '_kol_tracker') and self._kol_tracker:
+                            self._kol_tracker.add_wallet(creator, score.alias)
+                        self._save_state()
+                        logger.info(f"💎 BRAIN AUTO-ADDED SMART WALLET: {creator} (ATH: ${peak_mcap:,.0f})")
+                        if self._telegram:
+                            await self._telegram.send_message(
+                                f"💎 <b>Brain Auto-Smart Wallet</b>\n"
+                                f"Deployer <code>{creator}</code> successfully launched a token to <code>${peak_mcap:,.0f} MCAP</code>.\n"
+                                f"Now auto-following this smart wallet."
+                            )
+        except Exception as e:
+            logger.error(f"Error handling detected runner: {e}")
+
+    async def _db_update_wallet_pnl(self, address: str, pnl_sol: float, is_win: int):
+        """Track and update raw retail trader profit and loss statistics."""
+        try:
+            wallet = await self._db.get_wallet(address)
+            if not wallet:
+                # First trade tracked
+                win_rate = 1.0 if is_win else 0.0
+                await self._db.upsert_wallet(
+                    address,
+                    label="tracked_trader",
+                    tier="retail",
+                    win_rate=win_rate,
+                    historical_roi=pnl_sol
+                )
+            else:
+                current_roi = wallet.get('historical_roi') or 0.0
+                current_win_rate = wallet.get('win_rate') or 0.0
+                new_roi = current_roi + pnl_sol
+                new_win_rate = (current_win_rate * 9 + is_win) / 10
+                await self._db.upsert_wallet(
+                    address,
+                    label=wallet.get('label') or "tracked_trader",
+                    tier=wallet.get('tier') or "retail",
+                    win_rate=new_win_rate,
+                    historical_roi=new_roi
+                )
+        except Exception as e:
+            logger.error(f"Failed to update wallet PnL in database: {e}")
+
+    async def _daily_wallet_scanner_loop(self):
+        """Autonomously scans the database for retail wallets making profits daily
+        and promotes them to Smart Wallets / Copy Targets.
+        """
+        logger.info("Daily Wallet Scanner Loop started.")
+        while self._running:
+            try:
+                # Scan every 1 hour (can be adjusted)
+                await asyncio.sleep(3600)
+                
+                # Fetch wallets with win_rate > 70% and positive PnL (historical_roi > 0.5 SOL)
+                rows = await self._db._execute_read(
+                    "SELECT address, win_rate, historical_roi FROM wallets WHERE win_rate >= 0.7 AND historical_roi >= 0.5 AND tier = 'retail'"
+                )
+                
+                for row in rows:
+                    addr = row['address']
+                    win_rate = row['win_rate']
+                    roi = row['historical_roi']
+                    
+                    # Promote to copy target
+                    if self._filter and addr not in self._filter._copy_targets:
+                        self._filter.add_copy_target(addr)
+                        # Update database tier and label
+                        await self._db.upsert_wallet(
+                            addr,
+                            label="smart_wallet",
+                            tier="smart",
+                            win_rate=win_rate,
+                            historical_roi=roi
+                        )
+                        # Add to wallet scores
+                        from solbot.filters import WalletScore
+                        score = WalletScore(address=addr, alias=f"Smart_Scanner_{addr[:4]}", score=95, total_trades=10, win_rate=win_rate)
+                        self._filter._wallet_scores[addr] = score
+                        if hasattr(self, '_kol_tracker') and self._kol_tracker:
+                            self._kol_tracker.add_wallet(addr, score.alias)
+                        
+                        logger.info(f"🚀 DAILY SCANNER AUTO-PROMOTED WALLET TO SMART WALLET: {addr} (Win Rate: {win_rate*100:.1f}%, ROI: {roi:.2f} SOL)")
+                        if self._telegram:
+                            await self._telegram.send_message(
+                                f"🚀 <b>Daily Scanner Auto-Promotion</b>\n"
+                                f"Wallet <code>{addr}</code> has achieved <code>{win_rate*100:.1f}%</code> win rate and <code>+{roi:.2f} SOL</code> profit.\n"
+                                f"Promoted to **Smart Wallet** & auto-copying enabled!"
+                            )
+            except Exception as e:
+                logger.error(f"Error in daily wallet scanner loop: {e}")
+
+    async def _market_sentiment_adapter_loop(self):
+        """AGI Market Sentiment Adapter.
+        Periodically checks the success rate of recent token launches in the database,
+        determines the overall market state, and autonomously adjusts trading size,
+        stop losses, and Jito transaction priorities to maximize land-rates and win-rates.
+        """
+        logger.info("AGI Market Sentiment Adapter started.")
+        while self._running:
+            try:
+                # Run evaluation every 10 minutes
+                await asyncio.sleep(600)
+                
+                # Query the database for the 50 most recent token launches
+                rows = await self._db._execute_read(
+                    "SELECT exit_marketcap, max_marketcap FROM ticks ORDER BY timestamp DESC LIMIT 50"
+                )
+                
+                if len(rows) < 10:
+                    # Not enough historical database data yet, skip adapter execution
+                    continue
+                    
+                total = len(rows)
+                runners = 0
+                for row in rows:
+                    max_cap = row.get('max_marketcap') or 0.0
+                    exit_cap = row.get('exit_marketcap') or 0.0
+                    peak = max(max_cap, exit_cap)
+                    if peak >= 50000.0:
+                        runners += 1
+                        
+                success_rate = runners / total
+                logger.info(f"AGI Market sentiment evaluation: Success Rate = {success_rate*100:.1f}% ({runners}/{total} runners)")
+                
+                current_buy = self._config.jupiter.buy_amount_sol
+                current_stop = self._config.strategy.trailing_stop_pct
+                
+                # Autonomously shift risk mode based on success rate
+                if success_rate >= 0.25:
+                    # Hot market (Meme season) -> DEGEN Mode
+                    new_buy = 0.02
+                    new_stop = 0.30
+                    mode_str = "DEGEN (Bullish Meme Season 🌋)"
+                elif success_rate >= 0.10:
+                    # Standard market -> NORMAL Mode
+                    new_buy = 0.005
+                    new_stop = 0.20
+                    mode_str = "NORMAL (Stable Market ⚖️)"
+                else:
+                    # Dangerous market (Rug fest) -> SAFE Mode
+                    new_buy = 0.001
+                    new_stop = 0.10
+                    mode_str = "SAFE (High Rug Danger 🛡)"
+                    
+                # Query the bot's own recent trades for micro-performance adaptation
+                own_trades = await self._db._execute_read(
+                    "SELECT pnl FROM positions WHERE status = 'closed' ORDER BY timestamp DESC LIMIT 10"
+                )
+                
+                # Check micro-performance
+                if len(own_trades) >= 5:
+                    wins = sum(1 for r in own_trades if (r.get('pnl') or 0.0) > 0.0)
+                    own_win_rate = wins / len(own_trades)
+                    logger.info(f"AGI Self-performance evaluation: Own Win Rate = {own_win_rate*100:.1f}% ({wins}/{len(own_trades)} wins)")
+                    
+                    # Self-correcting risk adaptations
+                    if own_win_rate < 0.30:
+                        # Underperforming -> increase safety, reduce size
+                        self._ai_min_score = min(90, self._ai_min_score + 5)
+                        new_buy = new_buy * 0.5
+                        mode_str += " [Self-Correction: Tightening Risk 🛡]"
+                    elif own_win_rate >= 0.60:
+                        # Outperforming -> reduce safety slightly, increase size
+                        self._ai_min_score = max(65, self._ai_min_score - 5)
+                        new_buy = new_buy * 1.5
+                        mode_str += " [Self-Correction: Aggressive Scaling 🌋]"
+                
+                # Update config properties if they differ from current settings
+                if new_buy != current_buy or new_stop != current_stop:
+                    object.__setattr__(self._config.jupiter, "buy_amount_sol", new_buy)
+                    object.__setattr__(self._config.strategy, "trailing_stop_pct", new_stop)
+                    self._save_state()
+                    
+                    logger.info(f"🧠 AGI AUTO-ADJUSTED RISK: Shifted to {mode_str}. Size: {new_buy} SOL, Trailing Stop: {new_stop*100:.0f}%")
+                    if self._telegram:
+                        await self._telegram.send_message(
+                            f"🧠 <b>AGI Sentiment Shift & Self-Correction</b>\n"
+                            f"Evaluated last 50 launches: <code>{success_rate*100:.1f}%</code> success rate.\n"
+                            f"Autonomously shifted bot mode to **{mode_str}**.\n"
+                            f"Default Snipe Size: <code>{new_buy} SOL</code>\n"
+                            f"Trailing Stop Limit: <code>{new_stop*100:.0f}%</code>\n"
+                            f"AI Filter Min Score: <code>{self._ai_min_score}</code>"
+                        )
+            except Exception as e:
+                logger.error(f"Error in AGI sentiment adapter loop: {e}")
+
+    async def _missed_entry_tracker_loop(self):
+        """AGI Missed Entry Regret Engine.
+        Tracks every runner alert that was sent but not bought.
+        Monitors their price and fires a TG regret notification
+        at 5x, 10x, and 100x milestones so you feel the miss.
+        Tokens are tracked for up to 24 hours then discarded.
+        """
+        logger.info("AGI Missed Entry Tracker started — watching for regret opportunities.")
+        MILESTONES = [
+            (5.0,   "5x",   "⚠️"),
+            (10.0,  "10x",  "💀"),
+            (100.0, "100x", "🚀"),
+        ]
+        MAX_AGE_SECS = 86400  # 24 hours
+        POLL_INTERVAL = 300   # 5 minutes
+
+        while self._running:
+            await asyncio.sleep(POLL_INTERVAL)
+            if not self._missed_runners:
+                continue
+            try:
+                now = time()
+                stale = [mint for mint, info in self._missed_runners.items()
+                         if now - info['alert_time'] > MAX_AGE_SECS]
+                for mint in stale:
+                    self._missed_runners.pop(mint, None)
+
+                for mint, info in list(self._missed_runners.items()):
+                    # Skip if the user ended up buying it manually
+                    if mint in self._positions:
+                        self._missed_runners.pop(mint, None)
+                        continue
+
+                    alert_price = info.get('alert_price_usd', 0.0)
+                    if alert_price <= 0:
+                        continue
+
+                    # Fetch current price
+                    current_price = 0.0
+                    try:
+                        metrics = await self._dexscreener.get_price_metrics(mint)
+                        if metrics:
+                            current_price = float(metrics.get('market_cap_usd') or 0.0)
+                        if not current_price:
+                            gecko = await self._gecko.get_token_info(mint)
+                            if gecko:
+                                current_price = float(gecko.get('fdv_usd') or 0.0)
+                        if not current_price:
+                            # Last resort: pump.fun bonding curve
+                            sol_price = self._telegram._sol_price if self._telegram else 150.0
+                            current_price = await self._pump_client.get_bonding_curve_mcap(mint, sol_price)
+                    except Exception:
+                        continue
+
+                    if current_price <= 0:
+                        continue
+
+                    gain = current_price / alert_price
+                    elapsed_mins = int((now - info['alert_time']) / 60)
+
+                    for threshold, label, emoji in MILESTONES:
+                        if gain >= threshold and label not in info['notified_milestones']:
+                            info['notified_milestones'].add(label)
+                            missed_sol = (current_price - alert_price) / (self._telegram._sol_price if self._telegram and self._telegram._sol_price > 0 else 150.0)
+                            msg = (
+                                f"{emoji} <b>YOU MISSED {label} PROFIT! {emoji}</b>\n\n"
+                                f"Token: <b>{info['symbol']}</b> ({info['name']})\n"
+                                f"Mint: <code>{mint}</code>\n"
+                                f"Alert Price: <code>${alert_price:,.0f} MCAP</code>\n"
+                                f"Current Price: <code>${current_price:,.0f} MCAP</code>\n"
+                                f"Gain: <code>{gain:.1f}x</code> in <code>{elapsed_mins} min</code>\n"
+                                f"Missed Profit (1 SOL): <code>≈ {gain - 1:.1f} SOL</code>\n"
+                                f"Missed Profit (5 SOL): <code>≈ {(gain - 1) * 5:.1f} SOL</code>\n\n"
+                                f"📚 Saved to /brain for AGI learning.\n"
+                                f"👉 <a href='https://pump.fun/{mint}'>View on pump.fun</a>"
+                            )
+                            if self._telegram:
+                                await self._telegram.send_message(msg)
+                            logger.warning(f"MISSED ENTRY: {info['symbol']} hit {label} ({gain:.1f}x) — entry was ${alert_price:,.0f}")
+
+                            # Log to brain_events table
+                            try:
+                                import uuid
+                                await self._db._execute_write(
+                                    "INSERT INTO brain_events (event_id, command, details, timestamp) VALUES (?, ?, ?, ?)",
+                                    (str(uuid.uuid4()), 'missed_entry',
+                                     f"{info['symbol']}|{mint}|{label}|{gain:.2f}x|${current_price:,.0f}",
+                                     now)
+                                )
+                            except Exception:
+                                pass
+
+            except Exception as e:
+                logger.error(f"Error in missed entry tracker: {e}")
+
+    async def execute_manual_buy(self, mint: str, amount: float):
+        """Executes a manual buy triggered from Telegram UI buttons."""
+        logger.info(f"Manual buy triggered via TG button for {mint} | Size: {amount} SOL")
+        try:
+            meta = await self._pump_client.get_token_metadata(mint)
+            symbol = meta.get("symbol", "MANUAL")
+            token = TokenEvent(
+                mint=mint,
+                name=meta.get("name", "Unknown"),
+                symbol=symbol,
+                creator=meta.get("creator", "unknown"),
+                market_cap_usd=float(meta.get("market_cap_sol", 0)) * self._telegram._sol_price,
+                liquidity_sol=float(meta.get("liquidity_sol", 0)),
+                timestamp=time()
+            )
+            # Execute buy using client
+            await self._execute_snipe(token, amount, f"TG Manual Button")
+        except Exception as e:
+            logger.error(f"Error executing manual buy: {e}")
+            if self._telegram:
+                await self._telegram.send_message(f"❌ <b>Manual Buy Failed:</b> <code>{e}</code>")
+
+    async def _retrain_brain_weights(self):
+        """Autonomously adapts AGI parameters after every 100 completed trades."""
+        logger.info("🧠 AGI BRAIN: Retraining weights and adjusting parameters...")
+        try:
+            rows = await self._db._execute_read(
+                "SELECT * FROM positions WHERE status = 'closed' ORDER BY timestamp DESC LIMIT 100"
+            )
+            trades = [dict(r) for r in rows]
+            if len(trades) < 10:
+                logger.info("AGI BRAIN: Not enough completed trades for retraining yet.")
+                return
+                
+            wins = [t for t in trades if (t.get('pnl') or 0.0) > 0.0]
+            win_rate = len(wins) / len(trades)
+            
+            # Adapt thresholds
+            old_ai_threshold = self._ai_min_score
+            if win_rate < 0.35:
+                # Tighten rules to avoid losses
+                self._ai_min_score = min(90, self._ai_min_score + 5)
+            elif win_rate >= 0.55:
+                # Relax rules to capture more opportunities
+                self._ai_min_score = max(65, self._ai_min_score - 5)
+                
+            # Log to Telegram
+            if self._telegram:
+                await self._telegram.send_message(
+                    f"🧠 <b>SOLBOT AGI BRAIN V4 RETRAINED</b>\n\n"
+                    f"Processed Trades: <code>{len(trades)}</code>\n"
+                    f"Win Rate: <code>{win_rate*100:.1f}%</code>\n"
+                    f"AI Threshold: <code>{old_ai_threshold}</code> ➔ <code>{self._ai_min_score}</code>"
+                )
+        except Exception as e:
+            logger.error(f"Error retraining brain weights: {e}")
 
 async def run_bot():
     config = BotConfig()

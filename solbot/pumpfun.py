@@ -102,7 +102,7 @@ class PumpFunMonitor:
         ws.send(json.dumps({"method": "subscribeNewToken"}))
         
         # Correct subscription for all trades on PumpPortal
-        ws.send(json.dumps({"method": "subscribeTrade", "keys": []}))
+        ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": []}))
         
         # Reset backoff on successful connection
         self._reconnect_delay = 1.0

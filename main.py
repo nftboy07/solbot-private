@@ -42,23 +42,20 @@ async def main():
     
     feature_store = FeatureStore(redis, db)
     
-    # 4. Bot Instance (Mocking enough for the controller)
-    class Solbot:
-        def __init__(self):
-            self._paused = False
-            self._positions = {}
-            self._event_store = event_store
-            self._telemetry = telemetry
-            self._creator_genome = creator_genome
-            self._wallet_graph = wallet_graph
-            self._feature_store = feature_store
-            self._rpc_pool = rpc_pool
-
-    bot = Solbot()
+    # 4. Real Bot Instance
+    from solbot.bot import Solbot
+    bot = Solbot(
+        config,
+        event_store=event_store,
+        telemetry=telemetry,
+        creator_genome=creator_genome,
+        wallet_graph=wallet_graph,
+        feature_store=feature_store,
+        rpc_pool=rpc_pool
+    )
     
-    # 5. Telegram Controller (V3 Redesign)
-    tg_controller = TelegramController(config.telegram, bot)
-    await tg_controller.start()
+    # 5. Start the Real Bot
+    await bot.start()
     
     # 6. Keep Alive
     stop_event = asyncio.Event()
@@ -74,6 +71,7 @@ async def main():
     await stop_event.wait()
     
     # 7. Cleanup
+    await bot.stop()
     await event_store.stop()
     await telemetry.stop()
     logger.info("Solbot V3 Shutdown Complete.")
@@ -83,3 +81,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+

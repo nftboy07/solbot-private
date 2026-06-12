@@ -20,6 +20,37 @@ class Database:
             PRAGMA synchronous=NORMAL;
         """)
         await self._create_tables()
+        # Run column migrations for creators
+        for col, col_type in [
+            ("median_roi", "REAL DEFAULT 0.0"),
+            ("survival_time_avg", "REAL DEFAULT 0.0"),
+            ("whale_participation", "REAL DEFAULT 0.0"),
+            ("liquidity_quality", "REAL DEFAULT 0.0"),
+            ("creator_score", "REAL DEFAULT 50.0")
+        ]:
+            try:
+                await self._execute_write(f"ALTER TABLE creators ADD COLUMN {col} {col_type}")
+                logger.info(f"Added column {col} to creators table successfully.")
+            except Exception as e:
+                # Column likely already exists
+                logger.debug(f"Column {col} already exists or failed to add: {e}")
+
+        # Run column migrations for wallets
+        for col, col_type in [
+            ("avg_hold_time", "REAL DEFAULT 0.0"),
+            ("avg_multiple", "REAL DEFAULT 0.0"),
+            ("rug_pct", "REAL DEFAULT 0.0"),
+            ("avg_entry_mcap", "REAL DEFAULT 0.0"),
+            ("avg_exit_mcap", "REAL DEFAULT 0.0"),
+            ("wallet_score", "REAL DEFAULT 0.0"),
+            ("weight", "REAL DEFAULT 0.0")
+        ]:
+            try:
+                await self._execute_write(f"ALTER TABLE wallets ADD COLUMN {col} {col_type}")
+                logger.info(f"Added column {col} to wallets table successfully.")
+            except Exception as e:
+                # Column likely already exists
+                logger.debug(f"Column {col} already exists or failed to add: {e}")
 
     async def _execute_read(self, query: str, params: tuple = ()) -> List[sqlite3.Row]:
         return await self._loop.run_in_executor(
@@ -72,7 +103,12 @@ class Database:
             token_count INTEGER DEFAULT 0,
             avg_ath REAL DEFAULT 0.0,
             rug_count INTEGER DEFAULT 0,
-            blacklist_score REAL DEFAULT 0.0
+            blacklist_score REAL DEFAULT 0.0,
+            median_roi REAL DEFAULT 0.0,
+            survival_time_avg REAL DEFAULT 0.0,
+            whale_participation REAL DEFAULT 0.0,
+            liquidity_quality REAL DEFAULT 0.0,
+            creator_score REAL DEFAULT 50.0
         );
 
         CREATE TABLE IF NOT EXISTS positions (
@@ -89,7 +125,14 @@ class Database:
             label TEXT,
             tier TEXT,
             win_rate REAL DEFAULT 0.0,
-            historical_roi REAL DEFAULT 0.0
+            historical_roi REAL DEFAULT 0.0,
+            avg_hold_time REAL DEFAULT 0.0,
+            avg_multiple REAL DEFAULT 0.0,
+            rug_pct REAL DEFAULT 0.0,
+            avg_entry_mcap REAL DEFAULT 0.0,
+            avg_exit_mcap REAL DEFAULT 0.0,
+            wallet_score REAL DEFAULT 0.0,
+            weight REAL DEFAULT 0.0
         );
 
         CREATE TABLE IF NOT EXISTS trade_events (
@@ -150,6 +193,13 @@ class Database:
             trade_id TEXT,
             signal_id TEXT,
             serialized_features TEXT,
+            timestamp REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS brain_events (
+            event_id TEXT PRIMARY KEY,
+            command TEXT,
+            details TEXT,
             timestamp REAL
         );
         """

@@ -26,7 +26,8 @@ class SolanaConfig:
 class PumpFunConfig:
     ws_url: str = field(default_factory=lambda: os.getenv("PUMPFUN_WS_URL", "wss://pumpportal.fun/api/data"))
     min_liquidity_sol: float = field(default_factory=lambda: float(os.getenv("MIN_LIQUIDITY_SOL", "5.0")))
-    min_market_cap_usd: float = field(default_factory=lambda: float(os.getenv("MIN_MARKET_CAP_USD", "10000")))
+    min_market_cap_usd: float = field(default_factory=lambda: float(os.getenv("MIN_MARKET_CAP_USD", "100000")))
+    max_market_cap_usd: float = field(default_factory=lambda: float(os.getenv("MAX_MARKET_CAP_USD", "1000000")))
     max_token_age_seconds: int = field(default_factory=lambda: int(os.getenv("MAX_TOKEN_AGE_SECONDS", "60")))
 
 
@@ -44,9 +45,10 @@ class StrategyConfig:
     mode: BotMode = BotMode.NORMAL
     min_confidence_score: int = 75
     tp_targets: list[dict] = field(default_factory=lambda: [
-        {"multiplier": 1.5, "sell_pct": 0.25},
-        {"multiplier": 2.0, "sell_pct": 0.25},
-        {"multiplier": 3.0, "sell_pct": 0.25},
+        {"multiplier": 1.3, "sell_pct": 0.25},
+        {"multiplier": 1.6, "sell_pct": 0.33},
+        {"multiplier": 2.0, "sell_pct": 0.50},
+        {"multiplier": 3.0, "sell_pct": 1.00},
     ])
     trailing_stop_pct: float = 0.25
     stop_loss_pct: float = 0.20
@@ -55,6 +57,7 @@ class StrategyConfig:
     dev_dump_score_threshold: float = -0.2
     momentum_timeout_minutes: int = 30
     mcap_tp_target_usd: float = field(default_factory=lambda: float(os.getenv("MCAP_TP_TARGET_USD", "200000")))
+    max_active_positions: int = field(default_factory=lambda: int(os.getenv("MAX_ACTIVE_POSITIONS", "100")))
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,7 @@ class AIConfig:
     aws_bearer_token_bedrock: str = field(default_factory=lambda: os.getenv("AWS_BEARER_TOKEN_BEDROCK", ""))
     aws_region: str = field(default_factory=lambda: os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "ap-south-1")))
     bedrock_model_id: str = field(default_factory=lambda: os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0"))
+    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
 
 
 @dataclass(frozen=True)

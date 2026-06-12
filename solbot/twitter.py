@@ -19,6 +19,7 @@ class TwitterMonitor:
         self._config = config
         self._bot = bot_instance
         self._handles: Set[str] = set()
+        self._default_handles = ["blknoiz06", "hunterbiden", "weremeow", "solana_daily", "crypto_bitlord"]
         self._last_seen_ids: Dict[str, str] = {}
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
@@ -36,6 +37,11 @@ class TwitterMonitor:
         self._running = True
         timeout = aiohttp.ClientTimeout(total=15)
         self._session = aiohttp.ClientSession(timeout=timeout)
+        
+        # Auto-track default KOL handles
+        for h in self._default_handles:
+            self.add_handle(h)
+            
         asyncio.create_task(self._poll_loop())
         logger.info(f"Twitter Monitor started in {self._mode} mode.")
 

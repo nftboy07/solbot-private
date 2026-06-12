@@ -26,3 +26,7 @@ Thumbs.db
 
 # Project Specific
 data/state.json
+*.session
+*.session.backup
+*.db
+
