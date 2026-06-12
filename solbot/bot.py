@@ -928,12 +928,6 @@ class Solbot:
                     self._blacklisted_wallets.add(creator)
                     self._save_state()
                     logger.warning(f"🚨 BRAIN AUTO-BLACKLISTED RUGGER DEPLOYER: {creator} (Rugs: {rug_count})")
-                    if self._telegram:
-                        await self._telegram.send_message(
-                            f"🚨 <b>Brain Auto-Blacklist</b>\n"
-                            f"Deployer <code>{creator}</code> has rugged <code>{rug_count}</code> times.\n"
-                            f"Future launches from this creator will be ignored."
-                        )
         except Exception as e:
             logger.error(f"Error handling detected rug: {e}")
 
@@ -957,12 +951,6 @@ class Solbot:
                             self._kol_tracker.add_wallet(creator, score.alias)
                         self._save_state()
                         logger.info(f"💎 BRAIN AUTO-ADDED SMART WALLET: {creator} (ATH: ${peak_mcap:,.0f})")
-                        if self._telegram:
-                            await self._telegram.send_message(
-                                f"💎 <b>Brain Auto-Smart Wallet</b>\n"
-                                f"Deployer <code>{creator}</code> successfully launched a token to <code>${peak_mcap:,.0f} MCAP</code>.\n"
-                                f"Now auto-following this smart wallet."
-                            )
         except Exception as e:
             logger.error(f"Error handling detected runner: {e}")
 
@@ -1034,12 +1022,6 @@ class Solbot:
                             self._kol_tracker.add_wallet(addr, score.alias)
                         
                         logger.info(f"🚀 DAILY SCANNER AUTO-PROMOTED WALLET TO SMART WALLET: {addr} (Win Rate: {win_rate*100:.1f}%, ROI: {roi:.2f} SOL)")
-                        if self._telegram:
-                            await self._telegram.send_message(
-                                f"🚀 <b>Daily Scanner Auto-Promotion</b>\n"
-                                f"Wallet <code>{addr}</code> has achieved <code>{win_rate*100:.1f}%</code> win rate and <code>+{roi:.2f} SOL</code> profit.\n"
-                                f"Promoted to **Smart Wallet** & auto-copying enabled!"
-                            )
             except Exception as e:
                 logger.error(f"Error in daily wallet scanner loop: {e}")
 
