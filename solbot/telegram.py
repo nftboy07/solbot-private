@@ -239,6 +239,13 @@ class TelegramController:
                     except Exception as e:
                         logger.error(f"Callback buy error: {e}")
                         await event.answer(f"Error: {e}")
+            elif data.startswith("brain_"):
+                try:
+                    action = data.split("_", 1)[1]
+                    await self._handle_brain_callback(event, action)
+                except Exception as e:
+                    logger.error(f"Callback brain error: {e}")
+                    await event.answer(f"Error: {e}")
 
     # --- Command Implementations ---
 
@@ -380,94 +387,275 @@ class TelegramController:
                 await event.reply("🤖 <b>AI Filter: DISABLED</b>")
                 return
             elif cmd == "scan":
-                await event.reply("🧠 <b>Brain Engine: Analyzing pump.fun launch history...</b>\nThis will take a moment.")
-                
-                db_ruggers = []
-                db_smart = []
-                db_wallets = []
-                total_ticks = 0
-                db = getattr(self._bot, '_db', None) or getattr(self._bot, 'db', None)
-                if db:
-                    try:
-                        # Count total launch ticks tracked
-                        ticks_count = await db._execute_read("SELECT count(*) FROM ticks")
-                        if ticks_count:
-                            total_ticks = ticks_count[0][0]
-                        
-                        # Find ruggers (creators with at least 1 launch that died below $15k)
-                        rows = await db._execute_read(
-                            "SELECT creator, COUNT(*) as rugs FROM ticks WHERE exit_marketcap < 15000.0 OR max_marketcap < 15000.0 GROUP BY creator"
-                        )
-                        db_ruggers = [row['creator'] for row in rows if row['creator'] and row['creator'] != "unknown"]
-                        
-                        # Find smart developers (creators with at least 1 launch that reached >= $100k)
-                        rows = await db._execute_read(
-                            "SELECT creator FROM ticks WHERE exit_marketcap >= 100000.0 OR max_marketcap >= 100000.0 GROUP BY creator"
-                        )
-                        db_smart = [row['creator'] for row in rows if row['creator'] and row['creator'] != "unknown"]
-                        
-                        # Find profitable wallets
-                        rows = await db._execute_read(
-                            "SELECT address FROM wallets WHERE win_rate >= 0.7 AND historical_roi >= 0.5"
-                        )
-                        db_wallets = [row['address'] for row in rows if row['address']]
-                    except Exception as e:
-                        logger.error(f"Error reading ticks/wallets for brain analysis: {e}")
-                
-                all_ruggers = list(set(db_ruggers))
-                all_smart = list(set(db_smart + db_wallets))
-                
-                # Apply to bot state
-                added_blacklist = 0
-                added_smart = 0
-                
-                if hasattr(self._bot, '_blacklisted_wallets'):
-                    for addr in all_ruggers:
-                        if addr not in self._bot._blacklisted_wallets:
-                            self._bot._blacklisted_wallets.add(addr)
-                            added_blacklist += 1
-                            
-                if hasattr(self._bot, '_filter') and self._bot._filter is not None:
-                    for addr in all_smart:
-                        if addr not in self._bot._filter._copy_targets:
-                            self._bot._filter.add_copy_target(addr)
-                            # Initialize wallet score
-                            from solbot.filters import WalletScore
-                            score = WalletScore(address=addr, alias=f"Smart_Maker_{addr[:4]}", score=85, total_trades=10, win_rate=0.8)
-                            self._bot._filter._wallet_scores[addr] = score
-                            if hasattr(self._bot, '_kol_tracker') and self._bot._kol_tracker is not None:
-                                self._bot._kol_tracker.add_wallet(addr, score.alias)
-                            added_smart += 1
-                
-                if hasattr(self._bot, '_save_state'):
-                    self._bot._save_state()
-                    
-                msg = (f"🧠 <b>BRAIN REAL-DATA ANALYSIS COMPLETE</b>\n\n"
-                       f"Tokens Scanned: <code>{total_ticks}</code> (real-time launches)\n"
-                       f"Ruggers Identified: <code>{len(all_ruggers)}</code>\n"
-                       f"Profit Makers Identified: <code>{len(all_smart)}</code>\n\n"
-                       f"➕ Added to Blacklist: <code>{added_blacklist}</code> new ruggers\n"
-                       f"➕ Added to Smart Wallets: <code>{added_smart}</code> new profit makers\n\n"
-                       f"Total Blacklisted: <code>{len(getattr(self._bot, '_blacklisted_wallets', []))}</code>\n"
-                       f"Total Smart Wallets: <code>{len(self._bot._filter._copy_targets) if (hasattr(self._bot, '_filter') and self._bot._filter) else 0}</code>\n"
-                       f"Strategy: <b>Auto-buy above 100k Mcap, exit 100% at TP Targets</b>")
-                await event.reply(msg)
+                await self._run_brain_scan_via_callback(event)
+                return
+            elif cmd == "retrain":
+                await self._run_brain_retrain_via_callback(event)
                 return
 
-        blacklisted_count = len(getattr(self._bot, '_blacklisted_wallets', []))
-        smart_count = len(self._bot._filter._copy_targets) if (hasattr(self._bot, '_filter') and self._bot._filter) else 0
-        ai_min = getattr(self._bot, '_ai_min_score', 75)
+        msg, buttons = await self._get_brain_dashboard_content()
+        await event.reply(msg, buttons=buttons, parse_mode='html')
+
+    async def _get_brain_dashboard_content(self) -> tuple[str, list]:
+        db = getattr(self._bot, '_db', None)
         
+        # 1. Fetch recent launch success rate
+        success_rate = 0.0
+        scanned_count = 0
+        if db:
+            try:
+                rows = await db._execute_read(
+                    "SELECT max_marketcap, exit_marketcap FROM ticks ORDER BY timestamp DESC LIMIT 50"
+                )
+                if rows:
+                    scanned_count = len(rows)
+                    runners = 0
+                    for r in rows:
+                        max_cap = r.get('max_marketcap') or 0.0
+                        exit_cap = r.get('exit_marketcap') or 0.0
+                        if max(max_cap, exit_cap) >= 50000.0:
+                            runners += 1
+                    success_rate = (runners / len(rows)) * 100.0
+            except Exception as e:
+                logger.error(f"Error calculating dashboard success rate: {e}")
+                
+        # 2. Fetch win rate and closed trades
+        total_closed = 0
+        win_rate = 0.0
+        if db:
+            try:
+                rows = await db._execute_read(
+                    "SELECT pnl FROM positions WHERE status = 'closed'"
+                )
+                if rows:
+                    total_closed = len(rows)
+                    wins = sum(1 for r in rows if (r.get('pnl') or 0.0) > 0.0)
+                    win_rate = (wins / total_closed) * 100.0
+            except Exception as e:
+                logger.error(f"Error calculating dashboard win rate: {e}")
+                
+        # 3. Fetch total event count
+        total_events = 0
+        if db:
+            try:
+                rows = await db._execute_read("SELECT COUNT(*) as count FROM brain_events")
+                if rows:
+                    total_events = rows[0]['count']
+            except Exception as e:
+                logger.error(f"Error counting brain events: {e}")
+
+        # State metrics
         ai_enabled = getattr(self._bot, '_ai_enabled', True)
-        msg = (f"<b>🤖 MODEL INTELLIGENCE (BRAIN)</b>\n"
-               f"Active Model: <code>Solbot_V3_Transformer_L4</code>\n"
-               f"AI Filter: <code>{'ON' if ai_enabled else 'OFF'}</code>\n"
-               f"AI Min Score: <code>{ai_min}</code>\n"
-               f"Active Smart Wallets: <code>{smart_count}</code>\n"
-               f"Active Blacklisted Ruggers: <code>{blacklisted_count}</code>\n\n"
-               f"Commands: <code>/model <on|off></code>\n"
-               f"Run <code>/brain scan</code> to analyze pump.fun launch history and auto-configure blacklist/smart wallets.")
-        await event.reply(msg)
+        ai_min = getattr(self._bot, '_ai_min_score', 75)
+        smart_count = len(self._bot._filter._copy_targets) if (hasattr(self._bot, '_filter') and self._bot._filter) else 0
+        blacklisted_count = len(getattr(self._bot, '_blacklisted_wallets', []))
+        missed_count = len(getattr(self._bot, '_missed_runners', {}))
+        
+        # Sizing and stop parameters
+        buy_amount = self._bot._config.jupiter.buy_amount_sol
+        stop_pct = self._bot._config.strategy.trailing_stop_pct * 100.0
+        
+        # Classify preset name based on settings
+        if buy_amount == 0.01 and stop_pct == 5.0 and ai_min == 85:
+            preset_name = "SAFE 🛡"
+        elif buy_amount == 0.10 and stop_pct == 10.0 and ai_min == 75:
+            preset_name = "NORMAL ⚖️"
+        elif buy_amount == 0.50 and stop_pct == 20.0 and ai_min == 70:
+            preset_name = "DEGEN 🌋"
+        else:
+            preset_name = "DYNAMIC 🧠"
+
+        msg = (
+            "🧠 <b>SOLBOT AGI COGNITIVE DASHBOARD (BRAIN)</b>\n\n"
+            "🤖 <b>MODEL STATUS</b>\n"
+            f"  Model Endpoint: <code>gemini-2.5-flash</code>\n"
+            f"  AI Safety Filter: <code>{'🟢 ENABLED' if ai_enabled else '🔴 DISABLED'}</code>\n"
+            f"  Min Accept Score: <code>{ai_min}</code> (Mode: <code>{preset_name}</code>)\n\n"
+            "📉 <b>MARKET SENTIMENT & RISK</b>\n"
+            f"  Recent Launch Success Rate: <code>{success_rate:.1f}%</code> (Sample: {scanned_count})\n"
+            f"  Default Buy Size: <code>{buy_amount:.3f} SOL</code>\n"
+            f"  Trailing Stop-Loss: <code>{stop_pct:.1f}%</code>\n\n"
+            "🎓 <b>AUTONOMOUS LEARNING & MEMORY</b>\n"
+            f"  Total Cognitive Events: <code>{total_events}</code>\n"
+            f"  Smart Wallet Copy Targets: <code>{smart_count}</code>\n"
+            f"  Auto-Blacklisted Creators: <code>{blacklisted_count}</code>\n"
+            f"  Closed Trades Analyzed: <code>{total_closed}</code> (Own Win Rate: <code>{win_rate:.1f}%</code>)\n\n"
+            "💀 <b>REGRET LOG</b>\n"
+            f"  Active Missed Runners Tracked: <code>{missed_count}</code>\n\n"
+            "<i>Interact with the control panel below to alter parameters.</i>"
+        )
+        
+        buttons = [
+            [
+                Button.inline("🤖 Toggle AI Filter", b"brain_toggle_ai"),
+                Button.inline("🔄 Refresh Stats", b"brain_refresh")
+            ],
+            [
+                Button.inline("🛡 Preset: Safe", b"brain_preset_safe"),
+                Button.inline("⚖️ Normal", b"brain_preset_normal"),
+                Button.inline("🌋 Degen", b"brain_preset_degen")
+            ],
+            [
+                Button.inline("🔍 Run DB Scan", b"brain_scan"),
+                Button.inline("🧠 Force Retrain", b"brain_retrain")
+            ]
+        ]
+        
+        return msg, buttons
+
+    async def _handle_brain_callback(self, event, action):
+        def save():
+            if hasattr(self._bot, "_save_state"):
+                self._bot._save_state()
+
+        if action == "toggle_ai":
+            self._bot._ai_enabled = not getattr(self._bot, "_ai_enabled", True)
+            save()
+            await event.answer(f"AI Filter: {'ENABLED' if self._bot._ai_enabled else 'DISABLED'}")
+            
+        elif action == "preset_safe":
+            object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.01)
+            object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.05)
+            self._bot._ai_min_score = 85
+            save()
+            await event.answer("Applied Preset: SAFE")
+            
+        elif action == "preset_normal":
+            object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.10)
+            object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.10)
+            self._bot._ai_min_score = 75
+            save()
+            await event.answer("Applied Preset: NORMAL")
+            
+        elif action == "preset_degen":
+            object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.50)
+            object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.20)
+            self._bot._ai_min_score = 70
+            save()
+            await event.answer("Applied Preset: DEGEN")
+            
+        elif action == "scan":
+            await event.answer("Starting DB Scan...")
+            asyncio.create_task(self._run_brain_scan_via_callback(event))
+            return
+            
+        elif action == "retrain":
+            await event.answer("Starting Brain Retraining...")
+            asyncio.create_task(self._run_brain_retrain_via_callback(event))
+            return
+            
+        elif action == "refresh":
+            await event.answer("Dashboard Refreshed")
+
+        msg, buttons = await self._get_brain_dashboard_content()
+        await event.edit(msg, buttons=buttons, parse_mode='html')
+
+    async def _run_brain_scan_via_callback(self, event):
+        await event.edit("🧠 <b>Brain Engine: Analyzing pump.fun launch history...</b>\nThis will take a moment.", buttons=[])
+        
+        db_ruggers = []
+        db_smart = []
+        db_wallets = []
+        total_ticks = 0
+        db = getattr(self._bot, '_db', None)
+        if db:
+            try:
+                ticks_count = await db._execute_read("SELECT count(*) FROM ticks")
+                if ticks_count:
+                    total_ticks = ticks_count[0][0]
+                rows = await db._execute_read(
+                    "SELECT creator, COUNT(*) as rugs FROM ticks WHERE exit_marketcap < 15000.0 OR max_marketcap < 15000.0 GROUP BY creator"
+                )
+                db_ruggers = [row['creator'] for row in rows if row['creator'] and row['creator'] != "unknown"]
+                rows = await db._execute_read(
+                    "SELECT creator FROM ticks WHERE exit_marketcap >= 100000.0 OR max_marketcap >= 100000.0 GROUP BY creator"
+                )
+                db_smart = [row['creator'] for row in rows if row['creator'] and row['creator'] != "unknown"]
+                rows = await db._execute_read(
+                    "SELECT address FROM wallets WHERE win_rate >= 0.7 AND historical_roi >= 0.5"
+                )
+                db_wallets = [row['address'] for row in rows if row['address']]
+            except Exception as e:
+                logger.error(f"Error reading ticks/wallets for brain analysis: {e}")
+        
+        all_ruggers = list(set(db_ruggers))
+        all_smart = list(set(db_smart + db_wallets))
+        
+        added_blacklist = 0
+        added_smart = 0
+        
+        if hasattr(self._bot, '_blacklisted_wallets'):
+            for addr in all_ruggers:
+                if addr not in self._bot._blacklisted_wallets:
+                    self._bot._blacklisted_wallets.add(addr)
+                    added_blacklist += 1
+                    
+        if hasattr(self._bot, '_filter') and self._bot._filter is not None:
+            for addr in all_smart:
+                if addr not in self._bot._filter._copy_targets:
+                    self._bot._filter.add_copy_target(addr)
+                    from solbot.filters import WalletScore
+                    score = WalletScore(address=addr, alias=f"Smart_Maker_{addr[:4]}", score=85, total_trades=10, win_rate=0.8)
+                    self._bot._filter._wallet_scores[addr] = score
+                    if hasattr(self._bot, '_kol_tracker') and self._bot._kol_tracker is not None:
+                        self._bot._kol_tracker.add_wallet(addr, score.alias)
+                    added_smart += 1
+        
+        if hasattr(self._bot, '_save_state'):
+            self._bot._save_state()
+            
+        result_msg = (f"🧠 <b>BRAIN SCAN COMPLETE</b>\n\n"
+                      f"Tokens Scanned: <code>{total_ticks}</code>\n"
+                      f"➕ Added to Blacklist: <code>{added_blacklist}</code> new ruggers\n"
+                      f"➕ Added to Smart Wallets: <code>{added_smart}</code> new profit makers\n\n"
+                      f"Use the button below to return to the dashboard.")
+        
+        buttons = [[Button.inline("⬅️ Back to Dashboard", b"brain_refresh")]]
+        await event.edit(result_msg, buttons=buttons, parse_mode='html')
+
+    async def _run_brain_retrain_via_callback(self, event):
+        await event.edit("🧠 <b>Brain Engine: Retraining weights and optimizing parameters...</b>", buttons=[])
+        
+        success = False
+        details = ""
+        try:
+            db = getattr(self._bot, '_db', None)
+            if db:
+                rows = await db._execute_read(
+                    "SELECT * FROM positions WHERE status = 'closed' ORDER BY timestamp DESC LIMIT 100"
+                )
+                trades = [dict(r) for r in rows]
+                if len(trades) < 10:
+                    details = f"Not enough closed trades (need at least 10, have {len(trades)})."
+                else:
+                    wins = [t for t in trades if (t.get('pnl') or 0.0) > 0.0]
+                    win_rate = len(wins) / len(trades)
+                    old_ai_threshold = self._bot._ai_min_score
+                    if win_rate < 0.35:
+                        self._bot._ai_min_score = min(90, self._bot._ai_min_score + 5)
+                    elif win_rate >= 0.55:
+                        self._bot._ai_min_score = max(65, self._bot._ai_min_score - 5)
+                    
+                    if hasattr(self._bot, '_save_state'):
+                        self._bot._save_state()
+                        
+                    success = True
+                    details = (f"Analyzed trades: <code>{len(trades)}</code>\n"
+                               f"Win Rate: <code>{win_rate*100:.1f}%</code>\n"
+                               f"AI Threshold: <code>{old_ai_threshold}</code> ➔ <code>{self._bot._ai_min_score}</code>")
+            else:
+                details = "Database connection unavailable."
+        except Exception as e:
+            logger.error(f"Error retraining weights: {e}")
+            details = f"Error: {e}"
+            
+        result_msg = (f"🧠 <b>BRAIN RETRAINING RESULT</b>\n\n"
+                      f"Status: <code>{'SUCCESS' if success else 'SKIPPED'}</code>\n"
+                      f"{details}\n\n"
+                      f"Use the button below to return to the dashboard.")
+        
+        buttons = [[Button.inline("⬅️ Back to Dashboard", b"brain_refresh")]]
+        await event.edit(result_msg, buttons=buttons, parse_mode='html')
 
     async def _cmd_creator(self, event):
         args = event.message.text.split()
