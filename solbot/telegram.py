@@ -639,10 +639,18 @@ class TelegramController:
         if hasattr(self._bot, '_save_state'):
             self._bot._save_state()
             
-        result_msg = (f"🧠 <b>BRAIN SCAN COMPLETE</b>\n\n"
-                      f"Tokens Scanned: <code>{total_ticks}</code>\n"
+        total_blacklisted = len(self._bot._blacklisted_wallets) if hasattr(self._bot, '_blacklisted_wallets') else 0
+        total_smart_wallets = len(self._bot._filter._copy_targets) if (hasattr(self._bot, '_filter') and self._bot._filter) else 0
+
+        result_msg = (f"🧠 <b>BRAIN REAL-DATA ANALYSIS COMPLETE</b>\n\n"
+                      f"Tokens Scanned: <code>{total_ticks}</code> (real-time launches)\n"
+                      f"Ruggers Identified: <code>{len(all_ruggers)}</code>\n"
+                      f"Profit Makers Identified: <code>{len(all_smart)}</code>\n\n"
                       f"➕ Added to Blacklist: <code>{added_blacklist}</code> new ruggers\n"
                       f"➕ Added to Smart Wallets: <code>{added_smart}</code> new profit makers\n\n"
+                      f"Total Blacklisted: <code>{total_blacklisted}</code>\n"
+                      f"Total Smart Wallets: <code>{total_smart_wallets}</code>\n"
+                      f"Strategy: <b>Auto-buy above 100k Mcap, exit 100% at TP Targets</b>\n\n"
                       f"Use the button below to return to the dashboard.")
         
         buttons = [[Button.inline("⬅️ Back to Dashboard", b"brain_refresh")]]
