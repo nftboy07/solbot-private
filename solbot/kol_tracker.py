@@ -45,6 +45,34 @@ class KOLTracker:
             kol_count = len(self.active_buys[token])
             self.logger.info(f"KOL {kol_name} bought {token} with {amount} SOL. Peak holdings: {self.kol_holdings[token][wallet]} SOL. Total KOLs: {kol_count}")
 
+            # Send Telegram alert for copy trade
+            try:
+                from telethon import Button
+                buttons = [
+                    [
+                        Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{token}"),
+                        Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{token}")
+                    ],
+                    [
+                        Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{token}"),
+                        Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{token}")
+                    ]
+                ]
+                msg = (
+                    f"📢 <b>KOL BUY DETECTED</b>\n\n"
+                    f"👤 KOL: <b>{kol_name}</b>\n"
+                    f"🔑 Address: <code>{wallet}</code>\n"
+                    f"🪙 Token: <code>{token}</code>\n"
+                    f"💵 Amount: <code>{amount:.3f} SOL</code>\n"
+                    f"👥 Active KOLs holding: <code>{kol_count}</code>\n\n"
+                    f"👉 <a href='https://pump.fun/{token}'>pump.fun</a> | <a href='https://kolscan.io/trader/{wallet}'>kolscan.io</a>\n\n"
+                    f"<i>Tap a button below to copy trade instantly:</i>"
+                )
+                if hasattr(bot_instance, '_telegram') and bot_instance._telegram:
+                    asyncio.create_task(bot_instance._telegram.send_message(msg, buttons=buttons))
+            except Exception as e:
+                self.logger.error(f"Failed to send KOL buy Telegram alert: {e}")
+
             # Trigger when threshold reached
             if kol_count >= self.threshold:
                 self.logger.warning(f"COORDINATED KOL BUY DETECTED: {kol_count} KOLs in {token}. Executing copy-trade.")
@@ -77,6 +105,22 @@ class KOLTracker:
                     if token in bot_instance._positions:
                         pos = bot_instance._positions[token]
                         await bot_instance._exit_position(pos, reason_msg, 1.0)
+
+                    # Send Telegram alert for KOL exit
+                    try:
+                        exit_msg = (
+                            f"🔔 <b>KOL EXIT DETECTED</b>\n\n"
+                            f"👤 KOL: <b>{kol_name}</b>\n"
+                            f"🔑 Address: <code>{wallet}</code>\n"
+                            f"🪙 Token: <code>{token}</code>\n"
+                            f"📉 Sold Amount: <code>{amount:.3f} SOL</code> (Peak was <code>{peak_bal:.3f} SOL</code>)\n"
+                            f"📝 Reason: <code>{reason_msg}</code>\n\n"
+                            f"👉 <a href='https://pump.fun/{token}'>pump.fun</a> | <a href='https://kolscan.io/trader/{wallet}'>kolscan.io</a>"
+                        )
+                        if hasattr(bot_instance, '_telegram') and bot_instance._telegram:
+                            asyncio.create_task(bot_instance._telegram.send_message(exit_msg))
+                    except Exception as e:
+                        self.logger.error(f"Failed to send KOL exit Telegram alert: {e}")
                         
                     # Cleanup tracking
                     self.active_buys[token].discard(wallet)
