@@ -1423,13 +1423,18 @@ class Solbot:
         while self._running:
             try:
                 # 1. Fetch Jito tip estimation
-                url = "https://mainnet.block-engine.jito.wtf/api/v1/tips"
+                url = "https://bundles.jito.wtf/api/v1/bundles/tip_floor"
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, timeout=5) as resp:
                         if resp.status == 200:
                             tips_data = await resp.json()
+                            tip_info = {}
                             if isinstance(tips_data, list) and len(tips_data) > 0:
                                 tip_info = tips_data[0]
+                            elif isinstance(tips_data, dict):
+                                tip_info = tips_data
+                                
+                            if tip_info:
                                 p50 = float(tip_info.get("landed_tips_50th_percentile", 0.001))
                                 p75 = float(tip_info.get("landed_tips_75th_percentile", 0.002))
                                 p95 = float(tip_info.get("landed_tips_95th_percentile", 0.005))
