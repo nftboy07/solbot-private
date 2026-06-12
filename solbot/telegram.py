@@ -224,6 +224,10 @@ class TelegramController:
         async def missed_handler(event):
             await self._cmd_missed(event)
 
+        @self._client.on(events.NewMessage(pattern='/dailyrunner'))
+        async def dailyrunner_handler(event):
+            await self._cmd_dailyrunner(event)
+
         @self._client.on(events.CallbackQuery)
         async def callback_handler(event):
             data = event.data.decode("utf-8")
@@ -283,6 +287,7 @@ class TelegramController:
             "  /modelmode safe|normal|degen — Set AI min score threshold\n\n"
             "<b>📡 DATA & SIGNALS</b>\n"
             "  /signals — Active signals from last 24h\n"
+            "  /dailyrunner — View active daily runner candidates\n"
             "  /feature — Feature store status\n\n"
             "<b>💼 OPERATIONS & PORTFOLIO</b>\n"
             "  /portfolio or /positions or /history or /pnl — Full portfolio\n"
@@ -1331,6 +1336,43 @@ class TelegramController:
             if len(lines) > 10:  # Cap at 10 tokens per reply
                 lines.append(f"... and {len(missed) - 10} more.")
                 break
+        await event.reply("\n".join(lines), parse_mode='html', link_preview=False)
+
+    async def _cmd_dailyrunner(self, event):
+        await self.log_brain_event('dailyrunner', 'Daily runner list reviewed')
+        daily_runners = getattr(self._bot, '_daily_runners', {})
+        import time
+        now = time.time()
+        
+        recent_runners = {
+            m: info for m, info in daily_runners.items()
+            if now - info.get('detected_time', now) < 86400
+        }
+        
+        if not recent_runners:
+            await event.reply("🏃‍♂️ <b>DAILY RUNNER CANDIDATES</b>\nNo daily runner candidates detected in the last 24h.")
+            return
+            
+        lines = ["🏃‍♂️ <b>ACTIVE DAILY RUNNERS (LAST 24H)</b>\n"]
+        for mint, info in sorted(recent_runners.items(), key=lambda x: x[1].get('detected_time', 0), reverse=True):
+            age_secs = now - info.get('detected_time', now)
+            if age_secs < 60:
+                age_str = f"{int(age_secs)}s ago"
+            elif age_secs < 3600:
+                age_str = f"{int(age_secs / 60)}m ago"
+            else:
+                age_str = f"{int(age_secs / 3600)}h ago"
+                
+            lines.append(
+                f"• <b>{info.get('symbol', '???')}</b> | <code>{mint[:8]}</code>\n"
+                f"  Detected: <code>{age_str}</code> | Cap: <code>{info.get('mcap_sol', 0.0):.1f} SOL</code>\n"
+                f"  Big Buys: <code>{info.get('buys_count', 2)}</code>\n"
+                f"  👉 <a href='https://pump.fun/{mint}'>pump.fun</a>"
+            )
+            if len(lines) > 10:
+                lines.append(f"... and {len(recent_runners) - 10} more.")
+                break
+                
         await event.reply("\n".join(lines), parse_mode='html', link_preview=False)
 
 

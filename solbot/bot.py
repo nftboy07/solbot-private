@@ -95,6 +95,9 @@ class Solbot:
         self._risk_manager = RiskManager()
         # Missed entry tracker: mint -> {symbol, alert_price_usd, alert_time, notified_milestones}
         self._missed_runners: Dict[str, Dict] = {}
+        # Daily runners tracking state
+        self._daily_runner_buys: Dict[str, Dict] = {}
+        self._daily_runners: Dict[str, Dict] = {}
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -411,6 +414,20 @@ class Solbot:
         mcap_sol = data.get("marketCapSol")
         sol_amount = float(data.get("solAmount", 0) or 0.0)
         if not trader or not mint: return
+
+        # Daily Runner Check: Track big buys >= $1000
+        if tx_type == "buy" and hasattr(self, '_daily_runner_buys'):
+            sol_price = getattr(self._telegram, '_sol_price', 150.0)
+            usd_amount = sol_amount * sol_price
+            if usd_amount >= 1000.0:
+                if mint not in self._daily_runner_buys:
+                    self._daily_runner_buys[mint] = {'buys': [], 'notified': False}
+                self._daily_runner_buys[mint]['buys'].append((sol_amount, time()))
+                
+                # Check if we reached 2+ big buys and haven't notified yet
+                if len(self._daily_runner_buys[mint]['buys']) >= 2 and not self._daily_runner_buys[mint]['notified']:
+                    self._daily_runner_buys[mint]['notified'] = True
+                    asyncio.create_task(self._trigger_daily_runner_alert(mint, mcap_sol))
 
         # Blacklist check
         if self.is_blacklisted(trader):
@@ -953,6 +970,68 @@ class Solbot:
                         logger.info(f"💎 BRAIN AUTO-ADDED SMART WALLET: {creator} (ATH: ${peak_mcap:,.0f})")
         except Exception as e:
             logger.error(f"Error handling detected runner: {e}")
+
+    async def _trigger_daily_runner_alert(self, mint: str, mcap_sol: Optional[float] = None):
+        try:
+            # Fetch fresh metadata
+            meta = await self._pump_client.get_token_metadata(mint)
+            name = meta.get("name", "Unknown")
+            symbol = meta.get("symbol", "RUNNER")
+            creator = meta.get("creator", "unknown")
+            
+            sol_price = getattr(self._telegram, '_sol_price', 150.0)
+            
+            if mcap_sol is None:
+                mcap_sol = float(meta.get("market_cap_sol", 0.0) or 0.0)
+            mcap_usd = float(mcap_sol) * sol_price
+
+            # Save in daily runners candidates
+            self._daily_runners[mint] = {
+                'symbol': symbol,
+                'name': name,
+                'mcap_sol': mcap_sol,
+                'detected_time': time(),
+                'buys_count': len(self._daily_runner_buys.get(mint, {}).get('buys', []))
+            }
+            
+            # Register in missed entry tracker
+            self._missed_runners[mint] = {
+                'symbol': symbol,
+                'name': name,
+                'alert_price_usd': mcap_usd,
+                'alert_time': time(),
+                'notified_milestones': set()
+            }
+            self._save_state()
+
+            # Construct Telethon inline buttons
+            from telethon import Button
+            buttons = [
+                [
+                    Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{mint}"),
+                    Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{mint}")
+                ],
+                [
+                    Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{mint}"),
+                    Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{mint}")
+                ]
+            ]
+            
+            alert_msg = (
+                f"🏃‍♂️ <b>DAILY RUNNER CANDIDATE DETECTED!</b> 🏃‍♂️\n\n"
+                f"Token: <b>{symbol}</b> ({name})\n"
+                f"Mint: <code>{mint}</code>\n"
+                f"Market Cap: <code>{mcap_sol:.1f} SOL</code> (${mcap_usd:,.0f})\n"
+                f"Daily Runner Reason: <i>Detected 2+ big buys above $1000</i>\n\n"
+                f"👉 <a href='https://pump.fun/{mint}'>Buy on pump.fun</a>"
+            )
+            
+            if self._telegram:
+                await self._telegram.send_message(alert_msg, buttons=buttons)
+                
+            logger.info(f"🏃‍♂️ DAILY RUNNER DETECTED: {symbol} ({mint}) with {len(self._daily_runner_buys[mint]['buys'])} big buys.")
+        except Exception as e:
+            logger.error(f"Error triggering daily runner alert: {e}")
 
     async def _db_update_wallet_pnl(self, address: str, pnl_sol: float, is_win: int):
         """Track and update raw retail trader profit and loss statistics."""
