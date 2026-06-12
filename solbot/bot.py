@@ -105,6 +105,9 @@ class Solbot:
         self._congestion_level = "low"
         self._dynamic_priority_fee = 0.00001
         self._dynamic_jito_tip = 0.001
+        # Stalkchain / KOLscan integrations controller
+        from solbot.kols_controller import KOLsController
+        self._kols_controller = KOLsController(self)
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -200,6 +203,7 @@ class Solbot:
             logger.error(f"Failed to fetch initial wallet balance for RiskManager: {e}")
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
         await self._jupiter.start()
+        await self._kols_controller.start()
         
         # Inject bot reference into WalletGraphEngine if available
         if self._wallet_graph:
@@ -267,6 +271,7 @@ class Solbot:
     async def stop(self):
         self._running = False
         self._save_state()
+        await self._kols_controller.stop()
         if self._monitor: self._monitor.stop()
         if self._pump_client: await self._pump_client.stop()
         if self._jupiter: await self._jupiter.stop()

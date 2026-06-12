@@ -232,6 +232,10 @@ class TelegramController:
         async def kolthreshold_handler(event):
             await self._cmd_kolthreshold(event)
 
+        @self._client.on(events.NewMessage(pattern='/kols'))
+        async def kols_handler(event):
+            await self._cmd_kols(event)
+
         @self._client.on(events.CallbackQuery)
         async def callback_handler(event):
             data = event.data.decode("utf-8")
@@ -253,6 +257,13 @@ class TelegramController:
                     await self._handle_brain_callback(event, action)
                 except Exception as e:
                     logger.error(f"Callback brain error: {e}")
+                    await event.answer(f"Error: {e}")
+            elif data.startswith("kols_"):
+                try:
+                    action = data.split("_", 1)[1]
+                    await self._handle_kols_callback(event, action)
+                except Exception as e:
+                    logger.error(f"Callback kols error: {e}")
                     await event.answer(f"Error: {e}")
 
     # --- Command Implementations ---
@@ -308,6 +319,8 @@ class TelegramController:
             "  /addkol <addr> <alias> — Add a KOL wallet\n"
             "  /removekol <addr> — Remove a KOL wallet\n"
             "  /kolthreshold <num> — Set coordinated KOL mention threshold\n"
+            "  /kols — Interactive Stalkchain and KOLscan OS Panel\n"
+            "  /kols [feed|leaderboard|tokens|trends|toptokens|analytics|txs|cabal|jupiterdca|kolscan] — Run sub-query\n"
             "  /blacklist — View all blacklisted deployers\n"
             "  /blacklistdeployer <addr> — Manually blacklist deployer\n"
             "  /removeblacklist <addr> — Remove deployer from blacklist\n"
@@ -1410,6 +1423,120 @@ class TelegramController:
             await event.reply(f"🟢 <b>KOL Sentiment Threshold Updated</b>\nNew setting: <code>{val} unique sources</code>.")
         except Exception as e:
             await event.reply(f"❌ Invalid argument. Error: {e}")
+
+    async def _cmd_kols(self, event):
+        await self.log_brain_event('kols', 'KOLs/Stalkchain commands reviewed')
+        args = event.message.message.split()
+        
+        if len(args) < 2:
+            from telethon import Button
+            buttons = [
+                [
+                    Button.inline("📱 KOL Feed", b"kols_feed"),
+                    Button.inline("🏆 Leaderboard", b"kols_leaderboard")
+                ],
+                [
+                    Button.inline("📈 Top Tokens", b"kols_tokens"),
+                    Button.inline("🔥 Daily Trends", b"kols_trends")
+                ],
+                [
+                    Button.inline("🔝 Top Performers", b"kols_toptokens"),
+                    Button.inline("📊 Analytics", b"kols_analytics")
+                ],
+                [
+                    Button.inline("💸 Transactions", b"kols_txs"),
+                    Button.inline("🕵️‍♂️ Cabal Finder", b"kols_cabal")
+                ],
+                [
+                    Button.inline("🔄 Jupiter DCA", b"kols_jupiterdca")
+                ]
+            ]
+            menu_msg = (
+                "🦅 <b>SOLBOT AGI — KOLs & STALKCHAIN OS PANEL</b> 🦅\n"
+                "Access real-time smart money analytics, whale activity feeds, and Cabal discovery.\n\n"
+                "<b>Interactive Commands:</b>\n"
+                "• <code>/kols feed</code> — Real-time trade & wallet feed\n"
+                "• <code>/kols leaderboard</code> — Win-rates & profit rankings\n"
+                "• <code>/kols tokens</code> — Trending tokens among KOLs\n"
+                "• <code>/kols trends</code> — Hottest daily tokens & volume shifts\n"
+                "• <code>/kols toptokens</code> — Top performers by smart-money inflows\n"
+                "• <code>/kols analytics</code> — Token velocity & whale deep-dives\n"
+                "• <code>/kols txs</code> — Real-time transaction explorer\n"
+                "• <code>/kols cabal</code> — Coordinated wallet buy cluster spotter\n"
+                "• <code>/kols jupiterdca</code> — Jupiter DCA track & optimize\n"
+                "• <code>/kols kolscan [wallet/name]</code> — Profiles: win-rates, trades, profits\n\n"
+                "<i>Tap a button below or type a subcommand to continue.</i>"
+            )
+            await event.reply(menu_msg, buttons=buttons)
+            return
+
+        subcmd = args[1].lower()
+        ctrl = getattr(self._bot, '_kols_controller', None)
+        if not ctrl:
+            await event.reply("❌ KOLs controller not initialized.")
+            return
+
+        await event.respond(f"⏳ <b>Querying KOLs OS Engine...</b>", parse_mode='html')
+        
+        if subcmd == "feed":
+            res = await ctrl.get_kol_feed()
+        elif subcmd == "leaderboard":
+            res = await ctrl.get_kol_leaderboard()
+        elif subcmd == "tokens":
+            res = await ctrl.get_top_kol_tokens()
+        elif subcmd == "trends":
+            res = await ctrl.get_daily_trends()
+        elif subcmd == "toptokens":
+            res = await ctrl.get_top_tokens()
+        elif subcmd == "analytics":
+            res = await ctrl.get_trends_analytics()
+        elif subcmd == "txs":
+            res = await ctrl.get_transactions()
+        elif subcmd == "cabal":
+            res = await ctrl.get_cabal_finder()
+        elif subcmd == "jupiterdca":
+            res = await ctrl.get_jupiter_dca_tracker()
+        elif subcmd == "kolscan":
+            if len(args) < 3:
+                res = "🔍 <b>KOLscan Profile Query</b>\nPlease specify a wallet address or KOL name.\nExample: <code>/kols kolscan whale1</code>"
+            else:
+                wallet = " ".join(args[2:])
+                res = await ctrl.get_kolscan_info(wallet)
+        else:
+            res = f"❌ Unknown subcommand: <code>{subcmd}</code>. Type <code>/kols</code> for the main panel."
+
+        await event.reply(res, parse_mode='html', link_preview=False)
+
+    async def _handle_kols_callback(self, event, action):
+        ctrl = getattr(self._bot, '_kols_controller', None)
+        if not ctrl:
+            await event.answer("KOLs Controller not initialized.")
+            return
+
+        await event.answer("Querying KOLs OS...")
+        
+        if action == "feed":
+            res = await ctrl.get_kol_feed()
+        elif action == "leaderboard":
+            res = await ctrl.get_kol_leaderboard()
+        elif action == "tokens":
+            res = await ctrl.get_top_kol_tokens()
+        elif action == "trends":
+            res = await ctrl.get_daily_trends()
+        elif action == "toptokens":
+            res = await ctrl.get_top_tokens()
+        elif action == "analytics":
+            res = await ctrl.get_trends_analytics()
+        elif action == "txs":
+            res = await ctrl.get_transactions()
+        elif action == "cabal":
+            res = await ctrl.get_cabal_finder()
+        elif action == "jupiterdca":
+            res = await ctrl.get_jupiter_dca_tracker()
+        else:
+            res = "Unknown action."
+
+        await event.reply(res, parse_mode='html', link_preview=False)
 
     async def log_brain_event(self, command: str, details: str):
         """Log user command execution to AGI brain event log."""
