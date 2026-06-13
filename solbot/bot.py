@@ -954,6 +954,10 @@ class Solbot:
                             price_usd = float(metrics.get("market_cap_usd") or 0.0)
                     
                     if price_usd > 0:
+                        if getattr(pos, 'entry_price', 0) <= 0:
+                            logger.info(f"Backfilling missing entry price for {pos.symbol}: {price_usd}")
+                            pos.entry_price = price_usd
+                            
                         pos.current_price = price_usd
                         if price_usd > pos.highest_price:
                             pos.highest_price = price_usd
