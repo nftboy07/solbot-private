@@ -29,7 +29,7 @@ class PumpMovers:
         self.bot = bot
         self._running = False
         self._session: Optional[AsyncSession] = None
-        self._trending_url = "https://frontend-api.pump.fun/coins/trending"
+        self._trending_url = "https://frontend-api-v3.pump.fun/coins"
         self._seen_mints: set = set()
         self._poll_interval = 30  
         

@@ -177,7 +177,7 @@ class PumpFunClient:
 
     async def get_token_metadata(self, mint: str) -> Dict:
         """Fetch basic token metadata (symbol)."""
-        url = f"https://frontend-api.pump.fun/coins/{mint}"
+        url = f"https://frontend-api-v3.pump.fun/coins/{mint}"
         
         proxy = getattr(self, "_network_manager", None)
         proxy_url = proxy.get_proxy() if proxy else None
