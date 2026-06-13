@@ -122,12 +122,21 @@ class PumpFunClient:
     async def get_token_metadata(self, mint: str) -> Dict:
         """Fetch basic token metadata (symbol)."""
         url = f"https://frontend-api.pump.fun/coins/{mint}"
+        
+        proxy = getattr(self, "_network_manager", None)
+        proxy_url = proxy.get_proxy() if proxy else None
+        
+        import time
+        start = time.time()
         try:
-            async with self._session.get(url) as resp:
+            async with self._session.get(url, proxy=proxy_url) as resp:
+                if proxy and proxy_url:
+                    proxy.report_result(proxy_url, resp.status == 200, resp.status, time.time() - start)
                 if resp.status == 200:
                     return await resp.json()
-        except:
-            pass
+        except Exception as e:
+            if proxy and proxy_url:
+                proxy.report_result(proxy_url, False, 500, time.time() - start)
         return {"symbol": "???", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
 
     async def get_bonding_curve_mcap(self, mint: str, sol_price: float) -> float:

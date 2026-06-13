@@ -199,6 +199,7 @@ class Solbot:
         self._wallet = Wallet(self._config.solana)
         self._filter = TokenFilter(self._config)
         self._pump_client = PumpFunClient(self._config, self._wallet)
+        self._pump_client._network_manager = self._network_manager
         if self._rpc_pool:
             self._pump_client._rpc_pool = self._rpc_pool
         await self._pump_client.start()
