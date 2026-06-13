@@ -299,7 +299,7 @@ class PumpFunClient:
             "amount": amount,
             "slippage": slippage,
             "priorityFee": priority_fee,
-            "pool": "pump"
+            "pool": "auto"
         }
 
         try:
