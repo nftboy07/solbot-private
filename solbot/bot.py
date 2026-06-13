@@ -384,7 +384,7 @@ class Solbot:
                                 [Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{token.mint}")],
                                 [Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{token.mint}")],
                                 [Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{token.mint}")],
-                                [Button.inline("Buy 5.0 SOL 🔥", f"buy_5.0_{token.mint}")]
+                                [Button.inline("Buy 2.0 SOL 🔥", f"buy_2.0_{token.mint}")]
                             ]
                             market_cap_sol = token.market_cap_usd / self._telegram._sol_price if (self._telegram and self._telegram._sol_price > 0) else float(data.get("marketCapSol", 0) or 0.0)
                             alert_msg = (
@@ -596,7 +596,7 @@ class Solbot:
                     [Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{token.mint}")],
                     [Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{token.mint}")],
                     [Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{token.mint}")],
-                    [Button.inline("Buy 5.0 SOL 🔥", f"buy_5.0_{token.mint}")]
+                    [Button.inline("Buy 2.0 SOL 🔥", f"buy_2.0_{token.mint}")]
                 ]
                 market_cap_sol = token.market_cap_usd / self._telegram._sol_price if (self._telegram and self._telegram._sol_price > 0) else 0.0
                 alert_msg = (
@@ -1011,19 +1011,25 @@ class Solbot:
                         if mcap > 0:
                             roi = mcap / initial_cap
                             
-                            # Update tick performance
+                            # Update tick performance and track peak market cap
                             await self._db._execute_write(
-                                "UPDATE ticks SET exit_marketcap = ?, roi = ? WHERE mint = ?",
-                                (mcap, roi, mint)
+                                "UPDATE ticks SET exit_marketcap = ?, max_marketcap = CASE WHEN ? > max_marketcap THEN ? ELSE max_marketcap END, roi = ? WHERE mint = ?",
+                                (mcap, mcap, mcap, roi, mint)
                             )
                             
                             # Classification Logic
                             if mcap < 15000.0:
                                 # Classify as RUG
                                 await self._handle_detected_rug(creator, mint)
-                            elif mcap >= 100000.0:
+                            elif mcap >= 50000.0:
                                 # Classify as RUNNER
                                 await self._handle_detected_runner(creator, mint, mcap)
+                                
+                                # Send Telegram alert if not already notified
+                                if mint not in self._daily_runners:
+                                    sol_price = getattr(self._telegram, '_sol_price', 150.0)
+                                    mcap_sol = mcap / sol_price if sol_price > 0 else 0.0
+                                    asyncio.create_task(self._trigger_daily_runner_alert(mint, mcap_sol))
                     else:
                         # Fallback: If no metrics are available after 10 minutes, the token likely died/rugged immediately
                         await self._handle_detected_rug(creator, mint)
@@ -1116,8 +1122,8 @@ class Solbot:
                     Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{mint}")
                 ],
                 [
-                    Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{mint}"),
-                    Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{mint}")
+                    Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{mint}"),
+                    Button.inline("Buy 2.0 SOL 🔥", f"buy_2.0_{mint}")
                 ]
             ]
             
@@ -1609,8 +1615,8 @@ class Solbot:
                             Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{mint}")
                         ],
                         [
-                            Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{mint}"),
-                            Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{mint}")
+                            Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{mint}"),
+                            Button.inline("Buy 2.0 SOL 🔥", f"buy_2.0_{mint}")
                         ]
                     ]
                     alert_msg = (

@@ -1096,8 +1096,20 @@ class TelegramController:
                     "SELECT mint, creator, max_marketcap FROM ticks WHERE max_marketcap >= 50000.0 ORDER BY timestamp DESC LIMIT 10"
                 )
                 if rows:
-                    for i, r in enumerate(rows, 1):
-                        msg.append(f"{i}. 🪙 <code>{r['mint'][:8]}</code>... | Peak: <code>${r['max_marketcap']:,.0f}</code>")
+                    import asyncio
+                    # Fetch metadata in parallel
+                    tasks = []
+                    for r in rows:
+                        tasks.append(self._bot._pump_client.get_token_metadata(r['mint']))
+                    metas = await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    for i, (r, meta) in enumerate(zip(rows, metas), 1):
+                        symbol = "???"
+                        if isinstance(meta, dict) and "symbol" in meta:
+                            symbol = meta["symbol"]
+                        elif isinstance(meta, dict) and "name" in meta:
+                            symbol = meta["name"]
+                        msg.append(f"{i}. 🪙 <b>{symbol}</b> (<code>{r['mint'][:8]}...</code>) | Peak: <code>${r['max_marketcap']:,.0f}</code>")
                 else:
                     msg.append("No runners detected recently.")
             except Exception as e:
