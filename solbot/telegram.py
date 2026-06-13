@@ -494,7 +494,7 @@ class TelegramController:
         congestion_level = getattr(self._bot, '_congestion_level', 'low')
         dynamic_jito_tip = getattr(self._bot, '_dynamic_jito_tip', 0.001)
         dynamic_priority_fee = getattr(self._bot, '_dynamic_priority_fee', 0.00001)
-        kol_threshold = getattr(self._bot, '_kol_threshold', 2)
+        kol_threshold = getattr(self._bot, '_kol_threshold', 3)
         active_kol_mentions_count = len(getattr(self._bot, '_kol_mentions', {}))
         
         # Sizing and stop parameters
@@ -1439,7 +1439,7 @@ class TelegramController:
         await self.log_brain_event('kolthreshold', 'Adjusted KOL threshold')
         args = event.message.message.split()
         if len(args) < 2:
-            current = getattr(self._bot, '_kol_threshold', 2)
+            current = getattr(self._bot, '_kol_threshold', 3)
             await event.reply(f"📢 <b>KOL Sentiment Threshold</b>\nCurrent setting: <code>{current} unique sources</code>\nTo change it, use <code>/kolthreshold [number]</code> (e.g. <code>/kolthreshold 3</code>).")
             return
             

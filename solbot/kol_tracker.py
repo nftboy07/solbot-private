@@ -12,7 +12,7 @@ class KOLTracker:
         self.kol_reductions = {}  # {token_address: set(kol_addresses)}
         self.telegram_client = telegram_client
         self.logger = logging.getLogger("KOLTracker")
-        self.threshold = 2
+        self.threshold = 3
 
     def add_wallet(self, address: str, name: str):
         self.wallets[address] = name
@@ -43,40 +43,51 @@ class KOLTracker:
             self.kol_holdings[token][wallet] = self.kol_holdings[token].get(wallet, 0.0) + amount
             
             kol_count = len(self.active_buys[token])
-            self.logger.info(f"KOL {kol_name} bought {token} with {amount} SOL. Peak holdings: {self.kol_holdings[token][wallet]} SOL. Total KOLs: {kol_count}")
+            
+            # Fetch current SOL price and calculate USD amount spent
+            sol_price = getattr(bot_instance._telegram, '_sol_price', 150.0) if hasattr(bot_instance, '_telegram') else 150.0
+            usd_amount = amount * sol_price
+            
+            self.logger.info(
+                f"KOL {kol_name} bought {token} with {amount} SOL (~${usd_amount:.2f} USD). "
+                f"Peak holdings: {self.kol_holdings[token][wallet]} SOL. Total KOLs: {kol_count}"
+            )
 
-            # Send Telegram alert for copy trade
-            try:
-                from telethon import Button
-                buttons = [
-                    [
-                        Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{token}"),
-                        Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{token}")
-                    ],
-                    [
-                        Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{token}"),
-                        Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{token}")
+            # Get target threshold (defaults to 3)
+            threshold = getattr(bot_instance, '_kol_threshold', 3)
+
+            # Send Telegram alert for copy trade ONLY if kol_count >= threshold and spent >= $1k
+            if kol_count >= threshold and usd_amount >= 1000.0:
+                try:
+                    from telethon import Button
+                    buttons = [
+                        [
+                            Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{token}"),
+                            Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{token}")
+                        ],
+                        [
+                            Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{token}"),
+                            Button.inline("Buy 2.0 SOL 🔥", f"buy_2.0_{token}")
+                        ]
                     ]
-                ]
-                msg = (
-                    f"📢 <b>KOL BUY DETECTED</b>\n\n"
-                    f"👤 KOL: <b>{kol_name}</b>\n"
-                    f"🔑 Address: <code>{wallet}</code>\n"
-                    f"🪙 Token: <code>{token}</code>\n"
-                    f"💵 Amount: <code>{amount:.3f} SOL</code>\n"
-                    f"👥 Active KOLs holding: <code>{kol_count}</code>\n\n"
-                    f"👉 <a href='https://pump.fun/{token}'>pump.fun</a> | <a href='https://kolscan.io/trader/{wallet}'>kolscan.io</a>\n\n"
-                    f"<i>Tap a button below to copy trade instantly:</i>"
-                )
-                if hasattr(bot_instance, '_telegram') and bot_instance._telegram:
-                    asyncio.create_task(bot_instance._telegram.send_message(msg, buttons=buttons))
-            except Exception as e:
-                self.logger.error(f"Failed to send KOL buy Telegram alert: {e}")
+                    msg = (
+                        f"📢 <b>COORDINATED KOL BUY DETECTED (> $1K)</b>\n\n"
+                        f"👤 Last KOL: <b>{kol_name}</b>\n"
+                        f"🔑 Address: <code>{wallet}</code>\n"
+                        f"🪙 Token: <code>{token}</code>\n"
+                        f"💵 Amount: <code>{amount:.3f} SOL</code> (~<code>${usd_amount:.2f} USD</code>)\n"
+                        f"👥 Active KOLs holding: <code>{kol_count}</code>\n\n"
+                        f"👉 <a href='https://pump.fun/{token}'>pump.fun</a> | <a href='https://kolscan.io/trader/{wallet}'>kolscan.io</a>\n\n"
+                        f"<i>Tap a button below to copy trade instantly:</i>"
+                    )
+                    if hasattr(bot_instance, '_telegram') and bot_instance._telegram:
+                        asyncio.create_task(bot_instance._telegram.send_message(msg, buttons=buttons))
+                except Exception as e:
+                    self.logger.error(f"Failed to send KOL buy Telegram alert: {e}")
 
-            # Trigger when threshold reached
-            if kol_count >= self.threshold:
-                self.logger.warning(f"COORDINATED KOL BUY DETECTED: {kol_count} KOLs in {token}. Executing copy-trade.")
-                await bot_instance.execute_kol_snipe(token, f"{kol_count} KOLs Coordinated Buy")
+                # Trigger automatic coordinated buy when threshold and spend filters are reached
+                self.logger.warning(f"COORDINATED KOL BUY DETECTED: {kol_count} KOLs in {token} (Spent: ${usd_amount:.2f}). Executing copy-trade.")
+                await bot_instance.execute_kol_snipe(token, f"{kol_count} KOLs Coordinated Buy (> $1K)")
 
         elif action in ['sell', 'transfer']:
             if token in self.active_buys and wallet in self.active_buys[token]:

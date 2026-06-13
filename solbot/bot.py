@@ -102,7 +102,7 @@ class Solbot:
         self._daily_runners: Dict[str, Dict] = {}
         # KOL Alpha & Sentiment Aggregator State
         self._kol_mentions: Dict[str, Dict] = {}
-        self._kol_threshold = 2
+        self._kol_threshold = 3
         # Dynamic priority fee & Jito tip auto-scaling state
         self._congestion_level = "low"
         self._dynamic_priority_fee = 0.00001
@@ -182,7 +182,7 @@ class Solbot:
             self._ai_enabled = state.get("ai_enabled", True)
             self._ai_min_score = state.get("ai_min_score", 75)
             self._autobuy_enabled = state.get("autobuy_enabled", False)
-            self._kol_threshold = state.get("kol_threshold", 2)
+            self._kol_threshold = state.get("kol_threshold", 3)
             
             # Restore Blacklist
             self._blacklisted_wallets = set(state.get("blacklisted_wallets", []))
