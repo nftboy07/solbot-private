@@ -119,6 +119,62 @@ class PumpFunClient:
         
         return balances
 
+    async def get_token_metadata_onchain(self, mint: str) -> Dict:
+        """Fetch token metadata on-chain from Solana RPC via Metaplex Metadata PDA."""
+        try:
+            from solders.pubkey import Pubkey
+            import base64
+            import struct
+            import time
+
+            mint_pubkey = Pubkey.from_string(mint)
+            metadata_program_id = Pubkey.from_string("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")
+            seeds = [b"metadata", bytes(metadata_program_id), bytes(mint_pubkey)]
+            metadata_pda, _ = Pubkey.find_program_address(seeds, metadata_program_id)
+
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getAccountInfo",
+                "params": [
+                    str(metadata_pda),
+                    {"encoding": "base64"}
+                ]
+            }
+
+            url = await self._get_rpc_url()
+            start = time.perf_counter()
+            async with self._session.post(url, json=payload) as resp:
+                latency = (time.perf_counter() - start) * 1000
+                await self._report_rpc_metric(url, True, latency, status_code=resp.status)
+                if resp.status == 200:
+                    res_data = await resp.json()
+                    value = res_data.get("result", {}).get("value")
+                    if value and value.get("data"):
+                        b64_data = value["data"][0]
+                        data = base64.b64decode(b64_data)
+                        if len(data) >= 101:
+                            offset = 65
+                            name_len = struct.unpack("<I", data[offset:offset+4])[0]
+                            offset += 4
+                            name = data[offset:offset+name_len].decode("utf-8", errors="ignore").strip("\x00 \t\n\r")
+                            offset += 32
+                            
+                            symbol_len = struct.unpack("<I", data[offset:offset+4])[0]
+                            offset += 4
+                            symbol = data[offset:offset+symbol_len].decode("utf-8", errors="ignore").strip("\x00 \t\n\r")
+                            
+                            return {
+                                "symbol": symbol,
+                                "name": name,
+                                "creator": "unknown",
+                                "market_cap_sol": 0,
+                                "liquidity_sol": 0
+                            }
+        except Exception as e:
+            logger.error(f"Error fetching on-chain metadata for {mint}: {e}")
+        return {"symbol": "???", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
+
     async def get_token_metadata(self, mint: str) -> Dict:
         """Fetch basic token metadata (symbol)."""
         url = f"https://frontend-api.pump.fun/coins/{mint}"
@@ -137,7 +193,10 @@ class PumpFunClient:
         except Exception as e:
             if proxy and proxy_url:
                 proxy.report_result(proxy_url, False, 500, time.time() - start)
-        return {"symbol": "???", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
+        
+        # Fallback to on-chain metadata
+        logger.info(f"Frontend API blocked/failed for {mint}. Falling back to on-chain metadata.")
+        return await self.get_token_metadata_onchain(mint)
 
     async def get_bonding_curve_mcap(self, mint: str, sol_price: float) -> float:
         """Fetch the token's market cap in USD directly from the Solana RPC by querying the bonding curve account."""
