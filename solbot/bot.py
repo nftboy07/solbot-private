@@ -32,6 +32,8 @@ from solbot.pump_movers import PumpMovers
 from solbot.geckoterminal import GeckoTerminalClient
 from solbot.twitter_agents import TwitterAgentMonitor
 from solbot.core.network import NetworkManager
+from solbot.cluster_mapper import ClusterMapper
+from solbot.ai_tuner import AITuner
 
 logger = get_logger("bot")
 
@@ -108,6 +110,11 @@ class Solbot:
         # Stalkchain / KOLscan integrations controller
         from solbot.kols_controller import KOLsController
         self._kols_controller = KOLsController(self)
+        
+        # AI Tuner & Cluster Mapper
+        self._cluster_mapper = ClusterMapper(self)
+        self._ai_tuner = AITuner(self)
+        self._autotune_poller = None
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -263,6 +270,7 @@ class Solbot:
         self._sentiment_adapter = asyncio.create_task(self._market_sentiment_adapter_loop())
         self._missed_tracker = asyncio.create_task(self._missed_entry_tracker_loop())
         self._congestion_poller = asyncio.create_task(self._poll_network_congestion())
+        self._autotune_poller = asyncio.create_task(self._ai_autotune_loop())
         
         for pos in self._positions.values():
             if pos.active:
@@ -271,6 +279,8 @@ class Solbot:
     async def stop(self):
         self._running = False
         self._save_state()
+        if self._autotune_poller:
+            self._autotune_poller.cancel()
         await self._kols_controller.stop()
         if self._monitor: self._monitor.stop()
         if self._pump_client: await self._pump_client.stop()
@@ -661,6 +671,29 @@ class Solbot:
                     token.mint, token.creator, holders, creator_history
                 )
                 
+                # Dynamic Developer Cluster Mapping check
+                cluster_risk = 0.0
+                cluster_size = 0
+                try:
+                    cluster_risk, cluster_size, _ = await self._cluster_mapper.analyze_token_cluster(
+                        token.mint, rpc_url
+                    )
+                except Exception as e:
+                    logger.error(f"Cluster analysis failed: {e}")
+
+                if cluster_risk >= 30.0:
+                    cluster_reason = f"Stealth developer wallet cluster detected. Clustered wallets control {cluster_risk/2:.1f}% of supply."
+                    logger.warning(f"❌ AI SAFETY CLUSTER SCREEN FAILED for {token.symbol}: Cluster Risk={cluster_risk:.1f}% | Size={cluster_size} | Reason: {cluster_reason}")
+                    if self._telegram:
+                        await self._telegram.send_message(
+                            f"🚫 <b>AI Safety Filtered Clustered Launch:</b> {token.symbol}\n"
+                            f"Reason: <i>{cluster_reason}</i>\n"
+                            f"Cluster Risk Score: <code>{cluster_risk:.1f}/100</code> (size={cluster_size})"
+                        )
+                    self._processed_mints.discard(token.mint)
+                    self._active_buys.discard(token.mint)
+                    return
+
                 if analysis.get("score", 80) < self._ai_min_score or analysis.get("is_honeypot") or analysis.get("is_premine"):
                     logger.warning(f"❌ AI SAFETY SCREEN FAILED for {token.symbol}: Score={analysis.get('score')} | Honeypot={analysis.get('is_honeypot')} | Premine={analysis.get('is_premine')} | Reason: {analysis.get('reason')}")
                     if self._telegram:
@@ -1421,6 +1454,22 @@ class Solbot:
                  )
         except Exception as e:
             logger.error(f"Error retraining brain weights: {e}")
+
+    async def _ai_autotune_loop(self):
+        """Asynchronous background loop for AI Autotuning."""
+        logger.info("AI Autotune Loop started.")
+        while self._running:
+            try:
+                # Wait 4 hours between autotunes (14400s)
+                await asyncio.sleep(14400)
+                if self._ai_enabled:
+                    logger.info("Running scheduled AI Autotuning...")
+                    success, report = await self._ai_tuner.autotune()
+                    if success and self._telegram:
+                        await self._telegram.send_message(report)
+            except Exception as e:
+                logger.error(f"Error in AI autotune loop: {e}")
+                await asyncio.sleep(60)
 
     async def _poll_network_congestion(self):
         """Polls network congestion and Jito tips to dynamically scale transaction fees."""

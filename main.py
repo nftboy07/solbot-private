@@ -12,7 +12,8 @@ from solbot.engines.creator_genome import CreatorGenomeEngine
 from solbot.engines.wallet_graph import WalletGraphEngine
 from solbot.storage.feature_store import FeatureStore
 from solbot.storage.redis import RedisManager
-from solbot.rpc_pool import RPCPool
+from solbot.rpc_balancer import RPCBalancer
+import os
 
 async def main():
     # 1. Config & Logging
@@ -32,7 +33,18 @@ async def main():
     telemetry = TelemetryManager(db)
     await telemetry.start()
     
-    rpc_pool = RPCPool([{"url": config.solana.rpc_url, "name": "primary"}])
+    # Parse RPC Pool from environment
+    rpc_pool_urls = os.getenv("SOLANA_RPC_POOL", "")
+    nodes = []
+    if rpc_pool_urls:
+        for idx, url in enumerate(rpc_pool_urls.split(","), 1):
+            url = url.strip()
+            if url:
+                nodes.append({"url": url, "name": f"node_{idx}"})
+    if not nodes:
+        nodes.append({"url": config.solana.rpc_url, "name": "primary"})
+        
+    rpc_pool = RPCBalancer(nodes)
     asyncio.create_task(rpc_pool.run_monitor())
     
     # 3. Engines

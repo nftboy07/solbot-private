@@ -236,6 +236,18 @@ class TelegramController:
         async def kols_handler(event):
             await self._cmd_kols(event)
 
+        @self._client.on(events.NewMessage(pattern='/autotune'))
+        async def autotune_handler(event):
+            await self._cmd_autotune(event)
+
+        @self._client.on(events.NewMessage(pattern='/rpcbalancer'))
+        async def rpcbalancer_handler(event):
+            await self._cmd_rpcbalancer(event)
+
+        @self._client.on(events.NewMessage(pattern='/clustermap'))
+        async def clustermap_handler(event):
+            await self._cmd_clustermap(event)
+
         @self._client.on(events.CallbackQuery)
         async def callback_handler(event):
             data = event.data.decode("utf-8")
@@ -339,10 +351,14 @@ class TelegramController:
             "  /slippage <bps> — Set Jupiter slippage (basis points)\n"
             "  /priority <sol> — Set priority fee\n"
             "  /jito — View Jito bundle tip status\n\n"
+            "<b>🧠 ADVANCED AGI OPERATIONS SUITE</b>\n"
+            "  /autotune — View performance KPIs and run AI parameter tuning\n"
+            "  /rpcbalancer — Check latency and status of Solana RPC nodes\n"
+            "  /clustermap <token> — Run stealth funding genesis checks\n\n"
             "<b>🚀 INLINE BUY BUTTONS (Runner Alerts)</b>\n"
             "  Tap buttons when runner alert fires:\n"
             "  🟢 Buy 0.01 SOL  🟡 Buy 0.1 SOL  🟠 Buy 1.0 SOL  🔥 Buy 5.0 SOL\n\n"
-            "<b>Total: 45+ commands — all logged to /brain for AGI learning 🧠</b>"
+            "<b>Total: 48+ commands — all logged to /brain for AGI learning 🧠</b>"
         )
         await event.reply(msg1, parse_mode='html')
         await event.reply(msg2, parse_mode='html')
@@ -532,7 +548,8 @@ class TelegramController:
             ],
             [
                 Button.inline("🔍 Run DB Scan", b"brain_scan"),
-                Button.inline("🧠 Force Retrain", b"brain_retrain")
+                Button.inline("🧠 Force Retrain", b"brain_retrain"),
+                Button.inline("⚙️ AI Autotune", b"brain_autotune")
             ]
         ]
         
@@ -577,6 +594,11 @@ class TelegramController:
         elif action == "retrain":
             await event.answer("Starting Brain Retraining...")
             asyncio.create_task(self._run_brain_retrain_via_callback(event))
+            return
+            
+        elif action == "autotune":
+            await event.answer("Triggering AI Autotune...")
+            asyncio.create_task(self._run_brain_autotune_via_callback(event))
             return
             
         elif action == "refresh":
@@ -1561,6 +1583,89 @@ class TelegramController:
                 logger.info(f"AGI BRAIN LOGGED EVENT: {command} | {details}")
             except Exception as e:
                 logger.error(f"Failed to log brain event: {e}")
+
+    async def _cmd_autotune(self, event):
+        await self.log_brain_event('autotune', 'AI Autotuning requested')
+        args = event.message.text.split()
+        ctrl = getattr(self._bot, '_ai_tuner', None)
+        if not ctrl:
+            await event.reply("❌ AI Tuner not initialized.")
+            return
+
+        if len(args) > 1 and args[1].lower() == "run":
+            await event.respond("⏳ <b>Invoking Gemini AGI Autotuner...</b>", parse_mode='html')
+            success, report = await ctrl.autotune()
+            await event.reply(report, parse_mode='html')
+            return
+
+        await event.respond("⏳ <b>Fetching trade database metrics...</b>", parse_mode='html')
+        trades, kpis = await ctrl.get_closed_trades_summary()
+        
+        from telethon import Button
+        msg = (
+            f"🧠 <b>SOLBOT AGI AUTOTUNER PANEL</b>\n\n"
+            f"📊 <b>RECENT PERFORMANCE SUMMARY:</b>\n"
+            f"• Total Closed Trades: <code>{kpis['total_trades']}</code>\n"
+            f"• Est. Win Rate: <code>{kpis['win_rate']:.1f}%</code>\n"
+            f"• Net Profit/Loss: <code>{kpis['total_pnl_sol']:.3f} SOL</code>\n"
+            f"• Avg Profit/Trade: <code>{kpis['avg_pnl_sol']:.3f} SOL</code>\n\n"
+            f"⚙️ <b>ACTIVE SETTINGS:</b>\n"
+            f"• Buy Size: <code>{self._bot._config.jupiter.buy_amount_sol:.3f} SOL</code>\n"
+            f"• Trailing Stop-Loss: <code>{self._bot._config.strategy.trailing_stop_pct * 100.0:.1f}%</code>\n"
+            f"• Jupiter Slippage: <code>{self._bot._config.jupiter.slippage_bps} BPS</code>\n"
+            f"• AI Safety Min: <code>{self._bot._ai_min_score} score</code>\n"
+            f"• KOL Coordinated Mentions: <code>{getattr(self._bot, '_kol_threshold', 2)}</code>\n\n"
+            f"<i>You can click the button below to invoke the Gemini AI trade post-mortem and automatically optimize your parameters, or run <code>/autotune run</code>.</i>"
+        )
+        buttons = [[Button.inline("🧠 Run AI Autotuning", b"brain_autotune")]]
+        await event.reply(msg, buttons=buttons, parse_mode='html')
+
+    async def _run_brain_autotune_via_callback(self, event):
+        await event.edit("🧠 <b>Invoking Gemini AGI Autotuner...</b>", buttons=[])
+        ctrl = getattr(self._bot, '_ai_tuner', None)
+        if not ctrl:
+            await event.edit("❌ AI Tuner not initialized.")
+            return
+        success, report = await ctrl.autotune()
+        
+        from telethon import Button
+        buttons = [[Button.inline("⬅️ Back to Dashboard", b"brain_refresh")]]
+        await event.edit(report, buttons=buttons, parse_mode='html')
+
+    async def _cmd_rpcbalancer(self, event):
+        await self.log_brain_event('rpcbalancer', 'RPC Balancer status checked')
+        balancer = getattr(self._bot, '_rpc_pool', None)
+        if not balancer:
+            await event.reply("❌ RPC Balancer not initialized.")
+            return
+        
+        await event.respond("⏳ <b>Pinging Solana RPC pool...</b>", parse_mode='html')
+        await balancer.monitor_nodes()
+        
+        report = await balancer.get_node_status_report()
+        await event.reply(report, parse_mode='html')
+
+    async def _cmd_clustermap(self, event):
+        await self.log_brain_event('clustermap', 'Cluster map trace executed')
+        args = event.message.text.split()
+        if len(args) < 2:
+            await event.reply("🔍 <b>Developer Cluster Genesis</b>\nPlease specify a token mint address.\nExample: <code>/clustermap mint_address</code>")
+            return
+        
+        mint_address = args[1]
+        mapper = getattr(self._bot, '_cluster_mapper', None)
+        if not mapper:
+            await event.reply("❌ Cluster Mapper not initialized.")
+            return
+
+        await event.respond(f"⏳ <b>Tracing genesis of top holders for:</b>\n<code>{mint_address}</code>", parse_mode='html')
+        
+        rpc_url = self._bot._config.solana.rpc_url
+        if hasattr(self._bot, '_rpc_pool') and self._bot._rpc_pool:
+            rpc_url = await self._bot._rpc_pool.get_best_node()
+
+        report = await mapper.get_cluster_report(mint_address, rpc_url)
+        await event.reply(report, parse_mode='html')
 
 
 class TelegramManager(TelegramController):
