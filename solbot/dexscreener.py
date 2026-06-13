@@ -26,7 +26,12 @@ class DexScreenerClient:
         return {
             "price_usd": pair.get("priceUsd"),
             "volume_24h": pair.get("volume", {}).get("h24"),
+            "volume_m5": pair.get("volume", {}).get("m5"),
+            "volume_h1": pair.get("volume", {}).get("h1"),
+            "txns_m5": pair.get("txns", {}).get("m5", {}),
+            "txns_h1": pair.get("txns", {}).get("h1", {}),
             "liquidity_usd": pair.get("liquidity", {}).get("usd"),
+            "price_change_m5": pair.get("priceChange", {}).get("m5"),
             "price_change_1h": pair.get("priceChange", {}).get("h1"),
             "market_cap_usd": pair.get("fdv") or pair.get("marketCap")
         }

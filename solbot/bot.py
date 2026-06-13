@@ -34,6 +34,7 @@ from solbot.twitter_agents import TwitterAgentMonitor
 from solbot.core.network import NetworkManager
 from solbot.cluster_mapper import ClusterMapper
 from solbot.ai_tuner import AITuner
+from solbot.agi_prebuy_filter import AGIPreBuyFilter
 
 logger = get_logger("bot")
 
@@ -114,7 +115,11 @@ class Solbot:
         # AI Tuner & Cluster Mapper
         self._cluster_mapper = ClusterMapper(self)
         self._ai_tuner = AITuner(self)
+        self._agi_prebuy_filter = AGIPreBuyFilter(self)
         self._autotune_poller = None
+        
+        # AGI Watch Queue
+        self._watch_queue: Dict[str, Dict] = {}
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -260,6 +265,9 @@ class Solbot:
         for pos in self._positions.values():
             if pos.active:
                 asyncio.create_task(self._position_manager(pos))
+                
+        # Start watch queue manager
+        asyncio.create_task(self._watch_queue_manager())
         
         await self._telegram.send_message("<b>Solbot Sniper (Coordinated KOL Tracking) started!</b>")
 
@@ -760,6 +768,38 @@ class Solbot:
                     self._active_buys.discard(token.mint)
                     return
 
+                # AGI Pre-Buy Filter Execution
+                agi_action, agi_score, _, agi_reason = await self._agi_prebuy_filter.evaluate_token(token.mint, {
+                    "market_cap_usd": token.market_cap_usd,
+                    "liquidity_sol": token.liquidity_sol,
+                    "creator": token.creator
+                })
+
+                if agi_action == "SKIP":
+                    logger.warning(f"❌ AGI PRE-BUY FILTER FAILED for {token.symbol}: {agi_reason}")
+                    if self._telegram:
+                        await self._telegram.send_message(f"🚫 <b>AGI Pre-Buy Filter Rejected:</b> {token.symbol}\nReason: <i>{agi_reason}</i>")
+                    self._processed_mints.discard(token.mint)
+                    self._active_buys.discard(token.mint)
+                    return
+                elif agi_action == "WATCH":
+                    logger.info(f"👀 AGI PRE-BUY FILTER WATCHING {token.symbol}: {agi_reason}")
+                    self._watch_queue[token.mint] = {
+                        "token": token,
+                        "size": size,
+                        "reason": reason,
+                        "added_at": time.time()
+                    }
+                    if self._telegram:
+                        await self._telegram.send_message(f"👀 <b>AGI Pre-Buy Added to WATCH Queue:</b> {token.symbol}\nScore: <code>{agi_score}</code>\nReason: <i>{agi_reason}</i>")
+                    self._active_buys.discard(token.mint)
+                    return
+                elif agi_action == "BUY_HALF":
+                    logger.info(f"⚖️ AGI PRE-BUY FILTER BUY_HALF for {token.symbol}: {agi_reason}")
+                    size = size * 0.5
+                elif agi_action == "BUY_FULL":
+                    logger.info(f"✅ AGI PRE-BUY FILTER BUY_FULL for {token.symbol}: {agi_reason}")
+
             priority_fee_sol = self._dynamic_priority_fee
             jito_tip_sol = self._dynamic_jito_tip
             logger.info(f"Initiating snipe for {token.symbol} ({token.mint}) | Size: {size} SOL | Dynamic Fee: {priority_fee_sol:.6f} SOL | Jito Tip: {jito_tip_sol:.5f} SOL | Reason: {reason}")
@@ -797,7 +837,6 @@ class Solbot:
                     except Exception:
                         pass
                 await self._telegram.send_message(f"📡 <b>BUY ({reason}): {token.symbol}</b>\nMCAP: <code>${token.market_cap_usd:,.0f}</code>")
-                asyncio.create_task(self._position_manager(pos))
             else:
                 logger.error(f"Snipe failed for {token.symbol} ({token.mint}): {result.error}")
                 self._processed_mints.discard(token.mint)
@@ -818,6 +857,78 @@ class Solbot:
                     pass
         finally:
             self._active_buys.discard(token.mint)
+
+    async def _watch_queue_manager(self):
+        """Continuously polls tokens in the watch queue for execution."""
+        import time
+        while self._running:
+            try:
+                current_time = time.time()
+                for mint in list(self._watch_queue.keys()):
+                    data = self._watch_queue.get(mint)
+                    if not data:
+                        continue
+                    
+                    elapsed = current_time - data["added_at"]
+                    token = data["token"]
+                    size = data["size"]
+                    reason = data["reason"]
+
+                    # If in queue for > 3 minutes, discard
+                    if elapsed > 180:
+                        logger.info(f"🗑️ Dropping {token.symbol} from watch queue (timed out).")
+                        self._watch_queue.pop(mint, None)
+                        if self._telegram:
+                            await self._telegram.send_message(f"🗑️ <b>Dropped from Watch Queue:</b> {token.symbol} (timed out)")
+                        continue
+
+                    # Re-evaluate
+                    agi_action, agi_score, _, agi_reason = await self._agi_prebuy_filter.evaluate_token(mint, {
+                        "market_cap_usd": token.market_cap_usd,
+                        "liquidity_sol": token.liquidity_sol,
+                        "creator": token.creator
+                    })
+
+                    if agi_action == "SKIP":
+                        logger.info(f"🗑️ Dropping {token.symbol} from watch queue (score dropped).")
+                        self._watch_queue.pop(mint, None)
+                        continue
+                    elif agi_action in ["BUY_FULL", "BUY_HALF"]:
+                        logger.info(f"🚀 Executing Snipe for watched token {token.symbol} (Score: {agi_score})")
+                        self._watch_queue.pop(mint, None)
+                        
+                        adj_size = size
+                        if agi_action == "BUY_HALF":
+                            adj_size = size * 0.5
+                            
+                        # Execute buy
+                        priority_fee_sol = self._dynamic_priority_fee
+                        jito_tip_sol = self._dynamic_jito_tip
+                        result = await self._pump_client.execute_trade(
+                            mint, action="buy", amount=adj_size, priority_fee=priority_fee_sol, jito_tip=jito_tip_sol
+                        )
+                        if result.success:
+                            self._trades.append(result)
+                            pos = Position(
+                                mint=mint, symbol=token.symbol,
+                                entry_price=token.market_cap_usd, entry_liq=token.liquidity_sol,
+                                creator=token.creator,
+                                size=adj_size
+                            )
+                            pos.current_price = token.market_cap_usd
+                            pos.highest_price = token.market_cap_usd
+                            self._positions[mint] = pos
+                            asyncio.create_task(self._db.save_position(mint, token.market_cap_usd, adj_size, "open", f"{reason} (Watch Queue: {agi_score})"))
+                            asyncio.create_task(self._position_manager(pos))
+                            await self._risk_manager.on_position_opened(mint, adj_size)
+                            self._save_state()
+                            await self._telegram.send_message(f"📡 <b>WATCH BUY ({agi_action}): {token.symbol}</b>\nScore: {agi_score}\nMCAP: <code>${token.market_cap_usd:,.0f}</code>\nReason: <i>{agi_reason}</i>")
+                        else:
+                            logger.error(f"Watch snipe failed for {token.symbol}: {result.error}")
+
+            except Exception as e:
+                logger.error(f"Error in _watch_queue_manager: {e}")
+            await asyncio.sleep(10)
 
     async def _position_manager(self, pos: Position):
         strat = self._config.strategy
