@@ -130,7 +130,12 @@ class Solbot:
                 "ai_min_score": self._ai_min_score,
                 "autobuy_enabled": self._autobuy_enabled,
                 "blacklisted_wallets": list(self._blacklisted_wallets),
-                "kol_threshold": self._kol_threshold
+                "kol_threshold": self._kol_threshold,
+                "config_overrides": {
+                    "buy_amount_sol": self._config.jupiter.buy_amount_sol,
+                    "trailing_stop_pct": getattr(self._config.strategy, "trailing_stop_pct", 0.20),
+                    "slippage_bps": self._config.jupiter.slippage_bps
+                }
             }
             with open(self._state_file, "w") as f:
                 json.dump(state, f, indent=2)
@@ -183,6 +188,16 @@ class Solbot:
             self._ai_min_score = state.get("ai_min_score", 75)
             self._autobuy_enabled = state.get("autobuy_enabled", False)
             self._kol_threshold = state.get("kol_threshold", 3)
+            
+            # Restore config overrides
+            if "config_overrides" in state:
+                overrides = state["config_overrides"]
+                if "buy_amount_sol" in overrides:
+                    object.__setattr__(self._config.jupiter, "buy_amount_sol", overrides["buy_amount_sol"])
+                if "trailing_stop_pct" in overrides:
+                    object.__setattr__(self._config.strategy, "trailing_stop_pct", overrides["trailing_stop_pct"])
+                if "slippage_bps" in overrides:
+                    object.__setattr__(self._config.jupiter, "slippage_bps", overrides["slippage_bps"])
             
             # Restore Blacklist
             self._blacklisted_wallets = set(state.get("blacklisted_wallets", []))
@@ -240,6 +255,11 @@ class Solbot:
             logger.error(f"Failed to load historically traded mints: {e}")
             
         await self._sync_existing_holdings()
+        
+        # Start position managers for all restored active positions
+        for pos in self._positions.values():
+            if pos.active:
+                asyncio.create_task(self._position_manager(pos))
         
         await self._telegram.send_message("<b>Solbot Sniper (Coordinated KOL Tracking) started!</b>")
 
@@ -638,7 +658,7 @@ class Solbot:
         finally:
             self._active_buys.discard(token.mint)
 
-    async def _execute_snipe(self, token: TokenEvent, size: float, reason: str, status_msg=None):
+    async def _execute_snipe(self, token: TokenEvent, size: float, reason: str, status_msg=None, manual_override=False):
         if token.mint in self._positions:
             self._active_buys.discard(token.mint)
             return
@@ -646,7 +666,7 @@ class Solbot:
         self._processed_mints.add(token.mint)
         try:
             # Advanced AI Safety & Honeypot Screen
-            if self._ai_enabled:
+            if self._ai_enabled and not manual_override:
                 holders = []
                 try:
                     rpc_url = await self._pump_client._get_rpc_url()
@@ -751,14 +771,14 @@ class Solbot:
                 pos = Position(
                     mint=token.mint, symbol=token.symbol,
                     entry_price=token.market_cap_usd, entry_liq=token.liquidity_sol,
-                    creator=token.creator, size=size
+                    creator=token.creator,
+                    size=size
                 )
                 pos.current_price = token.market_cap_usd
                 pos.highest_price = token.market_cap_usd
                 self._positions[token.mint] = pos
-                
-                # Save position in SQLite DB
-                asyncio.create_task(self._db.save_position(token.mint, token.market_cap_usd, size, "open"))
+                asyncio.create_task(self._db.save_position(token.mint, token.market_cap_usd, size, "open", reason))
+                asyncio.create_task(self._position_manager(pos))
                 
                 # Track in RiskManager
                 await self._risk_manager.on_position_opened(token.mint, size)
@@ -1471,7 +1491,7 @@ class Solbot:
                 timestamp=time()
             )
             # Execute buy using client
-            await self._execute_snipe(token, amount, f"TG Manual Button", status_msg)
+            await self._execute_snipe(token, amount, f"TG Manual Button", status_msg, manual_override=True)
         except Exception as e:
             logger.error(f"Error executing manual buy: {e}")
             if status_msg:

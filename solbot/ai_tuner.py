@@ -66,9 +66,19 @@ class AITuner:
             return None
 
         trades, kpis = await self.get_closed_trades_summary()
-        if not trades:
-            logger.info("No closed trades to analyze for autotuning.")
-            return None
+
+        db = getattr(self._bot, '_db', None)
+        market_success_rate = 0.0
+        if db:
+            try:
+                rows = await db._execute_read(
+                    "SELECT exit_marketcap, max_marketcap FROM ticks ORDER BY timestamp DESC LIMIT 50"
+                )
+                if rows:
+                    runners = sum(1 for r in rows if max(r.get('max_marketcap') or 0.0, r.get('exit_marketcap') or 0.0) >= 50000.0)
+                    market_success_rate = (runners / len(rows)) * 100.0
+            except Exception as e:
+                logger.error(f"Error reading ticks for AI Tuner: {e}")
 
         # Format historical trades context for Gemini
         trades_str = ""
@@ -96,8 +106,10 @@ class AITuner:
             f"Win Rate: {kpis['win_rate']:.1f}%\n"
             f"Total Realized PnL: {kpis['total_pnl_sol']:.3f} SOL\n"
             f"Avg PnL Per Trade: {kpis['avg_pnl_sol']:.3f} SOL\n\n"
+            f"--- OVERALL MARKET SENTIMENT ---\n"
+            f"Recent Token Launch Success Rate (>=50k MCAP): {market_success_rate:.1f}%\n\n"
             f"--- RECENT LOGS ---\n"
-            f"{trades_str}\n"
+            f"{trades_str if trades_str else 'No recent trades available.'}\n"
             f"Task: Recommend new parameters clamped to these safety boundaries:\n"
             f"  - buy_amount_sol: [0.005 to 1.5]\n"
             f"  - trailing_stop_pct: [0.05 to 0.35]\n"

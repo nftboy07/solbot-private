@@ -52,6 +52,16 @@ class Database:
                 # Column likely already exists
                 logger.debug(f"Column {col} already exists or failed to add: {e}")
 
+        # Run column migrations for positions
+        for col, col_type in [
+            ("reason", "TEXT")
+        ]:
+            try:
+                await self._execute_write(f"ALTER TABLE positions ADD COLUMN {col} {col_type}")
+                logger.info(f"Added column {col} to positions table successfully.")
+            except Exception as e:
+                logger.debug(f"Column {col} already exists or failed to add: {e}")
+
     async def _execute_read(self, query: str, params: tuple = ()) -> List[sqlite3.Row]:
         return await self._loop.run_in_executor(
             self._executor, self.__execute_read_sync, query, params
@@ -117,7 +127,8 @@ class Database:
             size REAL,
             status TEXT,
             pnl REAL,
-            timestamp INTEGER
+            timestamp INTEGER,
+            reason TEXT
         );
 
         CREATE TABLE IF NOT EXISTS wallets (
@@ -242,13 +253,13 @@ class Database:
         return dict(rows[0]) if rows else None
 
     # Positions Methods
-    async def save_position(self, mint: str, entry_price: float, size: float, status: str = "open"):
+    async def save_position(self, mint: str, entry_price: float, size: float, status: str = "open", reason: str = None):
         query = """
-            INSERT OR REPLACE INTO positions (mint, entry_price, size, status, pnl, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO positions (mint, entry_price, size, status, pnl, timestamp, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """
         import time
-        params = (mint, entry_price, size, status, 0.0, int(time.time()))
+        params = (mint, entry_price, size, status, 0.0, int(time.time()), reason)
         await self._execute_write(query, params)
 
     async def update_position_pnl(self, mint: str, pnl: float, status: str = None):

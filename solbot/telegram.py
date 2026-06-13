@@ -807,13 +807,24 @@ class TelegramController:
             await event.reply("<b>📍 PORTFOLIO</b>\nNo active positions.")
             return
             
+        import asyncio
+        mints = list(positions.keys())
+        tasks = [self._bot._pump_client.get_token_metadata(mint) for mint in mints]
+        metas = await asyncio.gather(*tasks, return_exceptions=True)
+
         lines = ["<b>📍 ACTIVE PORTFOLIO</b>"]
-        for mint, pos in positions.items():
+        for mint, meta in zip(mints, metas):
+            pos = positions[mint]
             entry = getattr(pos, 'entry_price', 0.0)
             current = getattr(pos, 'current_price', 0.0)
             roi = ((current / entry) - 1.0) * 100 if entry > 0 else 0.0
-            lines.append(f"• <code>{mint[:8]}</code> (Creator: <code>{getattr(pos, 'creator', 'unknown')[:6]}</code>) | ROI: <code>{roi:+.2f}%</code>")
-        await event.reply("\n".join(lines))
+            
+            symbol = getattr(pos, 'symbol', '???')
+            if (symbol == '???' or symbol == 'SYNCED') and isinstance(meta, dict):
+                symbol = meta.get("symbol", meta.get("name", symbol))
+                
+            lines.append(f"• <b>{symbol}</b> (<code>{mint[:8]}...</code>) | ROI: <code>{roi:+.2f}%</code>")
+        await event.reply("\n".join(lines), parse_mode='html')
 
     async def _cmd_execution(self, event):
         await self.log_brain_event('execution', 'Execution metrics requested')
