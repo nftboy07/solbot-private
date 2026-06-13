@@ -441,19 +441,7 @@ class Solbot:
         sol_amount = float(data.get("solAmount", 0) or 0.0)
         if not trader or not mint: return
 
-        # Daily Runner Check: Track big buys >= $1000
-        if tx_type == "buy" and hasattr(self, '_daily_runner_buys'):
-            sol_price = getattr(self._telegram, '_sol_price', 150.0)
-            usd_amount = sol_amount * sol_price
-            if usd_amount >= 1000.0:
-                if mint not in self._daily_runner_buys:
-                    self._daily_runner_buys[mint] = {'buys': [], 'notified': False}
-                self._daily_runner_buys[mint]['buys'].append((sol_amount, time()))
-                
-                # Check if we reached 2+ big buys and haven't notified yet
-                if len(self._daily_runner_buys[mint]['buys']) >= 2 and not self._daily_runner_buys[mint]['notified']:
-                    self._daily_runner_buys[mint]['notified'] = True
-                    asyncio.create_task(self._trigger_daily_runner_alert(mint, mcap_sol))
+        pass
 
         # Blacklist check
         if self.is_blacklisted(trader):
@@ -489,7 +477,35 @@ class Solbot:
                 'token': mint,
                 'amount': sol_amount
             }
-            asyncio.create_task(self._kol_tracker.process_event(kol_event, self))
+            await self._kol_tracker.process_event(kol_event, self)
+
+        # Daily Runner Check: Track big buys >= $1000 & KOL buys
+        if tx_type == "buy" and hasattr(self, '_daily_runner_buys'):
+            sol_price = getattr(self._telegram, '_sol_price', 150.0)
+            usd_amount = sol_amount * sol_price
+            
+            if mint not in self._daily_runner_buys:
+                self._daily_runner_buys[mint] = {'buys': [], 'notified': False}
+                
+            if usd_amount >= 1000.0:
+                self._daily_runner_buys[mint]['buys'].append((sol_amount, time()))
+            
+            big_buys_count = len(self._daily_runner_buys[mint]['buys'])
+            kol_buys_count = len(self._kol_tracker.active_buys.get(mint, set()))
+            
+            # Check if we reached 4+ big buys OR 3+ KOL buys and haven't notified yet
+            if not self._daily_runner_buys[mint]['notified']:
+                reason = None
+                if big_buys_count >= 4 and kol_buys_count >= 3:
+                    reason = "Detected 4+ big buys above $1000 & 3+ active KOL buys"
+                elif big_buys_count >= 4:
+                    reason = "Detected 4+ big buys above $1000"
+                elif kol_buys_count >= 3:
+                    reason = f"Detected Coordinated KOL Interest ({kol_buys_count}+ active KOLs)"
+                
+                if reason:
+                    self._daily_runner_buys[mint]['notified'] = True
+                    asyncio.create_task(self._trigger_daily_runner_alert(mint, mcap_sol, reason))
 
         if mint in self._positions and mcap_sol:
             price_usd = float(mcap_sol) * self._telegram._sol_price
@@ -622,7 +638,7 @@ class Solbot:
         finally:
             self._active_buys.discard(token.mint)
 
-    async def _execute_snipe(self, token: TokenEvent, size: float, reason: str):
+    async def _execute_snipe(self, token: TokenEvent, size: float, reason: str, status_msg=None):
         if token.mint in self._positions:
             self._active_buys.discard(token.mint)
             return
@@ -685,6 +701,11 @@ class Solbot:
                 if cluster_risk >= 30.0:
                     cluster_reason = f"Stealth developer wallet cluster detected. Clustered wallets control {cluster_risk/2:.1f}% of supply."
                     logger.warning(f"❌ AI SAFETY CLUSTER SCREEN FAILED for {token.symbol}: Cluster Risk={cluster_risk:.1f}% | Size={cluster_size} | Reason: {cluster_reason}")
+                    if status_msg:
+                        try:
+                            await status_msg.edit(f"⚡️ <b>TG Manual Buy Clicked!</b>\nTarget: <code>{token.mint}</code>\nAmount: <code>{size} SOL</code>\nStatus: <code>🚫 REJECTED (AI Safety: Cluster Risk={cluster_risk:.1f}%)</code>", parse_mode='html')
+                        except Exception:
+                            pass
                     if self._telegram:
                         await self._telegram.send_message(
                             f"🚫 <b>AI Safety Filtered Clustered Launch:</b> {token.symbol}\n"
@@ -697,6 +718,11 @@ class Solbot:
 
                 if analysis.get("score", 80) < self._ai_min_score or analysis.get("is_honeypot") or analysis.get("is_premine"):
                     logger.warning(f"❌ AI SAFETY SCREEN FAILED for {token.symbol}: Score={analysis.get('score')} | Honeypot={analysis.get('is_honeypot')} | Premine={analysis.get('is_premine')} | Reason: {analysis.get('reason')}")
+                    if status_msg:
+                        try:
+                            await status_msg.edit(f"⚡️ <b>TG Manual Buy Clicked!</b>\nTarget: <code>{token.mint}</code>\nAmount: <code>{size} SOL</code>\nStatus: <code>🚫 REJECTED (AI Score={analysis.get('score')}/100)</code>", parse_mode='html')
+                        except Exception:
+                            pass
                     if self._telegram:
                         await self._telegram.send_message(
                             f"🚫 <b>AI Safety Filtered Rug/Honeypot:</b> {token.symbol}\n"
@@ -738,16 +764,31 @@ class Solbot:
                     }))
 
                 self._save_state()
+                if status_msg:
+                    try:
+                        await status_msg.edit(f"⚡️ <b>TG Manual Buy Clicked!</b>\nTarget: <code>{token.mint}</code>\nAmount: <code>{size} SOL</code>\nStatus: <code>🟢 SUCCESS (Tx: <a href='https://solscan.io/tx/{result.tx_signature}'>{result.tx_signature[:8]}...</a>)</code>", parse_mode='html', link_preview=False)
+                    except Exception:
+                        pass
                 await self._telegram.send_message(f"📡 <b>BUY ({reason}): {token.symbol}</b>\nMCAP: <code>${token.market_cap_usd:,.0f}</code>")
                 asyncio.create_task(self._position_manager(pos))
             else:
                 logger.error(f"Snipe failed for {token.symbol} ({token.mint}): {result.error}")
                 self._processed_mints.discard(token.mint)
+                if status_msg:
+                    try:
+                        await status_msg.edit(f"⚡️ <b>TG Manual Buy Clicked!</b>\nTarget: <code>{token.mint}</code>\nAmount: <code>{size} SOL</code>\nStatus: <code>❌ FAILED ({result.error})</code>", parse_mode='html')
+                    except Exception:
+                        pass
                 if self._telegram:
                     await self._telegram.send_message(f"❌ <b>Snipe Failed ({reason}): {token.symbol}</b>\nError: <code>{result.error}</code>")
         except Exception as e:
             logger.error(f"Error in _execute_snipe: {e}")
             self._processed_mints.discard(token.mint)
+            if status_msg:
+                try:
+                    await status_msg.edit(f"⚡️ <b>TG Manual Buy Clicked!</b>\nTarget: <code>{token.mint}</code>\nAmount: <code>{size} SOL</code>\nStatus: <code>❌ ERROR ({e})</code>", parse_mode='html')
+                except Exception:
+                    pass
         finally:
             self._active_buys.discard(token.mint)
 
@@ -1082,7 +1123,7 @@ class Solbot:
         except Exception as e:
             logger.error(f"Error handling detected runner: {e}")
 
-    async def _trigger_daily_runner_alert(self, mint: str, mcap_sol: Optional[float] = None):
+    async def _trigger_daily_runner_alert(self, mint: str, mcap_sol: Optional[float] = None, reason: Optional[str] = None):
         try:
             # Fetch fresh metadata
             meta = await self._pump_client.get_token_metadata(mint)
@@ -1128,19 +1169,21 @@ class Solbot:
                 ]
             ]
             
+            if reason is None:
+                reason = "Detected 4+ big buys above $1000"
             alert_msg = (
                 f"🏃‍♂️ <b>DAILY RUNNER CANDIDATE DETECTED!</b> 🏃‍♂️\n\n"
                 f"Token: <b>{symbol}</b> ({name})\n"
                 f"Mint: <code>{mint}</code>\n"
                 f"Market Cap: <code>{mcap_sol:.1f} SOL</code> (${mcap_usd:,.0f})\n"
-                f"Daily Runner Reason: <i>Detected 2+ big buys above $1000</i>\n\n"
+                f"Daily Runner Reason: <i>{reason}</i>\n\n"
                 f"👉 <a href='https://pump.fun/{mint}'>Buy on pump.fun</a>"
             )
             
             if self._telegram:
                 await self._telegram.send_message(alert_msg, buttons=buttons)
                 
-            logger.info(f"🏃‍♂️ DAILY RUNNER DETECTED: {symbol} ({mint}) with {len(self._daily_runner_buys[mint]['buys'])} big buys.")
+            logger.info(f"🏃‍♂️ DAILY RUNNER DETECTED: {symbol} ({mint}) | Reason: {reason}")
         except Exception as e:
             logger.error(f"Error triggering daily runner alert: {e}")
 
@@ -1405,7 +1448,7 @@ class Solbot:
             except Exception as e:
                 logger.error(f"Error in missed entry tracker: {e}")
 
-    async def execute_manual_buy(self, mint: str, amount: float):
+    async def execute_manual_buy(self, mint: str, amount: float, status_msg=None):
         """Executes a manual buy triggered from Telegram UI buttons."""
         logger.info(f"Manual buy triggered via TG button for {mint} | Size: {amount} SOL")
         try:
@@ -1421,10 +1464,15 @@ class Solbot:
                 timestamp=time()
             )
             # Execute buy using client
-            await self._execute_snipe(token, amount, f"TG Manual Button")
+            await self._execute_snipe(token, amount, f"TG Manual Button", status_msg)
         except Exception as e:
             logger.error(f"Error executing manual buy: {e}")
-            if self._telegram:
+            if status_msg:
+                try:
+                    await status_msg.edit(f"⚡️ <b>TG Manual Buy Clicked!</b>\nTarget: <code>{mint}</code>\nAmount: <code>{amount} SOL</code>\nStatus: <code>❌ FAILED ({e})</code>", parse_mode='html')
+                except Exception:
+                    pass
+            elif self._telegram:
                 await self._telegram.send_message(f"❌ <b>Manual Buy Failed:</b> <code>{e}</code>")
 
     async def _retrain_brain_weights(self):

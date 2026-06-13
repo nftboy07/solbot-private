@@ -257,8 +257,8 @@ class TelegramController:
                     try:
                         amount = float(parts[1])
                         mint = parts[2]
-                        await event.respond(f"⚡️ <b>TG Manual Buy Clicked!</b>\nTarget: <code>{mint}</code>\nAmount: <code>{amount} SOL</code>\nStatus: <code>SUBMITTING</code>", parse_mode='html')
-                        asyncio.create_task(self._bot.execute_manual_buy(mint, amount))
+                        status_msg = await event.respond(f"⚡️ <b>TG Manual Buy Clicked!</b>\nTarget: <code>{mint}</code>\nAmount: <code>{amount} SOL</code>\nStatus: <code>SUBMITTING</code>", parse_mode='html')
+                        asyncio.create_task(self._bot.execute_manual_buy(mint, amount, status_msg))
                         await event.answer("Buy order submitted!")
                     except Exception as e:
                         logger.error(f"Callback buy error: {e}")
