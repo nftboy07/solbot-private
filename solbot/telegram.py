@@ -277,6 +277,13 @@ class TelegramController:
                 except Exception as e:
                     logger.error(f"Callback kols error: {e}")
                     await event.answer(f"Error: {e}")
+            elif data.startswith("kollist_page_"):
+                try:
+                    page = int(data.split("_")[-1])
+                    await self._handle_kollist_page_callback(event, page)
+                except Exception as e:
+                    logger.error(f"Callback kollist page error: {e}")
+                    await event.answer(f"Error: {e}")
 
     # --- Command Implementations ---
 
@@ -1282,14 +1289,95 @@ class TelegramController:
 
     async def _cmd_kollist(self, event):
         await self.log_brain_event('kollist', 'KOL list requested')
+        args = event.message.text.split()
+        page = 1
+        if len(args) > 1:
+            try:
+                page = int(args[1])
+                if page < 1:
+                    page = 1
+            except ValueError:
+                pass
+                
         kols = getattr(self._bot._kol_tracker, 'wallets', {})
-        msg = ["<b>📣 TRACKED KOL WALLETS</b>"]
-        if kols:
-            for i, (addr, name) in enumerate(kols.items(), 1):
-                msg.append(f"{i}. <code>{addr[:8]}</code>... | Name: <code>{name}</code>")
-        else:
-            msg.append("No KOL wallets configured.")
-        await event.reply("\n".join(msg))
+        if not kols:
+            await event.reply("No KOL wallets configured.")
+            return
+
+        page_size = 30
+        kol_items = list(kols.items())
+        total_kols = len(kol_items)
+        total_pages = (total_kols + page_size - 1) // page_size
+        
+        if page > total_pages:
+            page = total_pages
+
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_items = kol_items[start_idx:end_idx]
+
+        msg = [
+            f"<b>📣 TRACKED KOL WALLETS (Page {page}/{total_pages})</b>",
+            f"<i>Total KOLs: <code>{total_kols}</code></i>\n"
+        ]
+        
+        for idx, (addr, name) in enumerate(page_items, start_idx + 1):
+            msg.append(f"{idx}. <code>{addr[:8]}</code>... | Name: <code>{name}</code>")
+            
+        msg.append(f"\nUse <code>/kollist [page_number]</code> to view more (e.g., <code>/kollist 2</code>).")
+        
+        from telethon import Button
+        buttons = []
+        row = []
+        if page > 1:
+            row.append(Button.inline("◀️ Prev", f"kollist_page_{page-1}"))
+        if page < total_pages:
+            row.append(Button.inline("Next ▶️", f"kollist_page_{page+1}"))
+        if row:
+            buttons.append(row)
+            
+        await event.reply("\n".join(msg), buttons=buttons if buttons else None, parse_mode='html')
+
+    async def _handle_kollist_page_callback(self, event, page):
+        kols = getattr(self._bot._kol_tracker, 'wallets', {})
+        if not kols:
+            await event.edit("No KOL wallets configured.")
+            return
+
+        page_size = 30
+        kol_items = list(kols.items())
+        total_kols = len(kol_items)
+        total_pages = (total_kols + page_size - 1) // page_size
+        
+        if page < 1: page = 1
+        if page > total_pages: page = total_pages
+
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        page_items = kol_items[start_idx:end_idx]
+
+        msg = [
+            f"<b>📣 TRACKED KOL WALLETS (Page {page}/{total_pages})</b>",
+            f"<i>Total KOLs: <code>{total_kols}</code></i>\n"
+        ]
+        
+        for idx, (addr, name) in enumerate(page_items, start_idx + 1):
+            msg.append(f"{idx}. <code>{addr[:8]}</code>... | Name: <code>{name}</code>")
+            
+        msg.append(f"\nUse <code>/kollist [page_number]</code> to view more (e.g., <code>/kollist 2</code>).")
+        
+        from telethon import Button
+        buttons = []
+        row = []
+        if page > 1:
+            row.append(Button.inline("◀️ Prev", f"kollist_page_{page-1}"))
+        if page < total_pages:
+            row.append(Button.inline("Next ▶️", f"kollist_page_{page+1}"))
+        if row:
+            buttons.append(row)
+            
+        await event.edit("\n".join(msg), buttons=buttons if buttons else None, parse_mode='html')
+        await event.answer()
 
     async def _cmd_addkol(self, event):
         await self.log_brain_event('addkol', 'KOL target added')
