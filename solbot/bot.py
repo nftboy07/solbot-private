@@ -677,10 +677,17 @@ class Solbot:
                 creator_history = []
                 try:
                     rows = await self._db._execute_read(
-                        "SELECT mint, peak_mcap_usd, rugged FROM positions WHERE creator = ? LIMIT 5",
+                        "SELECT mint, max_marketcap, roi FROM ticks WHERE creator = ? LIMIT 5",
                         (token.creator,)
                     )
-                    creator_history = [dict(r) for r in rows]
+                    creator_history = [
+                        {
+                            "mint": r["mint"],
+                            "peak_mcap_usd": r["max_marketcap"],
+                            "rugged": r["roi"] < -0.8 if r["roi"] is not None else False
+                        }
+                        for r in rows
+                    ]
                 except Exception as e:
                     logger.error(f"Failed to fetch creator history for safety screen: {e}")
 

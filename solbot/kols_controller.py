@@ -215,13 +215,13 @@ class KOLsController:
         if db:
             try:
                 rows = await db._execute_read(
-                    "SELECT token_mint, SUM(pnl) as total_pnl FROM positions WHERE status='closed' GROUP BY token_mint ORDER BY total_pnl DESC LIMIT 5"
+                    "SELECT mint, SUM(pnl) as total_pnl FROM positions WHERE status='closed' GROUP BY mint ORDER BY total_pnl DESC LIMIT 5"
                 )
                 for i, r in enumerate(rows, 1):
                     lines.append(
-                        f"{i}. Mint: <code>{r['token_mint'][:8]}</code>\n"
+                        f"{i}. Mint: <code>{r['mint'][:8]}</code>\n"
                         f"   Realized Profit: <code>{float(r['total_pnl']):+.2f} SOL</code>\n"
-                        f"   👉 <a href='https://pump.fun/{r['token_mint']}'>pump.fun</a>"
+                        f"   👉 <a href='https://pump.fun/{r['mint']}'>pump.fun</a>"
                     )
             except:
                 pass
@@ -267,12 +267,12 @@ class KOLsController:
         if db:
             try:
                 rows = await db._execute_read(
-                    "SELECT token_mint, buy_price, size, timestamp FROM positions ORDER BY timestamp DESC LIMIT 5"
+                    "SELECT mint, entry_price, size, timestamp FROM positions ORDER BY timestamp DESC LIMIT 5"
                 )
                 for r in rows:
                     lines.append(
-                        f"• BUY: <code>{r['token_mint'][:8]}</code>\n"
-                        f"  Size: <code>{r['size']:.3f} SOL</code> | Entry Cap: <code>${r['buy_price']:,.0f}</code>"
+                        f"• BUY: <code>{r['mint'][:8]}</code>\n"
+                        f"  Size: <code>{r['size']:.3f} SOL</code> | Entry Cap: <code>${r['entry_price']:,.0f}</code>"
                     )
             except:
                 pass

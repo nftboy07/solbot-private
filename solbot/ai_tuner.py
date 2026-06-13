@@ -34,7 +34,7 @@ class AITuner:
 
         try:
             rows = await db._execute_read(
-                "SELECT token_mint, buy_price, size, pnl, status, timestamp, reason FROM positions WHERE status = 'closed' ORDER BY timestamp DESC LIMIT 50"
+                "SELECT mint, entry_price, size, pnl, status, timestamp FROM positions WHERE status = 'closed' ORDER BY timestamp DESC LIMIT 50"
             )
             if rows:
                 trades = [dict(r) for r in rows]
@@ -73,7 +73,7 @@ class AITuner:
         # Format historical trades context for Gemini
         trades_str = ""
         for i, t in enumerate(trades[:15], 1):
-            trades_str += f"Trade {i}: Mint={t['token_mint'][:8]}... | Size={t['size']} SOL | PnL={t['pnl']} SOL | Reason={t.get('reason') or 'None'}\n"
+            trades_str += f"Trade {i}: Mint={t['mint'][:8]}... | Size={t['size']} SOL | PnL={t['pnl']} SOL\n"
 
         current_config = {
             "buy_amount_sol": self._bot._config.jupiter.buy_amount_sol,
