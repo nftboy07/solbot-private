@@ -391,6 +391,13 @@ class Solbot:
                     )
                     
                     if qualified:
+                        # Skip Mayhem Mode tokens
+                        meta = await self._pump_client.get_token_metadata(token.mint)
+                        is_mayhem = meta.get("mayhem") is not None or meta.get("mayhem_state") is not None
+                        if is_mayhem:
+                            logger.info(f"SKIPPING {token.symbol} ({token.mint}): Mayhem Mode token detected.")
+                            continue
+
                         # 4. Fetch Wallet SOL Balance for Sizing and Risk Checks
                         wallet_balance = await self._pump_client.get_sol_balance()
                         
@@ -584,6 +591,10 @@ class Solbot:
         self._active_buys.add(mint)
         try:
             meta = await self._pump_client.get_token_metadata(mint)
+            is_mayhem = meta.get("mayhem") is not None or meta.get("mayhem_state") is not None
+            if is_mayhem:
+                logger.info(f"Skipping KOL snipe for {mint} because it is a Mayhem Mode token.")
+                return
             token = TokenEvent(
                 mint=mint,
                 name=meta.get("name", "Unknown"),
@@ -1269,6 +1280,10 @@ class Solbot:
         try:
             # Fetch fresh metadata
             meta = await self._pump_client.get_token_metadata(mint)
+            is_mayhem = meta.get("mayhem") is not None or meta.get("mayhem_state") is not None
+            if is_mayhem:
+                logger.info(f"Skipping daily runner alert for {meta.get('symbol')} ({mint}) because it is a Mayhem Mode token.")
+                return
             name = meta.get("name", "Unknown")
             symbol = meta.get("symbol", "RUNNER")
             creator = meta.get("creator", "unknown")
