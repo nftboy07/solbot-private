@@ -410,10 +410,10 @@ class Solbot:
                         if c_score >= 85 and confidence_score >= 85:
                             from telethon import Button
                             buttons = [
-                                [Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{token.mint}")],
-                                [Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{token.mint}")],
-                                [Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{token.mint}")],
-                                [Button.inline("Buy 2.0 SOL 🔥", f"buy_2.0_{token.mint}")]
+                                [Button.inline("Buy 0.1 SOL 🟢", f"buy_0.1_{token.mint}")],
+                                [Button.inline("Buy 0.3 SOL 🟡", f"buy_0.3_{token.mint}")],
+                                [Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{token.mint}")],
+                                [Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{token.mint}")]
                             ]
                             market_cap_sol = token.market_cap_usd / self._telegram._sol_price if (self._telegram and self._telegram._sol_price > 0) else float(data.get("marketCapSol", 0) or 0.0)
                             alert_msg = (
@@ -638,10 +638,10 @@ class Solbot:
             if c_score >= 85 and genome:
                 from telethon import Button
                 buttons = [
-                    [Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{token.mint}")],
-                    [Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{token.mint}")],
-                    [Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{token.mint}")],
-                    [Button.inline("Buy 2.0 SOL 🔥", f"buy_2.0_{token.mint}")]
+                    [Button.inline("Buy 0.1 SOL 🟢", f"buy_0.1_{token.mint}")],
+                    [Button.inline("Buy 0.3 SOL 🟡", f"buy_0.3_{token.mint}")],
+                    [Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{token.mint}")],
+                    [Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{token.mint}")]
                 ]
                 market_cap_sol = token.market_cap_usd / self._telegram._sol_price if (self._telegram and self._telegram._sol_price > 0) else 0.0
                 alert_msg = (
@@ -1302,12 +1302,12 @@ class Solbot:
             from telethon import Button
             buttons = [
                 [
-                    Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{mint}"),
-                    Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{mint}")
+                    Button.inline("Buy 0.1 SOL 🟢", f"buy_0.1_{mint}"),
+                    Button.inline("Buy 0.3 SOL 🟡", f"buy_0.3_{mint}")
                 ],
                 [
-                    Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{mint}"),
-                    Button.inline("Buy 2.0 SOL 🔥", f"buy_2.0_{mint}")
+                    Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{mint}"),
+                    Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{mint}")
                 ]
             ]
             
@@ -1803,12 +1803,12 @@ class Solbot:
                     from telethon import Button
                     buttons = [
                         [
-                            Button.inline("Buy 0.01 SOL 🟢", f"buy_0.01_{mint}"),
-                            Button.inline("Buy 0.1 SOL 🟡", f"buy_0.1_{mint}")
+                            Button.inline("Buy 0.1 SOL 🟢", f"buy_0.1_{mint}"),
+                            Button.inline("Buy 0.3 SOL 🟡", f"buy_0.3_{mint}")
                         ],
                         [
-                            Button.inline("Buy 1.0 SOL 🟠", f"buy_1.0_{mint}"),
-                            Button.inline("Buy 2.0 SOL 🔥", f"buy_2.0_{mint}")
+                            Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{mint}"),
+                            Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{mint}")
                         ]
                     ]
                     alert_msg = (

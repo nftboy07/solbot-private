@@ -364,7 +364,7 @@ class TelegramController:
             "  /clustermap <token> — Run stealth funding genesis checks\n\n"
             "<b>🚀 INLINE BUY BUTTONS (Runner Alerts)</b>\n"
             "  Tap buttons when runner alert fires:\n"
-            "  🟢 Buy 0.01 SOL  🟡 Buy 0.1 SOL  🟠 Buy 1.0 SOL  🔥 Buy 5.0 SOL\n\n"
+            "  🟢 Buy 0.1 SOL  🟡 Buy 0.3 SOL  🟠 Buy 0.5 SOL  🔥 Buy 1.0 SOL\n\n"
             "<b>Total: 48+ commands — all logged to /brain for AGI learning 🧠</b>"
         )
         await event.reply(msg1, parse_mode='html')
