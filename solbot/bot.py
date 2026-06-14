@@ -1424,8 +1424,9 @@ class Solbot:
                 total = len(rows)
                 runners = 0
                 for row in rows:
-                    max_cap = row.get('max_marketcap') or 0.0
-                    exit_cap = row.get('exit_marketcap') or 0.0
+                    row_dict = dict(row)
+                    max_cap = row_dict.get('max_marketcap') or 0.0
+                    exit_cap = row_dict.get('exit_marketcap') or 0.0
                     peak = max(max_cap, exit_cap)
                     if peak >= 50000.0:
                         runners += 1
@@ -1460,7 +1461,7 @@ class Solbot:
                 
                 # Check micro-performance
                 if len(own_trades) >= 5:
-                    wins = sum(1 for r in own_trades if (r.get('pnl') or 0.0) > 0.0)
+                    wins = sum(1 for r in own_trades if (dict(r).get('pnl') or 0.0) > 0.0)
                     own_win_rate = wins / len(own_trades)
                     logger.info(f"AGI Self-performance evaluation: Own Win Rate = {own_win_rate*100:.1f}% ({wins}/{len(own_trades)} wins)")
                     
