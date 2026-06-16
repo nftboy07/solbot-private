@@ -29,7 +29,7 @@ class AGIPreBuyFilter:
             liquidity_sol = dex_data.get("liquidity_usd") / 150.0
 
         # Hard Market Cap Checks
-        if market_cap_sol < 20 or market_cap_sol > 150:
+        if market_cap_sol < 5.0 or market_cap_sol > 1500.0:
             return "SKIP", 0, 100.0, f"Market cap out of range: {market_cap_sol:.1f} SOL"
 
         # Hard Liquidity Checks
