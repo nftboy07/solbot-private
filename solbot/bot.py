@@ -1065,6 +1065,7 @@ class Solbot:
         if token_balance <= 0:
             pos.active = False
             if pos.mint in self._positions: del self._positions[pos.mint]
+            asyncio.create_task(self._db.update_position_pnl(pos.mint, 0.0, "closed"))
             self._save_state()
             return
         sell_amount = token_balance * pct
