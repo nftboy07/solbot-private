@@ -501,6 +501,8 @@ class TelegramController:
         # State metrics
         ai_enabled = getattr(self._bot, '_ai_enabled', True)
         ai_min = getattr(self._bot, '_ai_min_score', 75)
+        autorunner_enabled = getattr(self._bot, '_autorunner_enabled', False)
+        autorunner_amount = getattr(self._bot, '_autorunner_amount', 0.01)
         smart_count = len(self._bot._filter._copy_targets) if (hasattr(self._bot, '_filter') and self._bot._filter) else 0
         blacklisted_count = len(getattr(self._bot, '_blacklisted_wallets', []))
         missed_count = len(getattr(self._bot, '_missed_runners', {}))
@@ -531,7 +533,8 @@ class TelegramController:
             "🤖 <b>MODEL STATUS</b>\n"
             f"  Model Endpoint: <code>gemini-2.5-flash</code>\n"
             f"  AI Safety Filter: <code>{'🟢 ENABLED' if ai_enabled else '🔴 DISABLED'}</code>\n"
-            f"  Min Accept Score: <code>{ai_min}</code> (Mode: <code>{preset_name}</code>)\n\n"
+            f"  Min Accept Score: <code>{ai_min}</code> (Mode: <code>{preset_name}</code>)\n"
+            f"  AutoRunner: <code>{'🟢 ENABLED' if autorunner_enabled else '🔴 DISABLED'}</code> (Size: <code>{autorunner_amount} SOL</code>)\n\n"
             "📉 <b>MARKET SENTIMENT & RISK</b>\n"
             f"  Recent Launch Success Rate: <code>{success_rate:.1f}%</code> (Sample: {scanned_count})\n"
             f"  Default Buy Size: <code>{buy_amount:.3f} SOL</code>\n"
@@ -554,6 +557,7 @@ class TelegramController:
         buttons = [
             [
                 Button.inline("🤖 Toggle AI Filter", b"brain_toggle_ai"),
+                Button.inline("🏃 Toggle AutoRunner", b"brain_toggle_autorunner"),
                 Button.inline("🔄 Refresh Stats", b"brain_refresh")
             ],
             [
@@ -579,6 +583,12 @@ class TelegramController:
             self._bot._ai_enabled = not getattr(self._bot, "_ai_enabled", True)
             save()
             await event.answer(f"AI Filter: {'ENABLED' if self._bot._ai_enabled else 'DISABLED'}")
+            
+        elif action == "toggle_autorunner":
+            self._bot._autorunner_enabled = not getattr(self._bot, "_autorunner_enabled", False)
+            save()
+            status = "ENABLED" if self._bot._autorunner_enabled else "DISABLED"
+            await event.answer(f"AutoRunner: {status}")
             
         elif action == "preset_safe":
             object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.01)
