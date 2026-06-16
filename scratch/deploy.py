@@ -21,7 +21,8 @@ def main():
         "solbot/bot.py",
         "solbot/telegram.py",
         "solbot/ai_tuner.py",
-        "solbot/kols_controller.py"
+        "solbot/kols_controller.py",
+        "solbot/rpc_balancer.py"
     ]
     for file_path in files_to_sync:
         scp_cmd = f'scp -i "{key_path}" -o StrictHostKeyChecking=no {file_path} root@{vps_ip}:/root/solbot-production/{file_path}'

@@ -23,6 +23,6 @@ class RPCBalancer(RPCPool):
                 f"• <b>{node.name}</b>\n"
                 f"  URL: <code>{node.url[:40]}...</code>\n"
                 f"  Status: <code>{status}</code> | Latency: <code>{latency_ms:.1f}ms</code>\n"
-                f"  Slot: <code>{node.last_slot}</code> | Requests: <code>{node.failed_requests}/{node.total_requests} failed</code>"
+                f"  Slot: <code>{node.last_slot}</code> | Failed: <code>{node.failed_requests}/{node.total_requests}</code>"
             )
         return "\n".join(lines)
