@@ -128,6 +128,10 @@ class TelegramController:
         async def autobuy_handler(event):
             await self._cmd_autobuy(event)
 
+        @self._client.on(events.NewMessage(pattern='/autorunner'))
+        async def autorunner_handler(event):
+            await self._cmd_autorunner(event)
+
         @self._client.on(events.NewMessage(pattern='/risk|/kill|/pause|/resume|/max_position|/max_drawdown|/buy|/drawdown'))
         async def risk_handler(event):
             await self._cmd_risk(event)
@@ -351,6 +355,7 @@ class TelegramController:
             "  /pause — Pause bot (no new entries)\n"
             "  /resume — Resume bot operation\n"
             "  /autobuy on|off — Toggle automatic buying\n"
+            "  /autorunner on|off|<amount> — Toggle/set Auto-Buy for Daily Runners (0.01, 0.02, 0.05, 0.1 SOL)\n"
             "  /buy <amount> or /max_position <amount> — Set default buy size\n"
             "  /drawdown <pct> — Set trailing stop percentage\n"
             "  /resetrisk — Reset circuit breakers & failure counters\n"
@@ -376,11 +381,14 @@ class TelegramController:
         mode = "🧪 PAPER" if self._paper_mode else "⚔️ LIVE"
         state = "🛑 KILLED" if self._kill_switch else ("⏸ PAUSED" if getattr(self._bot, '_paused', False) else "🟢 ACTIVE")
         autobuy = "✅ ON" if getattr(self._bot, '_autobuy_enabled', False) else "❌ OFF"
+        autorunner = "✅ ON" if getattr(self._bot, '_autorunner_enabled', False) else "❌ OFF"
+        autorunner_size = getattr(self._bot, '_autorunner_amount', 0.01)
         
         msg = (f"<b>📊 SYSTEM STATUS</b>\n"
                f"Mode: <code>{mode}</code>\n"
                f"State: <code>{state}</code>\n"
                f"Autobuy: <code>{autobuy}</code>\n"
+               f"AutoRunner: <code>{autorunner}</code> ({autorunner_size} SOL)\n"
                f"Uptime: <code>{uptime}</code>\n"
                f"Active Positions: <code>{len(getattr(self._bot, '_positions', {}))}</code>\n"
                f"Event Bus Latency: <code>0.42ms</code>")
@@ -883,6 +891,41 @@ class TelegramController:
         if hasattr(self._bot, "_save_state"): self._bot._save_state()
         await event.reply(f"🤖 <b>Autobuy:</b> <code>{status}</code>")
 
+    async def _cmd_autorunner(self, event):
+        args = event.message.text.split()
+        valid_amounts = [0.01, 0.02, 0.05, 0.1]
+        
+        if len(args) > 1:
+            val = args[1].lower()
+            if val == "on":
+                self._bot._autorunner_enabled = True
+            elif val == "off":
+                self._bot._autorunner_enabled = False
+            else:
+                try:
+                    amount = float(val)
+                    if amount not in valid_amounts:
+                        await event.reply(f"⚠️ <b>Invalid Amount!</b>\nAllowed sizes are: <code>0.01, 0.02, 0.05, 0.1</code> SOL.")
+                        return
+                    self._bot._autorunner_amount = amount
+                    self._bot._autorunner_enabled = True
+                except ValueError:
+                    await event.reply(f"Usage:\n/autorunner on|off\n/autorunner <0.01|0.02|0.05|0.1>")
+                    return
+        else:
+            self._bot._autorunner_enabled = not getattr(self._bot, "_autorunner_enabled", False)
+            
+        status = "ENABLED" if self._bot._autorunner_enabled else "DISABLED"
+        amount = getattr(self._bot, "_autorunner_amount", 0.01)
+        
+        if hasattr(self._bot, "_save_state"):
+            self._bot._save_state()
+            
+        await event.reply(
+            f"🏃‍♂️ <b>Auto-Buying Runners:</b> <code>{status}</code>\n"
+            f"💰 <b>Runner Buy Size:</b> <code>{amount} SOL</code>"
+        )
+
     async def _cmd_risk(self, event):
         await self.log_brain_event('risk', 'Risk settings updated')
         args = event.message.text.split()
@@ -973,7 +1016,8 @@ class TelegramController:
                f"Max Drawdown: <code>{self._bot._config.strategy.trailing_stop_pct*100:.1f}%</code>\n"
                f"Kill Switch: <code>{'ON' if self._kill_switch else 'OFF'}</code>\n"
                f"Paper Mode: <code>{'ON' if self._paper_mode else 'OFF'}</code>\n"
-               f"Autobuy: <code>{'ON' if getattr(self._bot, '_autobuy_enabled', False) else 'OFF'}</code>\n\n"
+               f"Autobuy: <code>{'ON' if getattr(self._bot, '_autobuy_enabled', False) else 'OFF'}</code>\n"
+               f"AutoRunner: <code>{'ON' if getattr(self._bot, '_autorunner_enabled', False) else 'OFF'}</code> ({getattr(self._bot, '_autorunner_amount', 0.01)} SOL)\n\n"
                "<b>Presets:</b> <code>/risk <safe|normal|degen></code>")
         await event.reply(msg)
 

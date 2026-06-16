@@ -80,6 +80,8 @@ class Solbot:
         self._ai_enabled = True
         self._ai_min_score = 75
         self._autobuy_enabled = True
+        self._autorunner_enabled = False
+        self._autorunner_amount = 0.01
         self._ai_filter = AIFilter()
         self._go_monitor = None
         self._raydium = None
@@ -134,6 +136,8 @@ class Solbot:
                 "ai_enabled": self._ai_enabled,
                 "ai_min_score": self._ai_min_score,
                 "autobuy_enabled": self._autobuy_enabled,
+                "autorunner_enabled": self._autorunner_enabled,
+                "autorunner_amount": self._autorunner_amount,
                 "blacklisted_wallets": list(self._blacklisted_wallets),
                 "kol_threshold": self._kol_threshold,
                 "config_overrides": {
@@ -192,6 +196,8 @@ class Solbot:
             self._ai_enabled = state.get("ai_enabled", True)
             self._ai_min_score = state.get("ai_min_score", 75)
             self._autobuy_enabled = state.get("autobuy_enabled", False)
+            self._autorunner_enabled = state.get("autorunner_enabled", False)
+            self._autorunner_amount = state.get("autorunner_amount", 0.01)
             self._kol_threshold = state.get("kol_threshold", 3)
             
             # Restore config overrides
@@ -1313,32 +1319,58 @@ class Solbot:
             }
             self._save_state()
 
-            # Construct Telethon inline buttons
-            from telethon import Button
-            buttons = [
-                [
-                    Button.inline("Buy 0.1 SOL 🟢", f"buy_0.1_{mint}"),
-                    Button.inline("Buy 0.3 SOL 🟡", f"buy_0.3_{mint}")
-                ],
-                [
-                    Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{mint}"),
-                    Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{mint}")
-                ]
-            ]
-            
+            # Construct TokenEvent for sniping
+            token = TokenEvent(
+                mint=mint,
+                name=name,
+                symbol=symbol,
+                creator=creator,
+                market_cap_usd=mcap_usd,
+                liquidity_sol=float(meta.get("liquidity_sol", 0.0) or 0.0),
+                timestamp=time()
+            )
+
             if reason is None:
                 reason = "Detected 4+ big buys above $1000"
-            alert_msg = (
-                f"🏃‍♂️ <b>DAILY RUNNER CANDIDATE DETECTED!</b> 🏃‍♂️\n\n"
-                f"Token: <b>{symbol}</b> ({name})\n"
-                f"Mint: <code>{mint}</code>\n"
-                f"Market Cap: <code>{mcap_sol:.1f} SOL</code> (${mcap_usd:,.0f})\n"
-                f"Daily Runner Reason: <i>{reason}</i>\n\n"
-                f"👉 <a href='https://pump.fun/{mint}'>Buy on pump.fun</a>"
-            )
-            
-            if self._telegram:
-                await self._telegram.send_message(alert_msg, buttons=buttons)
+
+            if self._autorunner_enabled:
+                logger.info(f"Auto-buying runner {symbol} ({mint}) | Size: {self._autorunner_amount} SOL")
+                asyncio.create_task(self._execute_snipe(token, self._autorunner_amount, f"AutoRunner ({reason})"))
+                
+                alert_msg = (
+                    f"🏃‍♂️ <b>DAILY RUNNER CANDIDATE DETECTED!</b> 🏃‍♂️\n\n"
+                    f"Token: <b>{symbol}</b> ({name})\n"
+                    f"Mint: <code>{mint}</code>\n"
+                    f"Market Cap: <code>{mcap_sol:.1f} SOL</code> (${mcap_usd:,.0f})\n"
+                    f"Daily Runner Reason: <i>{reason}</i>\n\n"
+                    f"🤖 <b>Auto-Buy Triggered:</b> <code>{self._autorunner_amount} SOL</code>\n\n"
+                    f"👉 <a href='https://pump.fun/{mint}'>Buy on pump.fun</a>"
+                )
+                if self._telegram:
+                    await self._telegram.send_message(alert_msg)
+            else:
+                # Construct Telethon inline buttons for manual buy
+                from telethon import Button
+                buttons = [
+                    [
+                        Button.inline("Buy 0.1 SOL 🟢", f"buy_0.1_{mint}"),
+                        Button.inline("Buy 0.3 SOL 🟡", f"buy_0.3_{mint}")
+                    ],
+                    [
+                        Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{mint}"),
+                        Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{mint}")
+                    ]
+                ]
+                alert_msg = (
+                    f"🏃‍♂️ <b>DAILY RUNNER CANDIDATE DETECTED!</b> 🏃‍♂️\n\n"
+                    f"Token: <b>{symbol}</b> ({name})\n"
+                    f"Mint: <code>{mint}</code>\n"
+                    f"Market Cap: <code>{mcap_sol:.1f} SOL</code> (${mcap_usd:,.0f})\n"
+                    f"Daily Runner Reason: <i>{reason}</i>\n\n"
+                    f"👉 <a href='https://pump.fun/{mint}'>Buy on pump.fun</a>"
+                )
+                if self._telegram:
+                    await self._telegram.send_message(alert_msg, buttons=buttons)
                 
             logger.info(f"🏃‍♂️ DAILY RUNNER DETECTED: {symbol} ({mint}) | Reason: {reason}")
         except Exception as e:
