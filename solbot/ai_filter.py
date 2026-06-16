@@ -208,6 +208,34 @@ class AIFilter:
         Analyze Solana token distribution, dev history, and freeze authority for rug pull risks.
         Returns a dict: {"score": int (0-100), "is_premine": bool, "is_honeypot": bool, "reason": str}
         """
+        # 1. Tracing Funding Source Recursively (Creator Graph Blacklisting)
+        if hasattr(self, '_bot') and self._bot:
+            db = getattr(self._bot, '_db', None)
+            mapper = getattr(self._bot, '_cluster_mapper', None)
+            if db and mapper:
+                try:
+                    rpc_url = await self._bot._pump_client._get_rpc_url()
+                    current = creator
+                    for hop in range(3):
+                        parent = await mapper.trace_creator_genesis(current, rpc_url, max_hops=1)
+                        if not parent or parent == current:
+                            break
+                        creator_data = await db.get_creator(parent)
+                        if creator_data:
+                            blacklist_score = float(creator_data.get("blacklist_score", 0.0) or 0.0)
+                            rug_count = int(creator_data.get("rug_count", 0) or 0)
+                            if blacklist_score > 80.0 or rug_count > 0:
+                                logger.warning(f"🚫 Creator Graph Blacklist Triggered! Creator {creator} funded by blacklisted wallet: {parent} (Score: {blacklist_score}, Rugs: {rug_count})")
+                                return {
+                                    "score": 10,
+                                    "is_premine": False,
+                                    "is_honeypot": False,
+                                    "reason": f"Creator funded by blacklisted ancestor wallet: {parent[:6]}...{parent[-4:]}"
+                                }
+                        current = parent
+                except Exception as e:
+                    logger.error(f"Error checking creator graph blacklist: {e}")
+
         # Format holders & creator history for prompt
         holders_str = "\n".join([f"- Account: {h.get('account', 'unknown')[:8]}... | Share: {h.get('share_pct', 0.0):.2f}%" for h in holders[:10]])
         history_str = "\n".join([f"- Token: {h.get('mint', 'unknown')[:8]}... | Peak Mcap: ${h.get('peak_mcap_usd', 0.0):,.0f} | Rugged: {h.get('rugged', False)}" for h in creator_history[:5]])

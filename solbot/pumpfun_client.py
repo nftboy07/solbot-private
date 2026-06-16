@@ -17,6 +17,7 @@ from solbot.config import BotConfig
 from solbot.models import TradeResult
 from solbot.wallet import Wallet
 from solbot.jito import JitoClient
+from solbot.jito_tip_estimator import JitoTipEstimator
 
 logger = logging.getLogger("bot.pumpfun_client")
 
@@ -32,6 +33,7 @@ class PumpFunClient:
         self._jito: Optional[JitoClient] = None
         self._base_url = "https://pumpportal.fun/api/trade-local"
         self._rpc_pool = None
+        self._tip_estimator = JitoTipEstimator()
 
     async def start(self):
         if not self._session:
@@ -39,12 +41,12 @@ class PumpFunClient:
             self._session = aiohttp.ClientSession(timeout=timeout)
         # JitoClient only takes config
         self._jito = JitoClient(self._bot_config)
-        # JitoClient has no start method
+        await self._tip_estimator.start()
 
     async def stop(self):
         if self._session:
             await self._session.close()
-        # JitoClient has no stop method
+        await self._tip_estimator.stop()
 
     async def _get_rpc_url(self) -> str:
         if hasattr(self, '_rpc_pool') and self._rpc_pool:
@@ -292,6 +294,34 @@ class PumpFunClient:
                 continue
         return 0.0
 
+    async def get_recent_prioritization_fee(self, mint: str) -> float:
+        """Queries getRecentPrioritizationFees and returns the 75th percentile fee in SOL."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getRecentPrioritizationFees",
+            "params": [[mint]]
+        }
+        url = await self._get_rpc_url()
+        try:
+            async with self._session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    fees = data.get("result", [])
+                    if fees:
+                        fee_vals = sorted([float(f.get("prioritizationFee", 0)) for f in fees])
+                        idx = int(len(fee_vals) * 0.75)
+                        micro_lamports = fee_vals[idx] if idx < len(fee_vals) else fee_vals[-1]
+                        
+                        # Convert to SOL (assume 200k compute units limit standard)
+                        lamports = (micro_lamports * 200000) / 1000000.0
+                        fee_sol = lamports / 1e9
+                        # Safety limits: min 0.00005 SOL, max 0.01 SOL
+                        return max(0.00005, min(0.01, fee_sol))
+        except Exception as e:
+            logger.error(f"Error fetching prioritization fees: {e}")
+        return 0.00005
+
     async def execute_trade(
         self, 
         mint: str, 
@@ -307,7 +337,10 @@ class PumpFunClient:
         
         amount = amount or self._jupiter_config.buy_amount_sol
         slippage = slippage or self._jupiter_config.slippage_bps
-        priority_fee = priority_fee or 0.00001
+        
+        # 1. Dynamic prioritization fee estimation
+        if priority_fee is None:
+            priority_fee = await self.get_recent_prioritization_fee(mint)
 
         payload = {
             "publicKey": self._wallet.pubkey_str,
@@ -350,15 +383,14 @@ class PumpFunClient:
                 if not recent_blockhash:
                     return TradeResult(success=False, token_mint=mint, error="Failed to fetch recent blockhash for Jito tip")
 
-                # Dynamically set tip size based on buy size or congestion override
+                # 2. Dynamic Jito tip estimation
                 if jito_tip is not None:
                     tip_sol = jito_tip
                 else:
-                    tip_sol = 0.001
-                    if amount >= 0.02:
-                        tip_sol = 0.002
-                    elif amount <= 0.001:
-                        tip_sol = 0.0005
+                    priority_level = "medium"
+                    if action == "sell" or amount >= 0.1:
+                        priority_level = "high"
+                    tip_sol = self._tip_estimator.get_tip(priority_level)
 
                 tip_account = Pubkey.from_string("ADaUMid9yfUytqMBB6f7JSt39zG9u4L9J6vCjW2H96Mh")
                 tip_lamports = int(tip_sol * 1e9)

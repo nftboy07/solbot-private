@@ -252,6 +252,10 @@ class TelegramController:
         async def clustermap_handler(event):
             await self._cmd_clustermap(event)
 
+        @self._client.on(events.NewMessage(pattern='/visualize'))
+        async def visualize_handler(event):
+            await self._cmd_visualize(event)
+
         @self._client.on(events.CallbackQuery)
         async def callback_handler(event):
             data = event.data.decode("utf-8")
@@ -366,7 +370,8 @@ class TelegramController:
             "<b>🧠 ADVANCED AGI OPERATIONS SUITE</b>\n"
             "  /autotune — View performance KPIs and run AI parameter tuning\n"
             "  /rpcbalancer — Check latency and status of Solana RPC nodes\n"
-            "  /clustermap <token> — Run stealth funding genesis checks\n\n"
+            "  /clustermap <token> — Run stealth funding genesis checks\n"
+            "  /visualize <token> — Render visual ASCII holder relationship map\n\n"
             "<b>🚀 INLINE BUY BUTTONS (Runner Alerts)</b>\n"
             "  Tap buttons when runner alert fires:\n"
             "  🟢 Buy 0.1 SOL  🟡 Buy 0.3 SOL  🟠 Buy 0.5 SOL  🔥 Buy 1.0 SOL\n\n"
@@ -1830,6 +1835,28 @@ class TelegramController:
             rpc_url = await self._bot._rpc_pool.get_best_node()
 
         report = await mapper.get_cluster_report(mint_address, rpc_url)
+        await event.reply(report, parse_mode='html')
+
+    async def _cmd_visualize(self, event):
+        await self.log_brain_event('visualize', 'Holder relationship visualization executed')
+        args = event.message.text.split()
+        if len(args) < 2:
+            await event.reply("🔍 <b>Holder Relationship Mapping</b>\nPlease specify a token mint address.\nExample: <code>/visualize mint_address</code>")
+            return
+        
+        mint_address = args[1]
+        mapper = getattr(self._bot, '_cluster_mapper', None)
+        if not mapper:
+            await event.reply("❌ Cluster Mapper not initialized.")
+            return
+
+        await event.respond(f"⏳ <b>Mapping holder relationships for:</b>\n<code>{mint_address}</code>", parse_mode='html')
+        
+        rpc_url = self._bot._config.solana.rpc_url
+        if hasattr(self._bot, '_rpc_pool') and self._bot._rpc_pool:
+            rpc_url = await self._bot._rpc_pool.get_best_node()
+
+        report = await mapper.get_holder_relationship_map(mint_address, rpc_url)
         await event.reply(report, parse_mode='html')
 
 

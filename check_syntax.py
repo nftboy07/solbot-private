@@ -5,7 +5,11 @@ files = [
     r"C:\Users\91907\.gemini\antigravity\scratch\solbot-private\solbot\bot.py",
     r"C:\Users\91907\.gemini\antigravity\scratch\solbot-private\solbot\db.py",
     r"C:\Users\91907\.gemini\antigravity\scratch\solbot-private\solbot\ai_tuner.py",
-    r"C:\Users\91907\.gemini\antigravity\scratch\solbot-private\solbot\telegram.py"
+    r"C:\Users\91907\.gemini\antigravity\scratch\solbot-private\solbot\telegram.py",
+    r"C:\Users\91907\.gemini\antigravity\scratch\solbot-private\solbot\jito_tip_estimator.py",
+    r"C:\Users\91907\.gemini\antigravity\scratch\solbot-private\solbot\pumpfun_client.py",
+    r"C:\Users\91907\.gemini\antigravity\scratch\solbot-private\solbot\ai_filter.py",
+    r"C:\Users\91907\.gemini\antigravity\scratch\solbot-private\solbot\cluster_mapper.py"
 ]
 
 all_good = True

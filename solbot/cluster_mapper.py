@@ -220,3 +220,82 @@ class ClusterMapper:
         else:
             lines.append("No stealth-funded clusters detected in the top holders list.")
         return "\n".join(lines)
+
+    async def get_holder_relationship_map(self, mint: str, rpc_url: str) -> str:
+        """
+        Maps all top 10 holders, groups them by their genesis roots,
+        and renders a beautiful ASCII relationship tree.
+        """
+        accounts_data = await self._post_rpc(rpc_url, "getTokenLargestAccounts", [mint])
+        if not accounts_data or not isinstance(accounts_data, list):
+            if isinstance(accounts_data, dict):
+                accounts_data = accounts_data.get("value", [])
+            else:
+                return "❌ Could not fetch top holders data."
+
+        top_holders = accounts_data[:10]
+        if not top_holders:
+            return "❌ No holders found for this token."
+
+        total_supply = 1_000_000_000.0
+        
+        # 1. Resolve owners
+        owner_tasks = []
+        for holder in top_holders:
+            acc_address = holder.get("address")
+            amount = float(holder.get("amount", 0)) / 1e6
+            share_pct = (amount / total_supply) * 100.0
+            owner_tasks.append(self._resolve_owner(acc_address, rpc_url, share_pct))
+
+        resolved_holders = await asyncio.gather(*owner_tasks)
+        resolved_holders = [rh for rh in resolved_holders if rh]
+
+        # 2. Trace genesis roots
+        trace_tasks = []
+        for rh in resolved_holders:
+            trace_tasks.append(self.trace_creator_genesis(rh["owner"], rpc_url, max_hops=2))
+
+        roots = await asyncio.gather(*trace_tasks)
+
+        # 3. Associate owners with their roots
+        root_groups = {}  # {root: [holders]}
+        for rh, root in zip(resolved_holders, roots):
+            if not root:
+                root = "Unknown / Direct"
+            rh["root"] = root
+            if root not in root_groups:
+                root_groups[root] = []
+            root_groups[root].append(rh)
+
+        # 4. Format ASCII Output
+        lines = [
+            "🧬 <b>HOLDER RELATIONSHIP MAP</b>",
+            f"🪙 Token: <code>{mint}</code>\n",
+            "<code>"
+        ]
+
+        # Process roots with multiple wallets (Clusters) first
+        for root, group in root_groups.items():
+            if len(group) >= 2 and root != "Unknown / Direct":
+                total_pct = sum(g["share_pct"] for g in group)
+                lines.append(f"[Cluster Root] ──> Funder ({root[:6]}...{root[-4:]}) | {total_pct:.1f}% supply")
+                for i, g in enumerate(group):
+                    is_last = (i == len(group) - 1)
+                    branch = "└──>" if is_last else "├──>"
+                    lines.append(f"  {branch} Wallet {i+1} ({g['owner'][:6]}...{g['owner'][-4:]}): {g['share_pct']:.2f}%")
+                lines.append("")
+
+        # Process independent or single-holder roots next
+        lines.append("[Independent / Other Top Holders]")
+        ind_count = 0
+        for root, group in root_groups.items():
+            if len(group) == 1 or root == "Unknown / Direct":
+                for g in group:
+                    ind_count += 1
+                    lines.append(f"  ├── Wallet {ind_count} ({g['owner'][:6]}...{g['owner'][-4:]}): {g['share_pct']:.2f}%")
+        
+        if ind_count == 0:
+            lines.append("  (None - 100% of top holders are clustered!)")
+            
+        lines.append("</code>")
+        return "\n".join(lines)

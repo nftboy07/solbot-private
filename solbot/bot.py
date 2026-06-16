@@ -83,6 +83,7 @@ class Solbot:
         self._autorunner_enabled = False
         self._autorunner_amount = 0.01
         self._ai_filter = AIFilter()
+        self._ai_filter._bot = self
         self._go_monitor = None
         self._raydium = None
         self._dexscreener = DexScreenerClient()
