@@ -208,10 +208,6 @@ class AIFilter:
         Analyze Solana token distribution, dev history, and freeze authority for rug pull risks.
         Returns a dict: {"score": int (0-100), "is_premine": bool, "is_honeypot": bool, "reason": str}
         """
-        api_key = self._config.ai.gemini_api_key
-        if not api_key:
-            return {"score": 80, "is_premine": False, "is_honeypot": False, "reason": "No Gemini API Key available for safety scan."}
-
         # Format holders & creator history for prompt
         holders_str = "\n".join([f"- Account: {h.get('account', 'unknown')[:8]}... | Share: {h.get('share_pct', 0.0):.2f}%" for h in holders[:10]])
         history_str = "\n".join([f"- Token: {h.get('mint', 'unknown')[:8]}... | Peak Mcap: ${h.get('peak_mcap_usd', 0.0):,.0f} | Rugged: {h.get('rugged', False)}" for h in creator_history[:5]])
@@ -242,34 +238,68 @@ class AIFilter:
         }}
         """
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
-        }
-        headers = {"Content-Type": "application/json"}
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers=headers) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        # Extract JSON block
-                        json_match = re.search(r"\{.*\}", text, re.DOTALL)
-                        if json_match:
-                            res = json.loads(json_match.group())
-                            logger.info(f"Gemini Safety Analysis for {token_mint}: {res}")
-                            return {
-                                "score": int(res.get("score", 80)),
-                                "is_premine": bool(res.get("is_premine", False)),
-                                "is_honeypot": bool(res.get("is_honeypot", False)),
-                                "reason": str(res.get("reason", "Analyzed successfully."))
-                            }
-                    else:
-                        error_text = await resp.text()
-                        logger.error(f"Gemini Safety API error: {resp.status} - {error_text}")
-        except Exception as e:
-            logger.error(f"Gemini Safety API failed: {e}")
-        
-        return {"score": 80, "is_premine": False, "is_honeypot": False, "reason": "Safety scan failed, using default safe parameters."}
+        # 1. Try Gemini
+        api_key = self._config.ai.gemini_api_key
+        if api_key:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            payload = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }]
+            }
+            headers = {"Content-Type": "application/json"}
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=payload, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                            json_match = re.search(r"\{.*\}", text, re.DOTALL)
+                            if json_match:
+                                res = json.loads(json_match.group())
+                                logger.info(f"Gemini Safety Analysis for {token_mint}: {res}")
+                                return {
+                                    "score": int(res.get("score", 80)),
+                                    "is_premine": bool(res.get("is_premine", False)),
+                                    "is_honeypot": bool(res.get("is_honeypot", False)),
+                                    "reason": str(res.get("reason", "Analyzed successfully."))
+                                }
+                        else:
+                            error_text = await resp.text()
+                            logger.error(f"Gemini Safety API error: {resp.status} - {error_text}")
+            except Exception as e:
+                logger.error(f"Gemini Safety API failed: {e}")
+
+        # 2. Try Primary AI Provider (NVIDIA/BluesMinds/MiniMax)
+        if self._api_key:
+            try:
+                payload = {
+                    "model": self._model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1
+                }
+                headers = {
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json"
+                }
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(self._base_url, json=payload, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            content = data['choices'][0]['message']['content'].strip()
+                            json_match = re.search(r"\{.*\}", content, re.DOTALL)
+                            if json_match:
+                                res = json.loads(json_match.group())
+                                logger.info(f"Primary AI Safety Analysis for {token_mint}: {res}")
+                                return {
+                                    "score": int(res.get("score", 80)),
+                                    "is_premine": bool(res.get("is_premine", False)),
+                                    "is_honeypot": bool(res.get("is_honeypot", False)),
+                                    "reason": str(res.get("reason", "Analyzed successfully."))
+                                }
+                        else:
+                            logger.error(f"Primary AI Safety API error: {resp.status}")
+            except Exception as e:
+                logger.error(f"Primary AI Safety Analysis failed: {e}")
+
+        return {"score": 80, "is_premine": False, "is_honeypot": False, "reason": "Safety scan fallback used (APIs rate-limited or unavailable)."}

@@ -59,14 +59,9 @@ class AITuner:
         return trades, kpis
 
     async def generate_suggestions(self) -> Optional[dict]:
-        """Queries Gemini AI to generate optimized strategy parameters based on performance."""
-        api_key = self._bot._config.ai.gemini_api_key
-        if not api_key:
-            logger.warning("No Gemini API key found for AI Tuner.")
-            return None
-
+        """Queries Gemini AI (or primary AI provider fallback) to generate optimized strategy parameters based on performance."""
         trades, kpis = await self.get_closed_trades_summary()
-
+ 
         db = getattr(self._bot, '_db', None)
         market_success_rate = 0.0
         if db:
@@ -79,12 +74,12 @@ class AITuner:
                     market_success_rate = (runners / len(rows)) * 100.0
             except Exception as e:
                 logger.error(f"Error reading ticks for AI Tuner: {e}")
-
+ 
         # Format historical trades context for Gemini
         trades_str = ""
         for i, t in enumerate(trades[:15], 1):
             trades_str += f"Trade {i}: Mint={t['mint'][:8]}... | Size={t['size']} SOL | PnL={t['pnl']} SOL\n"
-
+ 
         current_config = {
             "buy_amount_sol": self._bot._config.jupiter.buy_amount_sol,
             "trailing_stop_pct": self._bot._config.strategy.trailing_stop_pct,
@@ -92,7 +87,7 @@ class AITuner:
             "ai_min_score": self._bot._ai_min_score,
             "kol_threshold": getattr(self._bot, "_kol_threshold", 2)
         }
-
+ 
         prompt = (
             f"You are the Solbot AGI Autotuner. Analyze recent trade performance and suggest parameter updates.\n\n"
             f"--- CURRENT CONFIGURATION ---\n"
@@ -126,29 +121,57 @@ class AITuner:
             f"  \"reason\": \"string explanation of changes\"\n"
             f"}}"
         )
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
-        }
-        headers = {"Content-Type": "application/json"}
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers=headers) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        # Extract JSON block
-                        json_match = re.search(r"\{.*\}", text, re.DOTALL)
-                        if json_match:
-                            return json.loads(json_match.group())
-                    else:
-                        logger.error(f"Gemini API returned error for autotuner: {resp.status}")
-        except Exception as e:
-            logger.error(f"Failed to call Gemini API for autotuner suggestions: {e}")
+ 
+        # 1. Try Gemini
+        api_key = self._bot._config.ai.gemini_api_key
+        if api_key:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            payload = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }]
+            }
+            headers = {"Content-Type": "application/json"}
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=payload, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                            json_match = re.search(r"\{.*\}", text, re.DOTALL)
+                            if json_match:
+                                return json.loads(json_match.group())
+                        else:
+                            logger.error(f"Gemini API returned error for autotuner: {resp.status}")
+            except Exception as e:
+                logger.error(f"Failed to call Gemini API for autotuner suggestions: {e}")
+ 
+        # 2. Try Primary AI Provider fallback
+        ai_filter = getattr(self._bot, "_ai_filter", None)
+        if ai_filter and ai_filter._api_key:
+            try:
+                payload = {
+                    "model": ai_filter._model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1
+                }
+                headers = {
+                    "Authorization": f"Bearer {ai_filter._api_key}",
+                    "Content-Type": "application/json"
+                }
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(ai_filter._base_url, json=payload, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            content = data['choices'][0]['message']['content'].strip()
+                            json_match = re.search(r"\{.*\}", content, re.DOTALL)
+                            if json_match:
+                                return json.loads(json_match.group())
+                        else:
+                            logger.error(f"Primary AI API returned error for autotuner: {resp.status}")
+            except Exception as e:
+                logger.error(f"Failed to call Primary AI API for autotuner suggestions: {e}")
+ 
         return None
 
     async def autotune(self) -> Tuple[bool, str]:
