@@ -29,7 +29,11 @@ class AGIPreBuyFilter:
             liquidity_sol = dex_data.get("liquidity_usd") / 150.0
 
         # Hard Market Cap Checks
-        if market_cap_sol < 5.0 or market_cap_sol > 1500.0:
+        sol_price = getattr(self._bot._telegram, '_sol_price', 150.0) if hasattr(self._bot, '_telegram') else 150.0
+        max_mcap_sol = 5000.0
+        if hasattr(self._bot, '_config') and self._bot._config.pumpfun.max_market_cap_usd:
+            max_mcap_sol = max(5000.0, self._bot._config.pumpfun.max_market_cap_usd / sol_price)
+        if market_cap_sol < 5.0 or market_cap_sol > max_mcap_sol:
             return "SKIP", 0, 100.0, f"Market cap out of range: {market_cap_sol:.1f} SOL"
 
         # Hard Liquidity Checks
@@ -45,8 +49,8 @@ class AGIPreBuyFilter:
         if volume_m5 < 3:
             return "SKIP", 0, 100.0, f"Volume too low: {volume_m5:.1f} SOL"
 
-        if sells > buys or (buys + sells > 0 and sells / (buys + sells) > 0.40):
-            return "SKIP", 0, 100.0, f"High sell ratio: {sells} sells vs {buys} buys"
+        if buys + sells > 0 and sells / (buys + sells) > 0.65:
+            return "SKIP", 0, 100.0, f"High sell ratio: {sells} sells vs {buys} buys (dumping)"
 
         buy_sell_ratio = buys / max(1, sells)
 
