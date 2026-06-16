@@ -135,23 +135,36 @@ class PumpFunClient:
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
-                "method": "getAccountInfo",
+                "method": "getMultipleAccounts",
                 "params": [
-                    str(metadata_pda),
+                    [mint, str(metadata_pda)],
                     {"encoding": "base64"}
                 ]
             }
 
             url = await self._get_rpc_url()
             start = time.perf_counter()
+            
+            symbol = "???"
+            name = "Unknown"
+            mayhem_mode = False
+            
             async with self._session.post(url, json=payload) as resp:
                 latency = (time.perf_counter() - start) * 1000
                 await self._report_rpc_metric(url, True, latency, status_code=resp.status)
                 if resp.status == 200:
                     res_data = await resp.json()
-                    value = res_data.get("result", {}).get("value")
-                    if value and value.get("data"):
-                        b64_data = value["data"][0]
+                    value = res_data.get("result", {}).get("value", [])
+                    
+                    # 1. Check mint account owner for Token-2022 (Mayhem Mode)
+                    if len(value) > 0 and value[0]:
+                        owner = value[0].get("owner")
+                        if owner == "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb":
+                            mayhem_mode = True
+                            
+                    # 2. Check metadata PDA for symbol/name
+                    if len(value) > 1 and value[1] and value[1].get("data"):
+                        b64_data = value[1]["data"][0]
                         data = base64.b64decode(b64_data)
                         if len(data) >= 101:
                             offset = 65
@@ -163,17 +176,18 @@ class PumpFunClient:
                             symbol_len = struct.unpack("<I", data[offset:offset+4])[0]
                             offset += 4
                             symbol = data[offset:offset+symbol_len].decode("utf-8", errors="ignore").strip("\x00 \t\n\r")
-                            
-                            return {
-                                "symbol": symbol,
-                                "name": name,
-                                "creator": "unknown",
-                                "market_cap_sol": 0,
-                                "liquidity_sol": 0
-                            }
+            
+            return {
+                "symbol": symbol,
+                "name": name,
+                "creator": "unknown",
+                "market_cap_sol": 0,
+                "liquidity_sol": 0,
+                "mayhem_mode": mayhem_mode
+            }
         except Exception as e:
             logger.error(f"Error fetching on-chain metadata for {mint}: {e}")
-        return {"symbol": "???", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0}
+        return {"symbol": "???", "name": "Unknown", "creator": "unknown", "market_cap_sol": 0, "liquidity_sol": 0, "mayhem_mode": False}
 
     async def get_token_metadata(self, mint: str) -> Dict:
         """Fetch basic token metadata (symbol)."""
@@ -189,7 +203,11 @@ class PumpFunClient:
                 if proxy and proxy_url:
                     proxy.report_result(proxy_url, resp.status == 200, resp.status, time.time() - start)
                 if resp.status == 200:
-                    return await resp.json()
+                    data = await resp.json()
+                    # If mayhem fields exist, explicitly mark mayhem_mode
+                    if data.get("mayhem") is not None or data.get("mayhem_state") is not None:
+                        data["mayhem_mode"] = True
+                    return data
         except Exception as e:
             if proxy and proxy_url:
                 proxy.report_result(proxy_url, False, 500, time.time() - start)
