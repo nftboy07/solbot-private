@@ -306,9 +306,11 @@ class Solbot:
         except Exception as e:
             logger.error(f"Failed to load historically traded mints: {e}")
             
-        await self._sync_existing_holdings()
+        logger.info("Running on-chain position reconcile...")
         await self._reconcile_positions_with_chain()
+        await self._sync_existing_holdings()
         profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+        logger.info("Enforcing startup position cap...")
         await self._enforce_position_cap_on_startup(profile)
 
         for pos in self._positions.values():
@@ -1731,22 +1733,21 @@ class Solbot:
             })
 
     async def _sync_existing_holdings(self):
+        """Refresh balances for tracked positions only (do not import entire wallet)."""
         try:
             tokens = await self._pump_client.get_all_token_balances()
-            for mint, data in tokens.items():
-                if mint not in self._positions and data["balance"] > 0:
-                    meta = await self._pump_client.get_token_metadata(mint)
-                    symbol = meta.get("symbol", "SYNCED")
-                    price_usd = float(meta.get("market_cap_sol", 0)) * self._telegram._sol_price
-                    pos = Position(
-                        mint=mint, symbol=symbol, entry_price=price_usd,
-                        entry_liq=float(meta.get("liquidity_sol", 0)),
-                        creator=meta.get("creator", "unknown"),
-                        size=float(data.get("balance", 0) or 0), active=True
-                    )
-                    pos.current_price = price_usd
-                    pos.highest_price = price_usd
-                    self._positions[mint] = pos
+            updated = 0
+            for mint, pos in list(self._positions.items()):
+                if not pos.active:
+                    continue
+                balance = float(tokens.get(mint, {}).get("balance", 0) or 0)
+                if balance > 0:
+                    pos.size = max(pos.size, balance)
+                    updated += 1
+            logger.info(
+                "Synced holdings for %s tracked positions (%s total on-chain accounts)",
+                updated, len(tokens),
+            )
             self._save_state()
         except Exception as e:
             logger.error(f"Failed to sync holdings: {e}")
