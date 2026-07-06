@@ -133,7 +133,14 @@ class RiskManager:
         max_risk_sol = wallet_balance * pct
         return max(0.0, min(base_size, max_risk_sol))
 
-    async def can_trade(self, token_address: str, size_sol: float, wallet_balance: Optional[float] = None) -> tuple[bool, str]:
+    async def can_trade(
+        self,
+        token_address: str,
+        size_sol: float,
+        wallet_balance: Optional[float] = None,
+        max_trade_pct: float = 0.02,
+        max_rpc_latency_ms: Optional[float] = None,
+    ) -> tuple[bool, str]:
         """
         Validates if a new trade can be entered based on all Phase 1 guardrails.
         Returns (is_allowed, reason).
@@ -146,7 +153,8 @@ class RiskManager:
                 return False, "Kill switch is active"
 
             # 2. RPC Latency Circuit Breaker
-            if self.state.last_rpc_latency_ms > self.MAX_RPC_LATENCY_MS:
+            rpc_limit = max_rpc_latency_ms if max_rpc_latency_ms is not None else self.MAX_RPC_LATENCY_MS
+            if self.state.last_rpc_latency_ms > rpc_limit:
                 return False, f"RPC latency too high: {self.state.last_rpc_latency_ms}ms"
 
             # 3. Consecutive Failures Circuit Breaker
@@ -172,11 +180,15 @@ class RiskManager:
             if size_sol > self.MAX_POSITION_SOL:
                 return False, f"Position size {size_sol} exceeds canary limit {self.MAX_POSITION_SOL}"
 
-            # 8. Single trade size exceeds 2% of wallet balance
+            # 8. Single trade size exceeds wallet pct cap
             if wallet_balance is not None:
-                max_risk_sol = wallet_balance * 0.02
+                pct = max(0.01, min(max_trade_pct, 0.20))
+                max_risk_sol = wallet_balance * pct
                 if size_sol > max_risk_sol + 1e-6:
-                    return False, f"Position size {size_sol} exceeds 2% of wallet balance ({max_risk_sol:.6f} SOL)"
+                    return False, (
+                        f"Position size {size_sol} exceeds {pct*100:.0f}% of wallet balance "
+                        f"({max_risk_sol:.6f} SOL)"
+                    )
 
             # 9. Canary Limits: Max Total Exposure
             current_exposure = sum(self.state.active_positions.values())

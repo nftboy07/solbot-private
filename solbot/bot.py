@@ -649,7 +649,13 @@ class Solbot:
             )
             return
 
-        allowed, reason = await self._risk_manager.can_trade(token.mint, size, wallet_balance)
+        allowed, reason = await self._risk_manager.can_trade(
+            token.mint,
+            size,
+            wallet_balance,
+            max_trade_pct=profile.max_trade_pct_wallet,
+            max_rpc_latency_ms=profile.max_rpc_latency_ms,
+        )
         if not allowed:
             self._stats.bump("skip_risk")
             logger.warning("SKIPPING %s: Risk check failed: %s", token.symbol, reason)

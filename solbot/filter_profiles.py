@@ -43,6 +43,7 @@ class FilterProfile:
     skip_mayhem_check: bool
     use_jito: bool
     max_trade_pct_wallet: float
+    max_rpc_latency_ms: float
 
 
 PROFILES: Dict[str, FilterProfile] = {
@@ -81,6 +82,7 @@ PROFILES: Dict[str, FilterProfile] = {
         skip_mayhem_check=False,
         use_jito=True,
         max_trade_pct_wallet=0.02,
+        max_rpc_latency_ms=250.0,
     ),
     "normal": FilterProfile(
         name="normal",
@@ -117,6 +119,7 @@ PROFILES: Dict[str, FilterProfile] = {
         skip_mayhem_check=False,
         use_jito=True,
         max_trade_pct_wallet=0.02,
+        max_rpc_latency_ms=300.0,
     ),
     "degen": FilterProfile(
         name="degen",
@@ -153,6 +156,7 @@ PROFILES: Dict[str, FilterProfile] = {
         skip_mayhem_check=True,
         use_jito=False,
         max_trade_pct_wallet=0.05,
+        max_rpc_latency_ms=500.0,
     ),
 }
 
