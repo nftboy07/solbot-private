@@ -92,7 +92,9 @@ def pick_rotation_candidates(
     skip = exclude_mints or set()
     active = [
         p for p in positions.values()
-        if getattr(p, "active", True) and p.mint not in skip
+        if getattr(p, "active", True)
+        and p.mint not in skip
+        and not getattr(p, "is_mayhem", False)
     ]
     if not active:
         return []

@@ -21,8 +21,9 @@ from solbot.jito_tip_estimator import JitoTipEstimator
 
 logger = logging.getLogger("bot.pumpfun_client")
 
+from solbot.mayhem import TOKEN_2022_PROGRAM, metadata_indicates_mayhem, ws_payload_indicates_mayhem
+
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 TOKEN_PROGRAMS = (SPL_TOKEN_PROGRAM, TOKEN_2022_PROGRAM)
 
 class PumpFunClient:
@@ -162,6 +163,28 @@ class PumpFunClient:
         
         return balances
 
+    async def _mint_uses_token_2022(self, mint: str) -> bool:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getAccountInfo",
+            "params": [mint, {"encoding": "jsonParsed"}],
+        }
+        data, _, _ = await self._rpc_post(payload, method="getAccountInfo")
+        if not data:
+            return False
+        owner = (data.get("result", {}).get("value") or {}).get("owner")
+        return owner == TOKEN_2022_PROGRAM
+
+    async def is_mayhem_token(self, mint: str, hint: Optional[Dict] = None) -> bool:
+        """Return True if token is Mayhem Mode (unsellable on pump.fun)."""
+        if hint and ws_payload_indicates_mayhem(hint):
+            return True
+        meta = await self.get_token_metadata(mint)
+        if metadata_indicates_mayhem(meta):
+            return True
+        return await self._mint_uses_token_2022(mint)
+
     async def get_token_metadata_onchain(self, mint: str) -> Dict:
         """Fetch token metadata on-chain from Solana RPC via Metaplex Metadata PDA."""
         try:
@@ -190,14 +213,15 @@ class PumpFunClient:
             
             symbol = "???"
             name = "Unknown"
-            
+            mayhem_mode = await self._mint_uses_token_2022(mint)
+
             async with self._session.post(url, json=payload) as resp:
                 latency = (time.perf_counter() - start) * 1000
                 await self._report_rpc_metric(url, True, latency, status_code=resp.status)
                 if resp.status == 200:
                     res_data = await resp.json()
                     value = res_data.get("result", {}).get("value", [])
-                    
+
                     # Check metadata PDA for symbol/name
                     if len(value) > 1 and value[1] and value[1].get("data"):
                         b64_data = value[1]["data"][0]
@@ -219,7 +243,7 @@ class PumpFunClient:
                 "creator": "unknown",
                 "market_cap_sol": 0,
                 "liquidity_sol": 0,
-                "mayhem_mode": False,
+                "mayhem_mode": mayhem_mode,
             }
         except Exception as e:
             logger.error(f"Error fetching on-chain metadata for {mint}: {e}")
@@ -244,7 +268,7 @@ class PumpFunClient:
                         )
                     if resp.status == 200:
                         data = await resp.json()
-                        if data.get("mayhem") is not None or data.get("mayhem_state") is not None:
+                        if metadata_indicates_mayhem(data):
                             data["mayhem_mode"] = True
                         return data
                     if resp.status in (402, 407) and attempt == 0:

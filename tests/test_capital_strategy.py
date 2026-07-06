@@ -64,6 +64,20 @@ def test_pick_rotation_candidates_returns_multiple():
     assert len(picks) >= 2
 
 
+def test_pick_rotation_skips_mayhem_positions():
+    from solbot.capital_strategy import RecycleSettings
+
+    settings = RecycleSettings()
+    mayhem = FakePos("m", "MAYHEM", 0.5, 15)
+    mayhem.is_mayhem = True
+    positions = {
+        "m": mayhem,
+        "b": FakePos("b", "B", 0.8, 9),
+    }
+    picks = pick_rotation_candidates(positions, time(), settings, aggressive=True)
+    assert all(p.mint != "m" for p in picks)
+
+
 def test_active_position_count():
     positions = {"a": FakePos("a", "A", 1.0, 1), "b": FakePos("b", "B", 1.0, 1, active=False)}
     assert active_position_count(positions) == 1

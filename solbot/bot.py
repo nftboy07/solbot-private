@@ -63,6 +63,7 @@ class Position:
     start_time: float = field(default_factory=time)
     highest_price: float = 0.0
     current_price: float = 0.0
+    is_mayhem: bool = False
 
 class Solbot:
     """High-speed DEGEN Sniper with Dev Dump Protection & KOL Coordinated Trading."""
@@ -422,6 +423,24 @@ class Solbot:
             profile.max_positions_cap,
         )
 
+    async def _reject_mayhem_token(
+        self, mint: str, symbol: str, raw_hint: Optional[dict] = None,
+    ) -> bool:
+        """Return True if token is mayhem (blocked)."""
+        if not self._pump_client:
+            return False
+        try:
+            if await self._pump_client.is_mayhem_token(mint, hint=raw_hint):
+                self._stats.bump("skip_mayhem")
+                logger.warning(
+                    "SKIPPING %s (%s): Mayhem Mode — unsellable on pump.fun",
+                    symbol, mint,
+                )
+                return True
+        except Exception as exc:
+            logger.debug("Mayhem check failed for %s: %s", mint, exc)
+        return False
+
     async def _ensure_buy_capital(self, profile, needed_sol: float) -> tuple[bool, Optional[str]]:
         if not self._pump_client:
             return True, None
@@ -445,6 +464,11 @@ class Solbot:
                 break
             candidate = candidates[0]
             exclude.add(candidate.mint)
+            if getattr(candidate, "is_mayhem", False):
+                candidate.active = False
+                self._positions.pop(candidate.mint, None)
+                self._stats.bump("ghosts_purged")
+                continue
             token_bal = await self._pump_client.get_token_balance(candidate.mint)
             if token_bal <= 0:
                 candidate.active = False
@@ -493,8 +517,19 @@ class Solbot:
         for mint, pos in list(self._positions.items()):
             if not pos.active:
                 continue
-            balance = float(on_chain.get(mint, {}).get("balance", 0) or 0)
-            if balance <= 0:
+            chain = on_chain.get(mint, {})
+            balance = float(chain.get("balance", 0) or 0)
+            if chain.get("program") == "Token-2022":
+                pos.is_mayhem = True
+                pos.active = False
+                self._positions.pop(mint, None)
+                purged.append(mint)
+                logger.warning(
+                    "Untracking mayhem bag %s (%s) — unsellable Token-2022",
+                    pos.symbol, mint[:8],
+                )
+                asyncio.create_task(self._db.update_position_pnl(mint, 0.0, "closed"))
+            elif balance <= 0:
                 pos.active = False
                 self._positions.pop(mint, None)
                 purged.append(mint)
@@ -541,7 +576,7 @@ class Solbot:
             candidate = candidates[0]
             exclude.add(candidate.mint)
             balance = await self._pump_client.get_token_balance(candidate.mint)
-            if balance <= 0:
+            if getattr(candidate, "is_mayhem", False) or balance <= 0:
                 candidate.active = False
                 self._positions.pop(candidate.mint, None)
                 self._stats.bump("ghosts_purged")
@@ -693,6 +728,10 @@ class Solbot:
         profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
         self._stats.bump("tokens_seen")
 
+        if not profile.skip_mayhem_check:
+            if await self._reject_mayhem_token(token.mint, token.symbol, raw_hint=raw_data):
+                return
+
         max_active_positions = await self._effective_max_positions(profile)
         active_count = active_position_count(self._positions)
         if max_active_positions > 0 and active_count >= max_active_positions:
@@ -808,15 +847,7 @@ class Solbot:
             return
 
         if not profile.skip_mayhem_check:
-            meta = await self._pump_client.get_token_metadata(token.mint)
-            is_mayhem = (
-                meta.get("mayhem") is not None
-                or meta.get("mayhem_state") is not None
-                or meta.get("mayhem_mode") is True
-            )
-            if is_mayhem:
-                self._stats.bump("skip_mayhem")
-                logger.info("SKIPPING %s (%s): Mayhem Mode token detected.", token.symbol, token.mint)
+            if await self._reject_mayhem_token(token.mint, token.symbol):
                 return
 
         self._stats.bump("qualified")
@@ -1070,13 +1101,7 @@ class Solbot:
             profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
             meta = await self._pump_client.get_token_metadata(mint)
             if not profile.skip_mayhem_check:
-                is_mayhem = (
-                    meta.get("mayhem") is not None
-                    or meta.get("mayhem_state") is not None
-                    or meta.get("mayhem_mode") is True
-                )
-                if is_mayhem:
-                    logger.info(f"Skipping KOL snipe for {mint} because it is a Mayhem Mode token.")
+                if await self._reject_mayhem_token(mint, meta.get("symbol", "KOL_PICK"), raw_hint=meta):
                     return
             token = TokenEvent(
                 mint=mint,
@@ -1181,6 +1206,11 @@ class Solbot:
         self._processed_mints.add(token.mint)
         try:
             exec_profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+            if not exec_profile.skip_mayhem_check:
+                if await self._reject_mayhem_token(token.mint, token.symbol):
+                    self._processed_mints.discard(token.mint)
+                    self._active_buys.discard(token.mint)
+                    return
             capital_ok, cap_reason = await self._ensure_buy_capital(exec_profile, size)
             if not capital_ok:
                 self._stats.bump("skip_low_balance")
@@ -1512,6 +1542,25 @@ class Solbot:
             pos.trailing_stop_activated = None
             
         while self._running and pos.active:
+            if getattr(pos, "is_mayhem", False):
+                logger.warning(
+                    "Stopping position manager for mayhem bag %s — unsellable",
+                    pos.symbol,
+                )
+                pos.active = False
+                self._positions.pop(pos.mint, None)
+                self._save_state()
+                break
+            if self._pump_client and await self._pump_client.is_mayhem_token(pos.mint):
+                pos.is_mayhem = True
+                logger.warning(
+                    "Mayhem detected on held %s — untracking (cannot sell on pump.fun)",
+                    pos.symbol,
+                )
+                pos.active = False
+                self._positions.pop(pos.mint, None)
+                self._save_state()
+                break
             now_ts = time()
             # Poll real-time price from RPC every 15 seconds
             if now_ts - last_poll_time >= 15:
@@ -1916,16 +1965,7 @@ class Solbot:
             profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
             meta = await self._pump_client.get_token_metadata(mint)
             if not profile.skip_mayhem_check:
-                is_mayhem = (
-                    meta.get("mayhem") is not None
-                    or meta.get("mayhem_state") is not None
-                    or meta.get("mayhem_mode") is True
-                )
-                if is_mayhem:
-                    logger.info(
-                        "Skipping daily runner alert for %s (%s) because it is a Mayhem Mode token.",
-                        meta.get("symbol"), mint,
-                    )
+                if await self._reject_mayhem_token(mint, meta.get("symbol", "RUNNER"), raw_hint=meta):
                     return
             name = meta.get("name", "Unknown")
             symbol = meta.get("symbol", "RUNNER")

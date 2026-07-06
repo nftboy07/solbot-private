@@ -18,7 +18,7 @@ def test_degen_profile_wider_than_safe():
     assert degen.enforce_creator_blacklist is False
     assert degen.auto_blacklist_after_rugs >= 15
     assert degen.skip_creator_genome_check is True
-    assert degen.skip_mayhem_check is True
+    assert degen.skip_mayhem_check is False
     assert degen.use_jito is False
     assert degen.max_trade_pct_wallet >= 0.05
     assert degen.recycle_mode is True
