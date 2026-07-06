@@ -2,6 +2,7 @@ import logging
 import asyncio
 import aiohttp
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Set, Tuple, List
 from solbot.models import TokenEvent
@@ -42,6 +43,14 @@ class TokenFilter:
 
     def set_skip_callback(self, callback: Optional[Callable[[str], None]]) -> None:
         self._on_skip = callback
+
+    def _resolve_rpc_url(self) -> str:
+        pool = os.getenv("SOLANA_RPC_POOL", "")
+        for url in pool.split(","):
+            url = url.strip()
+            if url:
+                return url
+        return self._config.solana.rpc_url
 
     def _reject(self, reason: str) -> Tuple[bool, float, float]:
         if self._on_skip:
@@ -292,7 +301,7 @@ class TokenFilter:
                 return self._reject("metadata failed")
 
         top10_pct = 0.0
-        rpc_url = self._config.solana.rpc_url
+        rpc_url = self._resolve_rpc_url()
         async with AsyncClient(rpc_url) as rpc_client:
             if p.require_authorities:
                 authorities_passed = await self.verify_mint_authorities(token.mint, rpc_client)
