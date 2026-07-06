@@ -631,7 +631,9 @@ class Solbot:
 
         self._stats.bump("qualified")
         wallet_balance = await self._pump_client.get_sol_balance()
-        size = self._risk_manager.calculate_position_size(confidence_score, wallet_balance)
+        size = self._risk_manager.calculate_position_size(
+            confidence_score, wallet_balance, floor_sol=profile.buy_amount_sol,
+        )
         if size <= 0.0:
             self._stats.bump("skip_risk")
             logger.info(

@@ -98,31 +98,38 @@ class RiskManager:
             await self._check_daily_reset()
             self.state.daily_pnl_sol += pnl_sol
 
-    def calculate_position_size(self, ai_score: float, wallet_balance: float) -> float:
+    def calculate_position_size(
+        self,
+        confidence_score: float,
+        wallet_balance: float,
+        floor_sol: float = 0.0,
+    ) -> float:
         """
-        Calculates position size based on AI Score:
-        - 90+ = Full position: 0.02 SOL
-        - 80-89 = Normal position: 0.01 SOL
-        - 70-79 = Half position: 0.005 SOL
-        - Below 70 = Skip (0.0 SOL)
-        
-        Never risk more than 2% of wallet per trade.
+        Position size from filter confidence (0-100):
+        - 90+ = 0.02 SOL
+        - 80-89 = 0.01 SOL
+        - 70-79 = 0.005 SOL
+        - 50-69 = floor_sol (degen default buy)
+        - Below 50 = skip unless floor_sol set
+        Capped at 2% of wallet balance.
         """
-        if ai_score >= 90:
+        if confidence_score >= 90:
             base_size = 0.02
-        elif ai_score >= 80:
+        elif confidence_score >= 80:
             base_size = 0.01
-        elif ai_score >= 70:
+        elif confidence_score >= 70:
             base_size = 0.005
+        elif confidence_score >= 50 and floor_sol > 0:
+            base_size = floor_sol
+        elif floor_sol > 0 and confidence_score > 0:
+            base_size = floor_sol
         else:
             return 0.0
-            
-        # Max risk is 2% of current wallet balance
+
+        if wallet_balance <= 0:
+            return 0.0
         max_risk_sol = wallet_balance * 0.02
-        
-        # Clamp size to max_risk_sol
-        final_size = min(base_size, max_risk_sol)
-        return max(0.0, final_size)
+        return max(0.0, min(base_size, max_risk_sol))
 
     async def can_trade(self, token_address: str, size_sol: float, wallet_balance: Optional[float] = None) -> tuple[bool, str]:
         """
