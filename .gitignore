@@ -1,8 +1,9 @@
-# Environment
+# Environment & secrets — NEVER commit
 .env
-.venv/
-venv/
-env/
+.env.*
+!.env.example
+.secrets/
+secrets/
 
 # Python
 __pycache__/
@@ -10,23 +11,28 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.venv/
+venv/
+env/
 
-# Logs
+# Logs & runtime data
 *.log
+data/state.json
+data/proxies.txt
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+*.session
+*.session-journal
+*.session.backup
 
-# IDE
+# IDE & OS
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Project Specific
-data/state.json
-*.session
-*.session.backup
-*.db
-
+# Local deploy config
+deploy.local.env

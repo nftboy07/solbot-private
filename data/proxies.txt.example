@@ -1,0 +1,5 @@
+# Copy to data/proxies.txt (gitignored) and add your proxy URLs.
+# One per line. Never commit real credentials to a public repo.
+#
+# http://username:password@proxy-host:port
+# socks5://username:password@proxy-host:port

@@ -13,6 +13,8 @@ def test_degen_profile_wider_than_safe():
     assert degen.max_mcap_sol > safe.max_mcap_sol
     assert degen.min_liquidity_sol < safe.min_liquidity_sol
     assert degen.skip_agi_prebuy is True
+    assert degen.require_ai_gate is False
+    assert degen.skip_ai_safety_screen is True
 
 
 def test_get_profile_unknown_defaults_to_degen():

@@ -544,8 +544,8 @@ class Solbot:
                     )
                     return
 
-        ai_score = 80.0
-        if self._ai_enabled:
+        ai_score = float(profile.ai_fallback_score)
+        if self._ai_enabled and profile.require_ai_gate:
             token_data = {
                 "mint": token.mint,
                 "symbol": token.symbol,
@@ -572,6 +572,11 @@ class Solbot:
                     token.symbol, heuristic, profile.heuristic_threshold, profile.name,
                 )
                 return
+        elif self._ai_enabled:
+            logger.debug(
+                "AI gate bypassed for %s (%s profile); using fallback score %.0f",
+                token.symbol, profile.name, ai_score,
+            )
 
         qualified, default_size, confidence_score = await self._filter.is_qualified(
             token, sol_price=self._telegram._sol_price, ai_score=ai_score, creator_score=c_score
@@ -923,8 +928,9 @@ class Solbot:
         self._active_buys.add(token.mint)
         self._processed_mints.add(token.mint)
         try:
+            exec_profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
             # Advanced AI Safety & Honeypot Screen
-            if self._ai_enabled and not manual_override:
+            if self._ai_enabled and not manual_override and not exec_profile.skip_ai_safety_screen:
                 holders = []
                 try:
                     rpc_url = await self._pump_client._get_rpc_url()
@@ -1063,6 +1069,11 @@ class Solbot:
                         "AGI pre-buy filter skipped (%s profile) for %s",
                         self._filter.profile.name, token.symbol,
                     )
+            elif exec_profile.skip_ai_safety_screen:
+                logger.info(
+                    "AI safety screen skipped (%s profile) for %s",
+                    exec_profile.name, token.symbol,
+                )
 
             priority_fee_sol = self._dynamic_priority_fee
             jito_tip_sol = self._dynamic_jito_tip

@@ -30,6 +30,8 @@ class FilterProfile:
     require_ev_positive: bool
     min_elite_wallets: int
     skip_agi_prebuy: bool
+    require_ai_gate: bool
+    skip_ai_safety_screen: bool
     buy_amount_sol: float
     trailing_stop_pct: float
     max_cluster_risk: float
@@ -58,6 +60,8 @@ PROFILES: Dict[str, FilterProfile] = {
         require_ev_positive=True,
         min_elite_wallets=2,
         skip_agi_prebuy=False,
+        require_ai_gate=True,
+        skip_ai_safety_screen=False,
         buy_amount_sol=0.01,
         trailing_stop_pct=0.05,
         max_cluster_risk=30.0,
@@ -84,6 +88,8 @@ PROFILES: Dict[str, FilterProfile] = {
         require_ev_positive=True,
         min_elite_wallets=1,
         skip_agi_prebuy=False,
+        require_ai_gate=True,
+        skip_ai_safety_screen=False,
         buy_amount_sol=0.10,
         trailing_stop_pct=0.10,
         max_cluster_risk=35.0,
@@ -99,10 +105,10 @@ PROFILES: Dict[str, FilterProfile] = {
         min_initial_buy_sol=0.1,
         max_initial_buy_sol=15.0,
         max_creator_pct=10.0,
-        min_ai_score=60,
-        min_creator_genome_score=25.0,
-        heuristic_threshold=0.15,
-        ai_fallback_score=65,
+        min_ai_score=0,
+        min_creator_genome_score=20.0,
+        heuristic_threshold=0.10,
+        ai_fallback_score=70,
         require_metadata=False,
         require_authorities=True,
         require_holder_check=True,
@@ -110,7 +116,9 @@ PROFILES: Dict[str, FilterProfile] = {
         require_ev_positive=False,
         min_elite_wallets=0,
         skip_agi_prebuy=True,
-        buy_amount_sol=0.05,
+        require_ai_gate=False,
+        skip_ai_safety_screen=True,
+        buy_amount_sol=0.02,
         trailing_stop_pct=0.20,
         max_cluster_risk=50.0,
     ),

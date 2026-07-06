@@ -1,10 +1,13 @@
+"""Deploy helper — reads connection details from environment only."""
+
+import os
 import subprocess
 import sys
 from pathlib import Path
 
-KEY_PATH = Path(r"C:\Users\91907\.ssh\REDACTED_SSH_KEY")
-VPS = "root@REDACTED_VPS_HOST"
-REMOTE_DIR = "/root/solbot-production"
+KEY_PATH = os.getenv("DEPLOY_SSH_KEY", "")
+VPS = os.getenv("DEPLOY_VPS_HOST", "")
+REMOTE_DIR = os.getenv("DEPLOY_REMOTE_DIR", "/root/solbot-production")
 
 
 def run(cmd: str) -> bool:
@@ -14,6 +17,10 @@ def run(cmd: str) -> bool:
 
 
 def main():
+    if not KEY_PATH or not VPS:
+        print("Set DEPLOY_SSH_KEY and DEPLOY_VPS_HOST env vars before deploying.")
+        sys.exit(1)
+
     repo = Path(__file__).resolve().parents[1]
     if not run(f'git -C "{repo}" push origin refactor/async-architecture'):
         print("Git push failed — commit locally first.")
@@ -33,7 +40,9 @@ def main():
     if not run(f'{ssh_base} "{remote_cmds}"'):
         sys.exit(1)
 
-    run(f'{scp_base} "{repo / "ops/logrotate.solbot"}" {VPS}:/etc/logrotate.d/solbot')
+    logrotate = repo / "ops/logrotate.solbot"
+    if logrotate.exists():
+        run(f'{scp_base} "{logrotate}" {VPS}:/etc/logrotate.d/solbot')
     print("Deploy complete.")
 
 

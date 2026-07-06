@@ -1,0 +1,20 @@
+{
+  "positions": {},
+  "trades": [],
+  "copy_targets": [],
+  "wallet_scores": {},
+  "twitter_handles": [],
+  "ai_enabled": true,
+  "ai_min_score": 60,
+  "autobuy_enabled": true,
+  "autorunner_enabled": false,
+  "autorunner_amount": 0.01,
+  "blacklisted_wallets": [],
+  "kol_threshold": 3,
+  "filter_profile": "degen",
+  "config_overrides": {
+    "buy_amount_sol": 0.02,
+    "trailing_stop_pct": 0.2,
+    "slippage_bps": 300
+  }
+}
