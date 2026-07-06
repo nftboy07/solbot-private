@@ -8,6 +8,7 @@ import os
 
 from solbot.config import BotConfig
 from solbot.db import Database
+from solbot.core.event_bus import EventBus
 from solbot.core.event_store import EventStore
 from solbot.core.telemetry import TelemetryManager
 from solbot.engines.creator_genome import CreatorGenomeEngine
@@ -50,6 +51,9 @@ async def main():
         logger.warning("Redis unavailable (%s); feature store caching disabled.", exc)
         redis = None
 
+    event_bus = EventBus()
+    await event_bus.start()
+
     event_store = EventStore(db)
     await event_store.start()
 
@@ -81,6 +85,7 @@ async def main():
         config,
         db=db,
         event_store=event_store,
+        event_bus=event_bus,
         telemetry=telemetry,
         creator_genome=creator_genome,
         wallet_graph=wallet_graph,
@@ -108,6 +113,7 @@ async def main():
     except asyncio.CancelledError:
         pass
 
+    await event_bus.stop()
     await event_store.stop()
     await telemetry.stop()
     if redis:

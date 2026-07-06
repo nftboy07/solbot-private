@@ -1,27 +1,13 @@
-import time
-from typing import List
+"""Lightweight heuristic inference used when no trained model is available."""
+
+from typing import Dict
+
 
 class InferenceEngine:
-    """Runs ultra-fast inference for trade signals."""
-    
-    def __init__(self):
-        # Mock coefficients for ultra-fast inference
-        self.weights = [0.4, 0.35, 0.25]
-        self.threshold = 0.7
+    """Heuristic scorer combining AI, creator, and liquidity signals."""
 
-    async def predict(self, feature_vector: List[float]) -> bool:
-        """
-        Calculate prediction in under 5ms.
-        """
-        start_time = time.perf_counter()
-        
-        # Dot product logic (Simulated LightGBM/Linear)
-        score = sum(w * f for w, f in zip(self.weights, feature_vector))
-        
-        prediction = score > self.threshold
-        
-        latency = (time.perf_counter() - start_time) * 1000
-        if latency > 5:
-            print(f"Warning: Inference latency exceeded 5ms: {latency:.2f}ms")
-            
-        return prediction
+    def predict(self, features: Dict[str, float]) -> float:
+        ai = float(features.get("ai_score", 0.0)) / 100.0
+        creator = float(features.get("creator_score", 50.0)) / 100.0
+        liquidity = min(1.0, float(features.get("liquidity_sol", 0.0)) / 50.0)
+        return max(0.0, min(1.0, ai * 0.5 + creator * 0.3 + liquidity * 0.2))

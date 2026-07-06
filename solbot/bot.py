@@ -35,6 +35,8 @@ from solbot.core.network import NetworkManager
 from solbot.cluster_mapper import ClusterMapper
 from solbot.ai_tuner import AITuner
 from solbot.agi_prebuy_filter import AGIPreBuyFilter
+from solbot.observability import ObservabilityHub
+from solbot.ml.inference import InferenceEngine
 
 logger = get_logger("bot")
 
@@ -55,10 +57,13 @@ class Position:
 class Solbot:
     """High-speed DEGEN Sniper with Dev Dump Protection & KOL Coordinated Trading."""
 
-    def __init__(self, config: BotConfig, db=None, event_store=None, telemetry=None, creator_genome=None, wallet_graph=None, feature_store=None, rpc_pool=None):
+    def __init__(self, config: BotConfig, db=None, event_store=None, event_bus=None, telemetry=None, creator_genome=None, wallet_graph=None, feature_store=None, rpc_pool=None):
         self._config = config
         self._event_store = event_store
+        self._event_bus = event_bus
         self._telemetry = telemetry
+        self._obs: Optional[ObservabilityHub] = None
+        self._inference = InferenceEngine()
         self._creator_genome = creator_genome
         self._wallet_graph = wallet_graph
         self._feature_store = feature_store
@@ -232,6 +237,14 @@ class Solbot:
         self._pump_client._network_manager = self._network_manager
         if self._rpc_pool:
             self._pump_client._rpc_pool = self._rpc_pool
+        self._obs = ObservabilityHub(
+            self._db,
+            telemetry=self._telemetry,
+            feature_store=self._feature_store,
+            event_bus=self._event_bus,
+            risk_manager=self._risk_manager,
+        )
+        self._pump_client._observability = self._obs
         await self._pump_client.start()
         try:
             bal = await self._pump_client.get_sol_balance()
@@ -239,7 +252,9 @@ class Solbot:
             logger.info(f"Initialized RiskManager bankroll to {bal:.4f} SOL")
         except Exception as e:
             logger.error(f"Failed to fetch initial wallet balance for RiskManager: {e}")
-        self._jupiter = JupiterClient(self._config.jupiter, self._wallet)
+        self._jupiter = JupiterClient(self._config.jupiter, self._wallet, self._config.solana)
+        self._jupiter._rpc_pool = self._rpc_pool
+        self._jupiter._observability = self._obs
         await self._jupiter.start()
         await self._kols_controller.start()
         
@@ -310,6 +325,29 @@ class Solbot:
         self._missed_tracker = asyncio.create_task(self._missed_entry_tracker_loop())
         self._congestion_poller = asyncio.create_task(self._poll_network_congestion())
         self._autotune_poller = asyncio.create_task(self._ai_autotune_loop())
+        asyncio.create_task(self._component_heartbeat_loop())
+
+    def _sentiment_for_mint(self, mint: str) -> str:
+        info = self._kol_mentions.get(mint)
+        if not info:
+            return ""
+        snippets = []
+        for mention in info.get("mentions", [])[-5:]:
+            text = (mention.get("text") or "").strip()
+            source = mention.get("source", "unknown")
+            if text:
+                snippets.append(f"[{source}] {text[:280]}")
+        return "\n".join(snippets)
+
+    async def _component_heartbeat_loop(self):
+        while self._running:
+            try:
+                await self._risk_manager.update_component_heartbeat("pump_ws")
+                await self._risk_manager.update_component_heartbeat("telegram")
+                await self._risk_manager.update_component_heartbeat("rpc_pool")
+            except Exception as exc:
+                logger.debug("Heartbeat error: %s", exc)
+            await asyncio.sleep(10)
 
     def _spawn_position_manager(self, pos: Position):
         existing = self._position_manager_tasks.get(pos.mint)
@@ -329,10 +367,19 @@ class Solbot:
         return None
 
     async def _log_trade_event(self, event_type: str, payload: Dict[str, Any]):
-        try:
-            await self._db.log_trade_event({"type": event_type, **payload})
-        except Exception as exc:
-            logger.debug("Failed to log trade event: %s", exc)
+        if not self._obs:
+            return
+        await self._obs.record_trade(
+            event_type,
+            payload.get("mint", ""),
+            symbol=payload.get("symbol", ""),
+            size=float(payload.get("size", 0.0) or 0.0),
+            success=bool(payload.get("success")),
+            tx_signature=payload.get("tx"),
+            error=payload.get("error"),
+            reason=payload.get("reason"),
+            latency_ms=float(payload.get("latency_ms", 0.0) or 0.0),
+        )
 
     async def _cleanup_ghost_positions(self):
         removed = []
@@ -420,9 +467,22 @@ class Solbot:
                     ai_score = 80.0
                     if self._ai_enabled:
                         token_data = {
-                            'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator, 'uri': token.uri
+                            "mint": token.mint,
+                            "symbol": token.symbol,
+                            "name": token.name,
+                            "creator": token.creator,
+                            "uri": token.uri,
+                            "sentiment_text": self._sentiment_for_mint(token.mint),
                         }
                         ai_score = await self._ai_filter.score_token(token_data)
+                        heuristic = self._inference.predict({
+                            "ai_score": ai_score,
+                            "creator_score": c_score,
+                            "liquidity_sol": token.liquidity_sol,
+                        })
+                        if heuristic < 0.35:
+                            logger.info("Heuristic inference below threshold for %s (%.2f)", token.symbol, heuristic)
+                            continue
 
                     # 3. Check V4 Buy Strategy
                     qualified, default_size, confidence_score = await self._filter.is_qualified(
@@ -451,6 +511,22 @@ class Solbot:
                         if not allowed:
                             logger.warning(f"SKIPPING {token.symbol}: Risk check failed: {reason}")
                             continue
+
+                        if self._obs:
+                            await self._obs.record_signal_async(
+                                token.mint,
+                                "pump_ws",
+                                ai_score=ai_score,
+                                creator_score=c_score,
+                                confidence=confidence_score,
+                            )
+                            await self._obs.capture_features(
+                                token.mint,
+                                ai_score=ai_score,
+                                creator_score=c_score,
+                                liquidity_sol=token.liquidity_sol,
+                                market_cap_usd=token.market_cap_usd,
+                            )
 
                         # 7. 10x/100x Potential Runner Alert Trigger with inline buttons
                         if c_score >= 85 and confidence_score >= 85:
@@ -677,7 +753,11 @@ class Solbot:
 
             if self._ai_enabled:
                 token_data = {
-                    'mint': token.mint, 'symbol': token.symbol, 'name': token.name, 'creator': token.creator
+                    "mint": token.mint,
+                    "symbol": token.symbol,
+                    "name": token.name,
+                    "creator": token.creator,
+                    "sentiment_text": self._sentiment_for_mint(token.mint),
                 }
                 score = await self._ai_filter.score_token(token_data)
                 if score < self._ai_min_score:
@@ -1064,7 +1144,11 @@ class Solbot:
                 # Periodic checks: AI trend reverses or distribution changes
                 if now_ts - last_moonbag_check_time >= 60:
                     last_moonbag_check_time = now_ts
-                    token_data = {'mint': pos.mint, 'symbol': pos.symbol}
+                    token_data = {
+                        "mint": pos.mint,
+                        "symbol": pos.symbol,
+                        "sentiment_text": self._sentiment_for_mint(pos.mint),
+                    }
                     current_score = await self._ai_filter.score_token(token_data)
                     if current_score < 50:
                         await self._exit_position(pos, f"Moonbag exit: AI Trend Reverse ({current_score})", 1.0)
@@ -1130,8 +1214,18 @@ class Solbot:
         # We increase priority fee for exits triggered by KOL sales
         priority_fee = 0.01 if "KOL EXIT" in reason else 0.001
         result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=sell_amount, denominated_in_sol=False, priority_fee=priority_fee)
+        await self._risk_manager.report_tx_result(result.success)
         if result.success:
             self._trades.append(result)
+            await self._log_trade_event("sell", {
+                "mint": pos.mint,
+                "symbol": pos.symbol,
+                "size": sell_amount,
+                "success": True,
+                "tx": result.tx_signature,
+                "reason": reason,
+                "latency_ms": result.latency_ms,
+            })
             # Update active position size in RiskManager for partial sells
             if pos.active:
                 self._risk_manager.state.active_positions[pos.mint] = pos.size * (1.0 - pct)
@@ -1160,6 +1254,15 @@ class Solbot:
                     asyncio.create_task(self._retrain_brain_weights())
             self._save_state()
             await self._telegram.send_message(f"= <b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
+        else:
+            await self._log_trade_event("sell", {
+                "mint": pos.mint,
+                "symbol": pos.symbol,
+                "size": sell_amount,
+                "success": False,
+                "error": result.error,
+                "reason": reason,
+            })
 
     async def _sync_existing_holdings(self):
         try:
@@ -1173,7 +1276,7 @@ class Solbot:
                         mint=mint, symbol=symbol, entry_price=price_usd,
                         entry_liq=float(meta.get("liquidity_sol", 0)),
                         creator=meta.get("creator", "unknown"),
-                        size=0.0, active=True
+                        size=float(data.get("balance", 0) or 0), active=True
                     )
                     pos.current_price = price_usd
                     pos.highest_price = price_usd

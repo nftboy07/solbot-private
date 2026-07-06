@@ -33,7 +33,11 @@ class PumpFunClient:
         self._jito: Optional[JitoClient] = None
         self._base_url = "https://pumpportal.fun/api/trade-local"
         self._rpc_pool = None
+        self._observability = None
         self._tip_estimator = JitoTipEstimator()
+
+    def _rpc_success(self, data: dict, http_status: int) -> bool:
+        return http_status == 200 and "error" not in data
 
     async def start(self):
         if not self._session:
@@ -53,9 +57,11 @@ class PumpFunClient:
             return await self._rpc_pool.get_best_node()
         return self._solana_config.rpc_url
 
-    async def _report_rpc_metric(self, url: str, success: bool, latency: float = 0.0, slot: int = 0, status_code: Optional[int] = None):
-        if hasattr(self, '_rpc_pool') and self._rpc_pool:
+    async def _report_rpc_metric(self, url: str, success: bool, latency: float = 0.0, slot: int = 0, status_code: Optional[int] = None, method: str = "rpc"):
+        if hasattr(self, "_rpc_pool") and self._rpc_pool:
             await self._rpc_pool.report_metrics(url, success, latency, slot, status_code)
+        if getattr(self, "_observability", None):
+            self._observability.record_rpc(url, method, latency, success, status_code)
 
     async def get_sol_balance(self) -> float:
         """Fetch the current SOL balance for the wallet."""
@@ -71,7 +77,10 @@ class PumpFunClient:
             async with self._session.post(url, json=payload) as resp:
                 data = await resp.json()
                 latency = (time.perf_counter() - start) * 1000
-                await self._report_rpc_metric(url, True, latency, status_code=resp.status)
+                ok = self._rpc_success(data, resp.status)
+                await self._report_rpc_metric(url, ok, latency, status_code=resp.status, method="getBalance")
+                if not ok:
+                    return 0.0
                 lamports = data.get("result", {}).get("value", 0)
                 return lamports / 1_000_000_000
         except Exception as e:
@@ -407,10 +416,13 @@ class PumpFunClient:
                 )
                 signed_tip_tx = VersionedTransaction(tip_msg, [self._wallet.keypair])
 
-                bundle_id = await self._jito.send_bundle([signed_tx, signed_tip_tx])
+                bundle_id = await self._jito.send_bundle([signed_tx, signed_tip_tx], session=self._session)
                 latency = (time.perf_counter() - start_time) * 1000
                 if bundle_id:
-                    return TradeResult(success=True, token_mint=mint, tx_signature=bundle_id, latency_ms=latency)
+                    tx_sig = await self._jito.confirm_bundle(bundle_id, self._session)
+                    if tx_sig:
+                        return TradeResult(success=True, token_mint=mint, tx_signature=tx_sig, latency_ms=latency)
+                    logger.warning("Jito bundle %s submitted but not confirmed in time; falling back to RPC.", bundle_id)
                 else:
                     logger.warning("Jito bundle submission failed. Falling back to direct RPC transaction broadcast.")
             
@@ -423,14 +435,14 @@ class PumpFunClient:
             async with self._session.post(rpc_url, json=rpc_payload) as r_resp:
                 r_data = await r_resp.json()
                 latency_b = (time.perf_counter() - start_broadcast) * 1000
-                await self._report_rpc_metric(rpc_url, True, latency_b, status_code=r_resp.status)
+                ok = self._rpc_success(r_data, r_resp.status)
+                await self._report_rpc_metric(rpc_url, ok, latency_b, status_code=r_resp.status, method="sendTransaction")
                 latency = (time.perf_counter() - start_time) * 1000
                 tx_sig = r_data.get("result")
-                if tx_sig:
+                if ok and tx_sig:
                     return TradeResult(success=True, token_mint=mint, tx_signature=tx_sig, latency_ms=latency)
-                else:
-                    error_msg = r_data.get("error", {}).get("message", "Unknown RPC error")
-                    return TradeResult(success=False, token_mint=mint, error=f"RPC Send Failed: {error_msg}", latency_ms=latency)
+                error_msg = r_data.get("error", {}).get("message", "Unknown RPC error")
+                return TradeResult(success=False, token_mint=mint, error=f"RPC Send Failed: {error_msg}", latency_ms=latency)
 
         except Exception as e:
             logger.error(f"Execution failed for {mint}: {e}")
