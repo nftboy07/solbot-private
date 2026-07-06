@@ -498,6 +498,11 @@ class Solbot:
             mcap_sol = float(meta.get("market_cap_sol") or meta.get("marketCapSol") or 0)
             if mcap_sol > 0:
                 token.market_cap_usd = mcap_sol * sol_price
+            init_buy = float(meta.get("initialBuy") or meta.get("solAmount") or 0)
+            if init_buy > 1e6:
+                init_buy /= 1e9
+            if init_buy > 0:
+                token.initial_buy_sol = init_buy
         except Exception as e:
             logger.debug("Could not refresh metrics for %s: %s", token.symbol, e)
 
