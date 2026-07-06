@@ -3,8 +3,10 @@
 from time import time
 
 from solbot.capital_strategy import (
+    active_position_count,
     dynamic_max_positions,
     pick_rotation_candidate,
+    pick_rotation_candidates,
     should_block_buy,
     spendable_balance,
 )
@@ -47,6 +49,24 @@ def test_pick_rotation_prefers_stale_loser():
     }
     picked = pick_rotation_candidate(positions, time(), settings)
     assert picked.mint == "b"
+
+
+def test_pick_rotation_candidates_returns_multiple():
+    from solbot.capital_strategy import RecycleSettings
+
+    settings = RecycleSettings()
+    positions = {
+        "a": FakePos("a", "A", 0.9, 8),
+        "b": FakePos("b", "B", 0.8, 9),
+        "c": FakePos("c", "C", 1.2, 2),
+    }
+    picks = pick_rotation_candidates(positions, time(), settings, aggressive=True)
+    assert len(picks) >= 2
+
+
+def test_active_position_count():
+    positions = {"a": FakePos("a", "A", 1.0, 1), "b": FakePos("b", "B", 1.0, 1, active=False)}
+    assert active_position_count(positions) == 1
 
 
 def test_degen_profile_has_recycle_enabled():

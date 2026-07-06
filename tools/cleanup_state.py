@@ -1,4 +1,4 @@
-"""Remove ghost positions (active entries with zero size) from state.json."""
+"""Remove ghost positions (inactive or zero-size entries) from state.json."""
 
 import json
 from pathlib import Path
@@ -18,14 +18,15 @@ def main():
     for mint, pos in list(positions.items()):
         size = float(pos.get("size", 0) or 0)
         active = pos.get("active", True)
-        if active and size <= 0:
-            pos["active"] = False
+        if not active or (active and size <= 0):
+            positions.pop(mint, None)
             removed.append(mint)
 
     if removed:
+        state["positions"] = positions
         with path.open("w", encoding="utf-8") as handle:
             json.dump(state, handle, indent=2)
-        print(f"Deactivated {len(removed)} ghost positions.")
+        print(f"Removed {len(removed)} ghost/inactive positions from state.")
     else:
         print("No ghost positions found.")
 

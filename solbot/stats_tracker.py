@@ -22,6 +22,7 @@ class StatsTracker:
     skip_trading_blocked: int = 0
     skip_low_balance: int = 0
     capital_rotations: int = 0
+    ghosts_purged: int = 0
     qualified: int = 0
     snipes_started: int = 0
     buys_success: int = 0

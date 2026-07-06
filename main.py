@@ -69,6 +69,15 @@ async def main():
                 nodes.append({"url": url, "name": f"node_{idx}"})
     if not nodes:
         nodes.append({"url": config.solana.rpc_url, "name": "primary"})
+    fallbacks = [
+        "https://api.mainnet-beta.solana.com",
+        "https://solana-rpc.publicnode.com",
+    ]
+    existing = {n["url"] for n in nodes}
+    for idx, url in enumerate(fallbacks, start=1):
+        if url not in existing:
+            nodes.append({"url": url, "name": f"fallback_{idx}"})
+            existing.add(url)
 
     rpc_pool = RPCBalancer(nodes)
     rpc_monitor_task = asyncio.create_task(rpc_pool.run_monitor())

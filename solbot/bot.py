@@ -16,8 +16,10 @@ from solbot.config import BotConfig, BotMode
 from solbot.filter_profiles import get_profile, default_profile_name
 from solbot.capital_strategy import (
     RecycleSettings,
+    active_position_count,
     dynamic_max_positions,
     pick_rotation_candidate,
+    pick_rotation_candidates,
     should_block_buy,
 )
 from solbot.stats_tracker import StatsTracker
@@ -305,7 +307,9 @@ class Solbot:
             logger.error(f"Failed to load historically traded mints: {e}")
             
         await self._sync_existing_holdings()
-        await self._cleanup_ghost_positions()
+        await self._reconcile_positions_with_chain()
+        profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+        await self._enforce_position_cap_on_startup(profile)
 
         for pos in self._positions.values():
             if pos.active:
@@ -426,16 +430,32 @@ class Solbot:
             return True, None
         if not settings.enabled:
             return False, block
-        candidate = pick_rotation_candidate(self._positions, time(), settings)
-        if not candidate:
-            return False, f"{block} (no position to rotate)"
-        self._stats.bump("capital_rotations")
-        logger.info(
-            "Rotating capital: exiting %s (%s) to fund new snipe (wallet=%.4f SOL)",
-            candidate.symbol, candidate.mint[:8], balance,
-        )
-        await self._exit_position(candidate, "CAPITAL ROTATION (free SOL for new snipe)", 1.0)
-        await asyncio.sleep(1.5)
+        exclude: Set[str] = set()
+        for _ in range(8):
+            balance = await self._pump_client.get_sol_balance()
+            block = should_block_buy(balance, needed_sol, settings.min_wallet_sol_reserve)
+            if not block:
+                return True, None
+            candidates = pick_rotation_candidates(
+                self._positions, time(), settings, exclude_mints=exclude, aggressive=True,
+            )
+            if not candidates:
+                break
+            candidate = candidates[0]
+            exclude.add(candidate.mint)
+            token_bal = await self._pump_client.get_token_balance(candidate.mint)
+            if token_bal <= 0:
+                candidate.active = False
+                self._positions.pop(candidate.mint, None)
+                self._stats.bump("ghosts_purged")
+                continue
+            self._stats.bump("capital_rotations")
+            logger.info(
+                "Rotating %s to free SOL for snipe (wallet=%.4f)",
+                candidate.symbol, balance,
+            )
+            await self._exit_position(candidate, "CAPITAL ROTATION (free SOL for new snipe)", 1.0)
+            await asyncio.sleep(1.0)
         balance = await self._pump_client.get_sol_balance()
         block = should_block_buy(balance, needed_sol, settings.min_wallet_sol_reserve)
         if block:
@@ -457,15 +477,104 @@ class Solbot:
             latency_ms=float(payload.get("latency_ms", 0.0) or 0.0),
         )
 
-    async def _cleanup_ghost_positions(self):
-        removed = []
+    async def _reconcile_positions_with_chain(self):
+        """Drop tracked positions that have no on-chain token balance."""
+        if not self._pump_client:
+            return
+        try:
+            on_chain = await self._pump_client.get_all_token_balances()
+        except Exception as exc:
+            logger.error("On-chain position reconcile failed: %s", exc)
+            return
+
+        purged = []
         for mint, pos in list(self._positions.items()):
-            if pos.active and pos.size <= 0:
+            if not pos.active:
+                continue
+            balance = float(on_chain.get(mint, {}).get("balance", 0) or 0)
+            if balance <= 0:
                 pos.active = False
-                removed.append(mint)
-        if removed:
-            logger.info("Deactivated %s ghost positions with zero size.", len(removed))
+                self._positions.pop(mint, None)
+                purged.append(mint)
+                asyncio.create_task(self._db.update_position_pnl(mint, 0.0, "closed"))
+            elif pos.size <= 0:
+                pos.size = balance
+
+        inactive = [m for m, p in self._positions.items() if not p.active]
+        for mint in inactive:
+            self._positions.pop(mint, None)
+
+        if purged:
+            self._stats.bump("ghosts_purged", len(purged))
+            logger.info(
+                "Purged %s ghost positions (no on-chain balance). Holdings on-chain: %s",
+                len(purged), len(on_chain),
+            )
             self._save_state()
+
+    async def _rotate_until_under_cap(
+        self,
+        profile,
+        target: int,
+        reason: str,
+        exclude_mint: Optional[str] = None,
+        aggressive: bool = False,
+    ) -> int:
+        if not profile.recycle_mode or not self._pump_client:
+            return 0
+        settings = self._profile_recycle_settings(profile)
+        exclude: Set[str] = {exclude_mint} if exclude_mint else set()
+        rotated = 0
+        max_attempts = min(30, max(5, active_position_count(self._positions) - target + 3))
+
+        for _ in range(max_attempts):
+            if active_position_count(self._positions) <= target:
+                break
+            candidates = pick_rotation_candidates(
+                self._positions, time(), settings,
+                exclude_mints=exclude, aggressive=aggressive,
+            )
+            if not candidates:
+                break
+            candidate = candidates[0]
+            exclude.add(candidate.mint)
+            balance = await self._pump_client.get_token_balance(candidate.mint)
+            if balance <= 0:
+                candidate.active = False
+                self._positions.pop(candidate.mint, None)
+                self._stats.bump("ghosts_purged")
+                rotated += 1
+                continue
+            self._stats.bump("capital_rotations")
+            logger.info(
+                "Rotating %s (%s) — %s [%s/%s slots]",
+                candidate.symbol, candidate.mint[:8], reason,
+                active_position_count(self._positions), target,
+            )
+            await self._exit_position(candidate, reason, 1.0)
+            await asyncio.sleep(0.8)
+            rotated += 1
+        return rotated
+
+    async def _enforce_position_cap_on_startup(self, profile) -> None:
+        target = await self._effective_max_positions(profile)
+        active = active_position_count(self._positions)
+        if active <= target:
+            logger.info("Position cap OK: %s/%s active", active, target)
+            return
+        logger.warning(
+            "Startup position cap exceeded (%s/%s); running multi-rotation cleanup",
+            active, target,
+        )
+        freed = await self._rotate_until_under_cap(
+            profile, target, "STARTUP CAP CLEANUP", aggressive=True,
+        )
+        remaining = active_position_count(self._positions)
+        logger.info(
+            "Startup cap cleanup done: rotated/purged %s, remaining %s/%s",
+            freed, remaining, target,
+        )
+        self._save_state()
 
     async def stop(self):
         self._running = False
@@ -583,20 +692,17 @@ class Solbot:
         self._stats.bump("tokens_seen")
 
         max_active_positions = await self._effective_max_positions(profile)
-        active_count = sum(1 for p in self._positions.values() if p.active)
+        active_count = active_position_count(self._positions)
         if max_active_positions > 0 and active_count >= max_active_positions:
             if profile.recycle_mode:
-                settings = self._profile_recycle_settings(profile)
-                candidate = pick_rotation_candidate(self._positions, time(), settings)
-                if candidate:
-                    self._stats.bump("capital_rotations")
-                    logger.info(
-                        "Position cap reached (%s/%s); rotating %s for %s",
-                        active_count, max_active_positions, candidate.symbol, token.symbol,
-                    )
-                    await self._exit_position(candidate, "CAPITAL ROTATION (position cap)", 1.0)
-                    await asyncio.sleep(1.5)
-                    active_count = sum(1 for p in self._positions.values() if p.active)
+                await self._rotate_until_under_cap(
+                    profile,
+                    max(0, max_active_positions - 1),
+                    f"CAPITAL ROTATION (make room for {token.symbol})",
+                    exclude_mint=token.mint,
+                    aggressive=True,
+                )
+                active_count = active_position_count(self._positions)
             if active_count >= max_active_positions:
                 self._stats.bump("skip_position_limit")
                 logger.warning(

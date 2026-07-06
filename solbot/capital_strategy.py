@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol
+from typing import Any, List, Optional, Protocol, Set
 
 
 class PositionLike(Protocol):
@@ -73,11 +73,31 @@ def pick_rotation_candidate(
     positions: dict[str, PositionLike],
     now_ts: float,
     settings: RecycleSettings,
+    exclude_mints: Optional[Set[str]] = None,
+    aggressive: bool = False,
 ) -> Optional[PositionLike]:
-    active = [p for p in positions.values() if getattr(p, "active", True)]
-    if not active:
-        return None
+    candidates = pick_rotation_candidates(
+        positions, now_ts, settings, exclude_mints=exclude_mints, aggressive=aggressive,
+    )
+    return candidates[0] if candidates else None
 
+
+def pick_rotation_candidates(
+    positions: dict[str, PositionLike],
+    now_ts: float,
+    settings: RecycleSettings,
+    exclude_mints: Optional[Set[str]] = None,
+    aggressive: bool = False,
+) -> List[PositionLike]:
+    skip = exclude_mints or set()
+    active = [
+        p for p in positions.values()
+        if getattr(p, "active", True) and p.mint not in skip
+    ]
+    if not active:
+        return []
+
+    min_hold_losers = 1.0 if aggressive else 5.0
     stale = []
     losers = []
     for pos in active:
@@ -85,15 +105,25 @@ def pick_rotation_candidate(
         gain = position_gain(pos)
         if hold_min >= settings.stale_exit_minutes and gain < settings.stale_min_gain:
             stale.append((hold_min, gain, pos))
-        elif hold_min >= 5.0:
+        elif hold_min >= min_hold_losers:
             losers.append((gain, hold_min, pos))
 
+    ordered: List[PositionLike] = []
     if stale:
         stale.sort(key=lambda x: (-x[0], x[1]))
-        return stale[0][2]
+        ordered.extend(x[2] for x in stale)
     if losers:
         losers.sort(key=lambda x: (x[0], -x[1]))
-        return losers[0][2]
+        for _, _, pos in losers:
+            if pos not in ordered:
+                ordered.append(pos)
 
     oldest = sorted(active, key=lambda p: p.start_time)
-    return oldest[0] if oldest else None
+    for pos in oldest:
+        if pos not in ordered:
+            ordered.append(pos)
+    return ordered
+
+
+def active_position_count(positions: dict[str, PositionLike]) -> int:
+    return sum(1 for p in positions.values() if getattr(p, "active", True))

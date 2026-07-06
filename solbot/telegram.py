@@ -15,6 +15,7 @@ from typing import Optional, Any, List, Dict
 
 from telethon import TelegramClient, events, Button
 from solbot.config import TelegramConfig
+from solbot.capital_strategy import dynamic_max_positions
 
 logger = logging.getLogger("solbot.ui.telegram")
 
@@ -1415,7 +1416,18 @@ class TelegramController:
                 f"Trading blocked: <code>{stats.skip_trading_blocked}</code>",
                 f"Low balance skips: <code>{stats.skip_low_balance}</code>",
                 f"Capital rotations: <code>{stats.capital_rotations}</code>",
+                f"Ghosts purged: <code>{stats.ghosts_purged}</code>",
             ])
+        active_n = sum(1 for p in getattr(self._bot, "_positions", {}).values() if p.active)
+        if profile and self._bot._pump_client:
+            try:
+                bal = await self._bot._pump_client.get_sol_balance()
+                cap = dynamic_max_positions(
+                    bal, profile.buy_amount_sol, profile.min_wallet_sol_reserve, profile.max_positions_cap,
+                )
+                msg.append(f"Active positions: <code>{active_n}/{cap}</code>")
+            except Exception:
+                msg.append(f"Active positions: <code>{active_n}</code>")
         if profile:
             msg.extend([
                 "",

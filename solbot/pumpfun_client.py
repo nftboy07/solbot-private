@@ -21,6 +21,10 @@ from solbot.jito_tip_estimator import JitoTipEstimator
 
 logger = logging.getLogger("bot.pumpfun_client")
 
+SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+TOKEN_PROGRAMS = (SPL_TOKEN_PROGRAM, TOKEN_2022_PROGRAM)
+
 class PumpFunClient:
     """Async client for PumpPortal local transaction signing with Jito bundling."""
 
@@ -57,6 +61,55 @@ class PumpFunClient:
             return await self._rpc_pool.get_best_node()
         return self._solana_config.rpc_url
 
+    async def _rpc_urls_for_retry(self) -> List[str]:
+        if hasattr(self, "_rpc_pool") and self._rpc_pool and hasattr(self._rpc_pool, "get_retry_urls"):
+            return await self._rpc_pool.get_retry_urls()
+        return [await self._get_rpc_url()]
+
+    def _is_rate_limited(self, data: dict, http_status: int) -> bool:
+        if http_status == 429:
+            return True
+        err = data.get("error") or {}
+        msg = str(err.get("message", "")).lower()
+        return "rate limit" in msg or "too many" in msg
+
+    async def _rpc_post(
+        self,
+        payload: dict,
+        method: str = "rpc",
+        max_attempts: int = 3,
+    ) -> tuple[Optional[dict], int, Optional[str]]:
+        last_error = None
+        urls = await self._rpc_urls_for_retry()
+        for attempt in range(max_attempts):
+            url = urls[attempt % len(urls)]
+            start = time.perf_counter()
+            try:
+                async with self._session.post(url, json=payload) as resp:
+                    data = await resp.json()
+                    latency = (time.perf_counter() - start) * 1000
+                    ok = self._rpc_success(data, resp.status)
+                    await self._report_rpc_metric(
+                        url, ok, latency, status_code=resp.status, method=method,
+                    )
+                    if ok:
+                        return data, resp.status, url
+                    if self._is_rate_limited(data, resp.status):
+                        last_error = data.get("error", {}).get("message", "rate limited")
+                        if hasattr(self, "_rpc_pool") and self._rpc_pool:
+                            await self._rpc_pool.report_metrics(
+                                url, False, latency, status_code=429,
+                            )
+                        await asyncio.sleep(0.3 * (attempt + 1))
+                        continue
+                    return data, resp.status, url
+            except Exception as exc:
+                last_error = str(exc)
+                await self._report_rpc_metric(url, False, status_code=500, method=method)
+                await asyncio.sleep(0.2 * (attempt + 1))
+        logger.warning("RPC %s failed after %s attempts: %s", method, max_attempts, last_error)
+        return None, 500, None
+
     async def _report_rpc_metric(self, url: str, success: bool, latency: float = 0.0, slot: int = 0, status_code: Optional[int] = None, method: str = "rpc"):
         if hasattr(self, "_rpc_pool") and self._rpc_pool:
             await self._rpc_pool.report_metrics(url, success, latency, slot, status_code)
@@ -71,29 +124,15 @@ class PumpFunClient:
             "method": "getBalance",
             "params": [self._wallet.pubkey_str]
         }
-        url = await self._get_rpc_url()
-        start = time.perf_counter()
-        try:
-            async with self._session.post(url, json=payload) as resp:
-                data = await resp.json()
-                latency = (time.perf_counter() - start) * 1000
-                ok = self._rpc_success(data, resp.status)
-                await self._report_rpc_metric(url, ok, latency, status_code=resp.status, method="getBalance")
-                if not ok:
-                    return 0.0
-                lamports = data.get("result", {}).get("value", 0)
-                return lamports / 1_000_000_000
-        except Exception as e:
-            logger.error(f"Error fetching SOL balance: {e}")
-            await self._report_rpc_metric(url, False, status_code=500)
+        data, _, _ = await self._rpc_post(payload, method="getBalance")
+        if not data:
             return 0.0
+        lamports = data.get("result", {}).get("value", 0)
+        return lamports / 1_000_000_000
 
     async def get_all_token_balances(self) -> Dict[str, Dict]:
         """Fetch all SPL and Token-2022 balances with metadata."""
-        programs = [
-            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", # SPL Token
-            "TokenzQdBNbLqP5VEhdkAS6EP2H6V3MG69L7AHXTo"  # Token-2022
-        ]
+        programs = list(TOKEN_PROGRAMS)
         balances = {}
         
         for program_id in programs:
@@ -107,26 +146,19 @@ class PumpFunClient:
                     {"encoding": "jsonParsed"}
                 ]
             }
-            url = await self._get_rpc_url()
-            start = time.perf_counter()
-            try:
-                async with self._session.post(url, json=payload) as resp:
-                    data = await resp.json()
-                    latency = (time.perf_counter() - start) * 1000
-                    await self._report_rpc_metric(url, True, latency, status_code=resp.status)
-                    accounts = data.get("result", {}).get("value", [])
-                    for acc in accounts:
-                        info = acc["account"]["data"]["parsed"]["info"]
-                        mint = info["mint"]
-                        amount = float(info["tokenAmount"]["uiAmount"] or 0)
-                        if amount > 0:
-                            balances[mint] = {
-                                "balance": amount,
-                                "program": "Token-2022" if program_id.endswith("To") else "SPL"
-                            }
-            except Exception as e:
-                logger.error(f"Error fetching balances for {program_id}: {e}")
-                await self._report_rpc_metric(url, False, status_code=500)
+            data, _, _ = await self._rpc_post(payload, method="getTokenAccountsByOwner")
+            if not data:
+                continue
+            accounts = data.get("result", {}).get("value", [])
+            for acc in accounts:
+                info = acc["account"]["data"]["parsed"]["info"]
+                mint = info["mint"]
+                amount = float(info["tokenAmount"]["uiAmount"] or 0)
+                if amount > 0:
+                    balances[mint] = {
+                        "balance": amount,
+                        "program": "Token-2022" if program_id == TOKEN_2022_PROGRAM else "SPL",
+                    }
         
         return balances
 
@@ -276,7 +308,7 @@ class PumpFunClient:
 
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
-        for program_id in ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EP2H6V3MG69L7AHXTo"]:
+        for program_id in TOKEN_PROGRAMS:
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -287,20 +319,13 @@ class PumpFunClient:
                     {"encoding": "jsonParsed"}
                 ]
             }
-            url = await self._get_rpc_url()
-            start = time.perf_counter()
-            try:
-                async with self._session.post(url, json=payload) as resp:
-                    data = await resp.json()
-                    latency = (time.perf_counter() - start) * 1000
-                    await self._report_rpc_metric(url, True, latency, status_code=resp.status)
-                    accounts = data.get("result", {}).get("value", [])
-                    if accounts:
-                        amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
-                        return float(amount_info["uiAmount"] or 0)
-            except:
-                await self._report_rpc_metric(url, False, status_code=500)
+            data, _, _ = await self._rpc_post(payload, method="getTokenAccountsByOwner")
+            if not data:
                 continue
+            accounts = data.get("result", {}).get("value", [])
+            if accounts:
+                amount_info = accounts[0]["account"]["data"]["parsed"]["info"]["tokenAmount"]
+                return float(amount_info["uiAmount"] or 0)
         return 0.0
 
     async def get_recent_prioritization_fee(self, mint: str) -> float:
@@ -432,17 +457,23 @@ class PumpFunClient:
                 "params": [base58.b58encode(bytes(signed_tx)).decode("utf-8"), {"skipPreflight": True}]
             }
             start_broadcast = time.perf_counter()
-            async with self._session.post(rpc_url, json=rpc_payload) as r_resp:
-                r_data = await r_resp.json()
-                latency_b = (time.perf_counter() - start_broadcast) * 1000
-                ok = self._rpc_success(r_data, r_resp.status)
-                await self._report_rpc_metric(rpc_url, ok, latency_b, status_code=r_resp.status, method="sendTransaction")
-                latency = (time.perf_counter() - start_time) * 1000
-                tx_sig = r_data.get("result")
-                if ok and tx_sig:
-                    return TradeResult(success=True, token_mint=mint, tx_signature=tx_sig, latency_ms=latency)
-                error_msg = r_data.get("error", {}).get("message", "Unknown RPC error")
-                return TradeResult(success=False, token_mint=mint, error=f"RPC Send Failed: {error_msg}", latency_ms=latency)
+            r_data, r_status, rpc_url = await self._rpc_post(
+                rpc_payload, method="sendTransaction", max_attempts=4,
+            )
+            latency_b = (time.perf_counter() - start_broadcast) * 1000
+            latency = (time.perf_counter() - start_time) * 1000
+            if not r_data:
+                return TradeResult(
+                    success=False, token_mint=mint,
+                    error="RPC Send Failed: rate limits exceeded on all endpoints",
+                    latency_ms=latency,
+                )
+            ok = self._rpc_success(r_data, r_status or 500)
+            tx_sig = r_data.get("result")
+            if ok and tx_sig:
+                return TradeResult(success=True, token_mint=mint, tx_signature=tx_sig, latency_ms=latency)
+            error_msg = r_data.get("error", {}).get("message", "Unknown RPC error")
+            return TradeResult(success=False, token_mint=mint, error=f"RPC Send Failed: {error_msg}", latency_ms=latency)
 
         except Exception as e:
             logger.error(f"Execution failed for {mint}: {e}")

@@ -32,14 +32,21 @@ class RPCPool:
 
     async def get_best_node(self) -> str:
         """Returns the best available RPC node based on slot and latency."""
-        async with self._lock:
-            active_nodes = [n for n in self.nodes if n.is_active]
-            if not active_nodes:
-                logger.error("No active RPC nodes available! Falling back to first configured node.")
-                return self.nodes[0].url
+        urls = await self.get_retry_urls()
+        return urls[0]
 
-            sorted_nodes = sorted(active_nodes, key=lambda x: (-x.last_slot, x.latency))
-            return sorted_nodes[0].url
+    async def get_retry_urls(self) -> List[str]:
+        """Ordered RPC URLs for failover (active first, then cooldown nodes)."""
+        async with self._lock:
+            await self._reactivate_stale_nodes(cooldown_seconds=60)
+            active_nodes = [n for n in self.nodes if n.is_active]
+            if active_nodes:
+                sorted_nodes = sorted(active_nodes, key=lambda x: (-x.last_slot, x.latency))
+                return [n.url for n in sorted_nodes]
+            if self.nodes:
+                logger.error("No active RPC nodes available! Falling back to all configured nodes.")
+                return [n.url for n in self.nodes]
+            return []
 
     async def report_metrics(self, url: str, success: bool, latency: float = 0.0, slot: int = 0, status_code: Optional[int] = None):
         """Updates node metrics after a request."""
