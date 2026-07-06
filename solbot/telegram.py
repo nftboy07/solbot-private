@@ -1413,6 +1413,18 @@ class TelegramController:
                 f"Snipes started: <code>{stats.snipes_started}</code>",
                 f"Buys OK / fail: <code>{stats.buys_success}</code> / <code>{stats.buys_failed}</code>",
                 f"Trading blocked: <code>{stats.skip_trading_blocked}</code>",
+                f"Low balance skips: <code>{stats.skip_low_balance}</code>",
+                f"Capital rotations: <code>{stats.capital_rotations}</code>",
+            ])
+        if profile:
+            msg.extend([
+                "",
+                "<b>Capital recycle</b>",
+                f"Mode: <code>{'ON' if profile.recycle_mode else 'OFF'}</code>",
+                f"Min reserve: <code>{profile.min_wallet_sol_reserve:.3f} SOL</code>",
+                f"TP ladder: <code>{profile.tp1_multiplier:.2f}x/{profile.tp2_multiplier:.2f}x</code>",
+                f"Stale exit: <code>{profile.stale_exit_minutes:.0f}m &lt; {profile.stale_min_gain:.2f}x</code>",
+                f"Max hold: <code>{profile.max_hold_minutes:.0f}m</code>",
             ])
             top = stats.top_filter_reasons(5)
             if top:

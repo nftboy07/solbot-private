@@ -20,6 +20,8 @@ class StatsTracker:
     skip_mayhem: int = 0
     skip_risk: int = 0
     skip_trading_blocked: int = 0
+    skip_low_balance: int = 0
+    capital_rotations: int = 0
     qualified: int = 0
     snipes_started: int = 0
     buys_success: int = 0

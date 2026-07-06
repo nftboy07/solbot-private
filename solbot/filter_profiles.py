@@ -44,6 +44,19 @@ class FilterProfile:
     use_jito: bool
     max_trade_pct_wallet: float
     max_rpc_latency_ms: float
+    min_wallet_sol_reserve: float
+    recycle_mode: bool
+    tp1_multiplier: float
+    tp1_sell_pct: float
+    tp2_multiplier: float
+    tp2_sell_pct: float
+    stop_loss_pct: float
+    stale_exit_minutes: float
+    stale_min_gain: float
+    max_hold_minutes: float
+    trailing_activate_gain: float
+    use_dynamic_position_cap: bool
+    max_positions_cap: int
 
 
 PROFILES: Dict[str, FilterProfile] = {
@@ -83,6 +96,19 @@ PROFILES: Dict[str, FilterProfile] = {
         use_jito=True,
         max_trade_pct_wallet=0.02,
         max_rpc_latency_ms=250.0,
+        min_wallet_sol_reserve=0.05,
+        recycle_mode=False,
+        tp1_multiplier=2.0,
+        tp1_sell_pct=0.25,
+        tp2_multiplier=3.0,
+        tp2_sell_pct=0.50,
+        stop_loss_pct=0.15,
+        stale_exit_minutes=20.0,
+        stale_min_gain=1.05,
+        max_hold_minutes=45.0,
+        trailing_activate_gain=1.50,
+        use_dynamic_position_cap=False,
+        max_positions_cap=15,
     ),
     "normal": FilterProfile(
         name="normal",
@@ -120,6 +146,19 @@ PROFILES: Dict[str, FilterProfile] = {
         use_jito=True,
         max_trade_pct_wallet=0.02,
         max_rpc_latency_ms=300.0,
+        min_wallet_sol_reserve=0.05,
+        recycle_mode=False,
+        tp1_multiplier=1.60,
+        tp1_sell_pct=0.35,
+        tp2_multiplier=2.20,
+        tp2_sell_pct=0.60,
+        stop_loss_pct=0.15,
+        stale_exit_minutes=15.0,
+        stale_min_gain=1.04,
+        max_hold_minutes=30.0,
+        trailing_activate_gain=1.35,
+        use_dynamic_position_cap=True,
+        max_positions_cap=20,
     ),
     "degen": FilterProfile(
         name="degen",
@@ -150,13 +189,26 @@ PROFILES: Dict[str, FilterProfile] = {
         brain_rug_mcap_usd=3000.0,
         brain_scan_min_rugs=8,
         buy_amount_sol=0.02,
-        trailing_stop_pct=0.20,
+        trailing_stop_pct=0.12,
         max_cluster_risk=50.0,
         skip_creator_genome_check=True,
         skip_mayhem_check=True,
         use_jito=False,
         max_trade_pct_wallet=0.05,
         max_rpc_latency_ms=500.0,
+        min_wallet_sol_reserve=0.05,
+        recycle_mode=True,
+        tp1_multiplier=1.35,
+        tp1_sell_pct=0.55,
+        tp2_multiplier=1.70,
+        tp2_sell_pct=0.85,
+        stop_loss_pct=0.12,
+        stale_exit_minutes=10.0,
+        stale_min_gain=1.03,
+        max_hold_minutes=18.0,
+        trailing_activate_gain=1.25,
+        use_dynamic_position_cap=True,
+        max_positions_cap=28,
     ),
 }
 

@@ -14,6 +14,12 @@ if TYPE_CHECKING:
 
 from solbot.config import BotConfig, BotMode
 from solbot.filter_profiles import get_profile, default_profile_name
+from solbot.capital_strategy import (
+    RecycleSettings,
+    dynamic_max_positions,
+    pick_rotation_candidate,
+    should_block_buy,
+)
 from solbot.stats_tracker import StatsTracker
 from solbot.filters import TokenFilter
 from solbot.jupiter import JupiterClient
@@ -380,6 +386,62 @@ class Solbot:
             return "risk manager kill switch active"
         return None
 
+    def _profile_recycle_settings(self, profile) -> RecycleSettings:
+        return RecycleSettings(
+            enabled=profile.recycle_mode,
+            min_wallet_sol_reserve=profile.min_wallet_sol_reserve,
+            tp1_multiplier=profile.tp1_multiplier,
+            tp1_sell_pct=profile.tp1_sell_pct,
+            tp2_multiplier=profile.tp2_multiplier,
+            tp2_sell_pct=profile.tp2_sell_pct,
+            stop_loss_pct=profile.stop_loss_pct,
+            stale_exit_minutes=profile.stale_exit_minutes,
+            stale_min_gain=profile.stale_min_gain,
+            max_hold_minutes=profile.max_hold_minutes,
+            trailing_activate_gain=profile.trailing_activate_gain,
+            use_dynamic_position_cap=profile.use_dynamic_position_cap,
+            max_positions_cap=profile.max_positions_cap,
+        )
+
+    async def _effective_max_positions(self, profile) -> int:
+        if not profile.use_dynamic_position_cap:
+            return getattr(self._config.strategy, "max_active_positions", 100)
+        if not self._pump_client:
+            return profile.max_positions_cap
+        balance = await self._pump_client.get_sol_balance()
+        return dynamic_max_positions(
+            balance,
+            profile.buy_amount_sol,
+            profile.min_wallet_sol_reserve,
+            profile.max_positions_cap,
+        )
+
+    async def _ensure_buy_capital(self, profile, needed_sol: float) -> tuple[bool, Optional[str]]:
+        if not self._pump_client:
+            return True, None
+        settings = self._profile_recycle_settings(profile)
+        balance = await self._pump_client.get_sol_balance()
+        block = should_block_buy(balance, needed_sol, settings.min_wallet_sol_reserve)
+        if not block:
+            return True, None
+        if not settings.enabled:
+            return False, block
+        candidate = pick_rotation_candidate(self._positions, time(), settings)
+        if not candidate:
+            return False, f"{block} (no position to rotate)"
+        self._stats.bump("capital_rotations")
+        logger.info(
+            "Rotating capital: exiting %s (%s) to fund new snipe (wallet=%.4f SOL)",
+            candidate.symbol, candidate.mint[:8], balance,
+        )
+        await self._exit_position(candidate, "CAPITAL ROTATION (free SOL for new snipe)", 1.0)
+        await asyncio.sleep(1.5)
+        balance = await self._pump_client.get_sol_balance()
+        block = should_block_buy(balance, needed_sol, settings.min_wallet_sol_reserve)
+        if block:
+            return False, f"{block} after rotation"
+        return True, None
+
     async def _log_trade_event(self, event_type: str, payload: Dict[str, Any]):
         if not self._obs:
             return
@@ -447,8 +509,9 @@ class Solbot:
         self._ai_filter._fallback_score = profile.ai_fallback_score
         object.__setattr__(self._config.jupiter, "buy_amount_sol", profile.buy_amount_sol)
         object.__setattr__(self._config.strategy, "trailing_stop_pct", profile.trailing_stop_pct)
+        object.__setattr__(self._config.strategy, "stop_loss_pct", profile.stop_loss_pct)
         logger.info(
-            "Applied %s preset: delay=%.1fs age=[%.1f,%.1f] mcap=[%.0f,%.0f] ai_min=%d blacklist=%s",
+            "Applied %s preset: delay=%.1fs age=[%.1f,%.1f] mcap=[%.0f,%.0f] ai_min=%d blacklist=%s recycle=%s reserve=%.3f",
             profile.name,
             profile.sniper_delay_seconds,
             profile.min_age_seconds,
@@ -457,6 +520,8 @@ class Solbot:
             profile.max_mcap_sol,
             profile.min_ai_score,
             "enforce" if profile.enforce_creator_blacklist else "soft",
+            "ON" if profile.recycle_mode else "OFF",
+            profile.min_wallet_sol_reserve,
         )
         return profile
 
@@ -517,15 +582,28 @@ class Solbot:
         profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
         self._stats.bump("tokens_seen")
 
-        max_active_positions = getattr(self._config.strategy, "max_active_positions", 100)
+        max_active_positions = await self._effective_max_positions(profile)
         active_count = sum(1 for p in self._positions.values() if p.active)
         if max_active_positions > 0 and active_count >= max_active_positions:
-            self._stats.bump("skip_position_limit")
-            logger.warning(
-                "SKIPPING %s: Active positions limit (%s/%s) reached.",
-                token.symbol, active_count, max_active_positions,
-            )
-            return
+            if profile.recycle_mode:
+                settings = self._profile_recycle_settings(profile)
+                candidate = pick_rotation_candidate(self._positions, time(), settings)
+                if candidate:
+                    self._stats.bump("capital_rotations")
+                    logger.info(
+                        "Position cap reached (%s/%s); rotating %s for %s",
+                        active_count, max_active_positions, candidate.symbol, token.symbol,
+                    )
+                    await self._exit_position(candidate, "CAPITAL ROTATION (position cap)", 1.0)
+                    await asyncio.sleep(1.5)
+                    active_count = sum(1 for p in self._positions.values() if p.active)
+            if active_count >= max_active_positions:
+                self._stats.bump("skip_position_limit")
+                logger.warning(
+                    "SKIPPING %s: Active positions limit (%s/%s) reached.",
+                    token.symbol, active_count, max_active_positions,
+                )
+                return
 
         if profile.enforce_creator_blacklist and self.is_blacklisted(token.creator):
             self._stats.bump("skip_blacklist")
@@ -659,6 +737,12 @@ class Solbot:
         if not allowed:
             self._stats.bump("skip_risk")
             logger.warning("SKIPPING %s: Risk check failed: %s", token.symbol, reason)
+            return
+
+        capital_ok, cap_reason = await self._ensure_buy_capital(profile, size)
+        if not capital_ok:
+            self._stats.bump("skip_low_balance")
+            logger.warning("SKIPPING %s: %s", token.symbol, cap_reason)
             return
 
         if self._obs:
@@ -989,6 +1073,13 @@ class Solbot:
         self._processed_mints.add(token.mint)
         try:
             exec_profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+            capital_ok, cap_reason = await self._ensure_buy_capital(exec_profile, size)
+            if not capital_ok:
+                self._stats.bump("skip_low_balance")
+                logger.warning("Trade blocked for %s: %s", token.symbol, cap_reason)
+                self._processed_mints.discard(token.mint)
+                self._active_buys.discard(token.mint)
+                return
             # Advanced AI Safety & Honeypot Screen
             if self._ai_enabled and not manual_override and not exec_profile.skip_ai_safety_screen:
                 holders = []
@@ -1370,6 +1461,51 @@ class Solbot:
                         await self._exit_position(pos, f"Moonbag exit: AI Trend Reverse ({current_score})", 1.0)
                         break
             else:
+                profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+                if profile.recycle_mode:
+                    hold_min = (now_ts - pos.start_time) / 60.0
+                    if hold_min >= profile.max_hold_minutes:
+                        await self._exit_position(pos, f"MAX HOLD ({profile.max_hold_minutes:.0f}m)", 1.0)
+                        break
+                    if hold_min >= profile.stale_exit_minutes and gain < profile.stale_min_gain:
+                        await self._exit_position(
+                            pos, f"STALE EXIT ({hold_min:.0f}m @ {gain:.2f}x)", 1.0,
+                        )
+                        break
+                    if (
+                        gain >= profile.tp2_multiplier
+                        and profile.tp2_multiplier not in pos.tp_targets_hit
+                    ):
+                        await self._exit_position(
+                            pos, f"RECYCLE TP2 ({profile.tp2_multiplier:.2f}x)", profile.tp2_sell_pct,
+                        )
+                        pos.tp_targets_hit.append(profile.tp2_multiplier)
+                        self._save_state()
+                    elif (
+                        gain >= profile.tp1_multiplier
+                        and profile.tp1_multiplier not in pos.tp_targets_hit
+                    ):
+                        await self._exit_position(
+                            pos, f"RECYCLE TP1 ({profile.tp1_multiplier:.2f}x)", profile.tp1_sell_pct,
+                        )
+                        pos.tp_targets_hit.append(profile.tp1_multiplier)
+                        self._save_state()
+                    elif gain >= profile.trailing_activate_gain:
+                        if drawdown >= profile.trailing_stop_pct:
+                            await self._exit_position(
+                                pos,
+                                f"TRAILING STOP ({profile.trailing_stop_pct*100:.0f}% from peak)",
+                                1.0,
+                            )
+                            break
+                    elif gain <= (1.0 - profile.stop_loss_pct):
+                        await self._exit_position(
+                            pos, f"STOP LOSS ({profile.stop_loss_pct*100:.0f}%)", 1.0,
+                        )
+                        break
+                    await asyncio.sleep(5)
+                    continue
+
                 # Not a moonbag yet. Check TP Presets (Aggressive by default, or Conservative)
                 preset = getattr(strat, "tp_preset", "aggressive")
                 
@@ -1429,7 +1565,15 @@ class Solbot:
         sell_amount = token_balance * pct
         # We increase priority fee for exits triggered by KOL sales
         priority_fee = 0.01 if "KOL EXIT" in reason else 0.001
-        result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=sell_amount, denominated_in_sol=False, priority_fee=priority_fee)
+        sell_profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+        result = await self._pump_client.execute_trade(
+            pos.mint,
+            action="sell",
+            amount=sell_amount,
+            denominated_in_sol=False,
+            priority_fee=priority_fee,
+            use_jito=sell_profile.use_jito,
+        )
         await self._risk_manager.report_tx_result(result.success)
         if result.success:
             self._trades.append(result)
