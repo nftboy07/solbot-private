@@ -15,18 +15,18 @@ def main():
         state = json.load(handle)
 
     positions = state.get("positions", {})
-    now = time.time()
+    max_keep = int(__import__("os").getenv("MAX_STATE_POSITIONS", "15"))
+    active_items = [
+        (float(pos.get("start_time", 0) or 0), mint, pos)
+        for mint, pos in positions.items()
+        if pos.get("active", True)
+    ]
+    active_items.sort(key=lambda x: x[0], reverse=True)
+    keep_mints = {mint for _, mint, _ in active_items[:max_keep]}
     kept = {}
     removed = 0
     for mint, pos in positions.items():
-        size = float(pos.get("size", 0) or 0)
-        active = pos.get("active", True)
-        start = float(pos.get("start_time", 0) or 0)
-        symbol = pos.get("symbol", "")
-        # Keep recent bot snipes (last 48h) or positions with SOL-sized entries
-        recent = (now - start) < 172800 if start > 0 else False
-        bot_like = size >= 0.001 and symbol not in ("SYNCED", "???", "")
-        if active and (recent or bot_like):
+        if mint in keep_mints:
             kept[mint] = pos
         else:
             removed += 1
