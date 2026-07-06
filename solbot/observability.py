@@ -87,7 +87,8 @@ class ObservabilityHub:
             "metadata": json.dumps(metadata),
         }
         if self.telemetry:
-            self.telemetry.log_trade_event(trade_id, **row)
+            telemetry_row = {k: v for k, v in row.items() if k != "trade_id"}
+            self.telemetry.log_trade_event(trade_id, **telemetry_row)
         else:
             await self.db.log_trade_event(row)
         await self.publish(
