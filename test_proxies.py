@@ -1,58 +1,71 @@
 import asyncio
 import os
+from pathlib import Path
+
 from curl_cffi.requests import AsyncSession
 
-proxies = [
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@38.154.203.95:5863",
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@198.105.121.200:6462",
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@64.137.96.74:6641",
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@209.127.138.10:5784",
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@38.154.185.97:6370",
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@84.247.60.125:6095",
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@142.111.67.146:5611",
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@191.96.254.138:6185",
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@31.58.9.4:6077",
-    "http://REDACTED_PROXY_USER:REDACTED_PROXY_PASS@104.239.107.47:5699"
-]
 
-async def test_proxy(url):
+def load_proxies() -> list[str]:
+    path = os.getenv("PROXY_LIST_PATH", "data/proxies.txt")
+    if not Path(path).exists():
+        print(f"No proxy list found at {path}")
+        return []
+    proxies = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                proxies.append(line)
+    single = os.getenv("PROXY_URL", "").strip()
+    if single:
+        proxies.insert(0, single)
+    return proxies
+
+
+async def test_proxy(url: str):
     try:
-        async with AsyncSession(impersonate="chrome120") as s:
-            # curl_cffi handles common browser headers automatically via impersonate
-            resp = await s.get(
-                "https://frontend-api.pump.fun/coins/latest", 
-                proxy=url, 
-                timeout=10
+        async with AsyncSession(impersonate="chrome120") as session:
+            resp = await session.get(
+                "https://frontend-api.pump.fun/coins/latest",
+                proxy=url,
+                timeout=10,
             )
             if resp.status_code == 200:
                 return url, True, resp.status_code
             return url, False, resp.status_code
-    except Exception as e:
-        return url, False, str(e)
+    except Exception as exc:
+        return url, False, str(exc)
+
 
 async def main():
-    tasks = [test_proxy(p) for p in proxies]
-    res = await asyncio.gather(*tasks)
-    working = [r[0] for r in res if r[1]]
-    
-    print("\n--- TEST RESULTS (using curl_cffi) ---")
-    for url, status, detail in res:
-        # Mask the auth part for cleaner output
-        short_url = url.split('@')[1] if '@' in url else url
-        print(f"{short_url}: {'WORKING (200 OK)' if status else f'FAILED ({detail})'}")
-        
-    if working:
-        print(f"\nfound a working one: {working[0].split('@')[1] if '@' in working[0] else working[0]}")
-        lines = []
-        if os.path.exists(".env"):
-            with open(".env", "r") as f:
-                lines = [l for l in f.readlines() if "PROXY_URL" not in l]
-        lines.append(f"PROXY_URL={working[0]}\n")
-        with open(".env", "w") as f:
-            f.writelines(lines)
-        print("cleaned .env and updated PROXY_URL")
-    else:
-        print("\nall 10 proxies are blocked or failing even with chrome120 impersonation")
+    proxies = load_proxies()
+    if not proxies:
+        print("Add proxies to data/proxies.txt or set PROXY_URL in .env")
+        return
 
-if __name__ == '__main__':
+    results = await asyncio.gather(*(test_proxy(proxy) for proxy in proxies))
+    working = [result[0] for result in results if result[1]]
+
+    print("\n--- TEST RESULTS (using curl_cffi) ---")
+    for url, status, detail in results:
+        short_url = url.split("@")[1] if "@" in url else url
+        print(f"{short_url}: {'WORKING (200 OK)' if status else f'FAILED ({detail})'}")
+
+    if working:
+        best = working[0]
+        short = best.split("@")[1] if "@" in best else best
+        print(f"\nfound a working one: {short}")
+        if Path(".env").exists():
+            lines = []
+            with open(".env", "r", encoding="utf-8") as handle:
+                lines = [line for line in handle.readlines() if not line.startswith("PROXY_URL=")]
+            lines.append(f"PROXY_URL={best}\n")
+            with open(".env", "w", encoding="utf-8") as handle:
+                handle.writelines(lines)
+            print("updated PROXY_URL in .env")
+    else:
+        print("\nall proxies failed")
+
+
+if __name__ == "__main__":
     asyncio.run(main())

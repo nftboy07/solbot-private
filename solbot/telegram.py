@@ -35,6 +35,23 @@ class TelegramController:
         # Prices (mocked or synced from bot)
         self._sol_price = 150.0 # Placeholder, should ideally be synced
 
+    def _authorized_admin_ids(self) -> set[int]:
+        ids = set(self._config.admin_ids)
+        if self._config.chat_id and str(self._config.chat_id).isdigit():
+            ids.add(int(self._config.chat_id))
+        return ids
+
+    async def _require_admin(self, event) -> bool:
+        allowed = self._authorized_admin_ids()
+        if not allowed:
+            return True
+        sender = await event.get_sender()
+        sender_id = getattr(sender, "id", None)
+        if sender_id not in allowed:
+            await event.reply("⛔️ Unauthorized. This command is restricted to bot admins.")
+            return False
+        return True
+
     async def start(self):
         """Initialize and start the Telethon client."""
         if not self._config.token or not self._config.api_id or not self._config.api_hash:
@@ -260,6 +277,9 @@ class TelegramController:
         async def callback_handler(event):
             data = event.data.decode("utf-8")
             if data.startswith("buy_"):
+                if not await self._require_admin(event):
+                    await event.answer("Unauthorized", alert=True)
+                    return
                 parts = data.split("_")
                 if len(parts) == 3:
                     try:
@@ -882,6 +902,8 @@ class TelegramController:
         await event.reply(msg)
 
     async def _cmd_paper(self, event):
+        if not await self._require_admin(event):
+            return
         args = event.message.text.split()
         if len(args) > 1:
             val = args[1].lower()
@@ -942,6 +964,8 @@ class TelegramController:
         )
 
     async def _cmd_risk(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('risk', 'Risk settings updated')
         args = event.message.text.split()
         cmd = args[0].lower()
@@ -958,10 +982,16 @@ class TelegramController:
                 self._kill_switch = not self._kill_switch
             
             if self._kill_switch:
-                if hasattr(self._bot, '_paused'): self._bot._paused = True
+                if hasattr(self._bot, '_paused'):
+                    self._bot._paused = True
+                if hasattr(self._bot, '_risk_manager'):
+                    await self._bot._risk_manager.kill()
                 await event.reply("🚨 <b>KILL SWITCH ACTIVATED</b>\nNew entries disabled. Monitoring exits only.")
             else:
-                if hasattr(self._bot, '_paused'): self._bot._paused = False
+                if hasattr(self._bot, '_paused'):
+                    self._bot._paused = False
+                if hasattr(self._bot, '_risk_manager'):
+                    await self._bot._risk_manager.resume()
                 await event.reply("✅ <b>KILL SWITCH DEACTIVATED</b>\nNormal operation resumed.")
             return
 

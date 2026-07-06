@@ -55,7 +55,7 @@ class Position:
 class Solbot:
     """High-speed DEGEN Sniper with Dev Dump Protection & KOL Coordinated Trading."""
 
-    def __init__(self, config: BotConfig, event_store=None, telemetry=None, creator_genome=None, wallet_graph=None, feature_store=None, rpc_pool=None):
+    def __init__(self, config: BotConfig, db=None, event_store=None, telemetry=None, creator_genome=None, wallet_graph=None, feature_store=None, rpc_pool=None):
         self._config = config
         self._event_store = event_store
         self._telemetry = telemetry
@@ -82,7 +82,7 @@ class Solbot:
         self._autobuy_enabled = True
         self._autorunner_enabled = False
         self._autorunner_amount = 0.01
-        self._ai_filter = AIFilter()
+        self._ai_filter = AIFilter(config)
         self._ai_filter._bot = self
         self._go_monitor = None
         self._raydium = None
@@ -97,8 +97,10 @@ class Solbot:
         self._network_manager = NetworkManager(config.proxy_list_path)
         from solbot.db import Database
         from solbot.engines.risk_manager import RiskManager
-        self._db = Database()
+        self._db = db or Database()
+        self._owns_db = db is None
         self._risk_manager = RiskManager()
+        self._position_manager_tasks: Dict[str, asyncio.Task] = {}
         # Missed entry tracker: mint -> {symbol, alert_price_usd, alert_time, notified_milestones}
         self._missed_runners: Dict[str, Dict] = {}
         # Daily runners tracking state
@@ -222,7 +224,8 @@ class Solbot:
         setup_logger(self._config.logging)
         logger.info("SOLBOT DEGEN SNIPER STARTING")
 
-        await self._db.connect()
+        if self._owns_db:
+            await self._db.connect()
         self._wallet = Wallet(self._config.solana)
         self._filter = TokenFilter(self._config)
         self._pump_client = PumpFunClient(self._config, self._wallet)
@@ -267,11 +270,11 @@ class Solbot:
             logger.error(f"Failed to load historically traded mints: {e}")
             
         await self._sync_existing_holdings()
-        
-        # Start position managers for all restored active positions
+        await self._cleanup_ghost_positions()
+
         for pos in self._positions.values():
             if pos.active:
-                asyncio.create_task(self._position_manager(pos))
+                self._spawn_position_manager(pos)
                 
         # Start watch queue manager
         asyncio.create_task(self._watch_queue_manager())
@@ -307,10 +310,39 @@ class Solbot:
         self._missed_tracker = asyncio.create_task(self._missed_entry_tracker_loop())
         self._congestion_poller = asyncio.create_task(self._poll_network_congestion())
         self._autotune_poller = asyncio.create_task(self._ai_autotune_loop())
-        
-        for pos in self._positions.values():
-            if pos.active:
-                asyncio.create_task(self._position_manager(pos))
+
+    def _spawn_position_manager(self, pos: Position):
+        existing = self._position_manager_tasks.get(pos.mint)
+        if existing and not existing.done():
+            return
+        self._position_manager_tasks[pos.mint] = asyncio.create_task(self._position_manager(pos))
+
+    def _trading_blocked(self) -> Optional[str]:
+        if self._telegram and getattr(self._telegram, "_kill_switch", False):
+            return "kill switch active"
+        if self._telegram and getattr(self._telegram, "_paper_mode", False):
+            return "paper mode enabled"
+        if self._paused:
+            return "bot paused"
+        if self._risk_manager.state.kill_switch_active:
+            return "risk manager kill switch active"
+        return None
+
+    async def _log_trade_event(self, event_type: str, payload: Dict[str, Any]):
+        try:
+            await self._db.log_trade_event({"type": event_type, **payload})
+        except Exception as exc:
+            logger.debug("Failed to log trade event: %s", exc)
+
+    async def _cleanup_ghost_positions(self):
+        removed = []
+        for mint, pos in list(self._positions.items()):
+            if pos.active and pos.size <= 0:
+                pos.active = False
+                removed.append(mint)
+        if removed:
+            logger.info("Deactivated %s ghost positions with zero size.", len(removed))
+            self._save_state()
 
     async def stop(self):
         self._running = False
@@ -688,6 +720,14 @@ class Solbot:
         if token.mint in self._positions:
             self._active_buys.discard(token.mint)
             return
+        blocked = self._trading_blocked()
+        if blocked:
+            logger.warning("Trade blocked for %s: %s", token.symbol, blocked)
+            if self._telegram:
+                await self._telegram.send_message(
+                    f"⛔️ <b>Trade Blocked:</b> {token.symbol}\nReason: <code>{blocked}</code>"
+                )
+            return
         self._active_buys.add(token.mint)
         self._processed_mints.add(token.mint)
         try:
@@ -769,7 +809,7 @@ class Solbot:
                     self._active_buys.discard(token.mint)
                     return
 
-                if analysis.get("score", 80) < self._ai_min_score or analysis.get("is_honeypot") or analysis.get("is_premine"):
+                if analysis.get("score", 0) < self._ai_min_score or analysis.get("is_honeypot") or analysis.get("is_premine"):
                     logger.warning(f"❌ AI SAFETY SCREEN FAILED for {token.symbol}: Score={analysis.get('score')} | Honeypot={analysis.get('is_honeypot')} | Premine={analysis.get('is_premine')} | Reason: {analysis.get('reason')}")
                     if status_msg:
                         try:
@@ -824,6 +864,7 @@ class Solbot:
             result = await self._pump_client.execute_trade(
                 token.mint, action="buy", amount=size, priority_fee=priority_fee_sol, jito_tip=jito_tip_sol
             )
+            await self._risk_manager.report_tx_result(result.success)
             if result.success:
                 self._trades.append(result)
                 pos = Position(
@@ -836,8 +877,16 @@ class Solbot:
                 pos.highest_price = token.market_cap_usd
                 self._positions[token.mint] = pos
                 asyncio.create_task(self._db.save_position(token.mint, token.market_cap_usd, size, "open", reason))
-                asyncio.create_task(self._position_manager(pos))
-                
+                self._spawn_position_manager(pos)
+                await self._log_trade_event("buy", {
+                    "mint": token.mint,
+                    "symbol": token.symbol,
+                    "size": size,
+                    "reason": reason,
+                    "tx": result.tx_signature,
+                    "success": True,
+                })
+
                 # Track in RiskManager
                 await self._risk_manager.on_position_opened(token.mint, size)
                 
@@ -857,6 +906,14 @@ class Solbot:
                 await self._telegram.send_message(f"📡 <b>BUY ({reason}): {token.symbol}</b>\nMCAP: <code>${token.market_cap_usd:,.0f}</code>")
             else:
                 logger.error(f"Snipe failed for {token.symbol} ({token.mint}): {result.error}")
+                await self._log_trade_event("buy", {
+                    "mint": token.mint,
+                    "symbol": token.symbol,
+                    "size": size,
+                    "reason": reason,
+                    "success": False,
+                    "error": result.error,
+                })
                 self._processed_mints.discard(token.mint)
                 if status_msg:
                     try:

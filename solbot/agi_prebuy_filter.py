@@ -79,7 +79,7 @@ class AGIPreBuyFilter:
                     elite_wallets += 1
 
         if elite_wallets < 2:
-            pass # The rules say "skip" if no smart wallets, but we will penalize the score
+            return "SKIP", 0, 100.0, "Insufficient smart-wallet participation (<2 elite wallets)"
 
         # Calculate Weights
         score = 0

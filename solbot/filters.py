@@ -74,7 +74,7 @@ class TokenFilter:
             return False
         except Exception as e:
             logger.error(f"Error verifying mint authorities for {mint}: {e}")
-            return True # Neutral fallback
+            return False
         
     async def analyze_holders(self, mint: str, rpc_client: AsyncClient) -> Tuple[bool, float]:
         """Analyze top 10 holder concentration excluding the bonding curve."""
@@ -123,7 +123,7 @@ class TokenFilter:
             return True, top10_pct
         except Exception as e:
             logger.error(f"Error in analyze_holders for {mint}: {e}")
-            return True, 0.0
+            return False, 0.0
 
     async def check_bundles(self, mint: str, rpc_client: AsyncClient) -> bool:
         """Detect bundled wallets funded by same address holding > 30% of supply."""
@@ -199,7 +199,7 @@ class TokenFilter:
             return True
         except Exception as e:
             logger.error(f"Error in check_bundles for {mint}: {e}")
-            return True
+            return False
 
     def calculate_expected_value(self, ai_score: float, creator_score: float, top10_pct: float) -> Tuple[float, float]:
         """Calculates win probability and expected value (EV)."""

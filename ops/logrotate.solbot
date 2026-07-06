@@ -1,0 +1,10 @@
+/root/solbot-production/solbot.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    maxsize 500M
+}

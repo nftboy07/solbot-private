@@ -72,6 +72,9 @@ class TelegramConfig:
     chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", ""))
     api_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_API_ID", ""))
     api_hash: str = field(default_factory=lambda: os.getenv("TELEGRAM_API_HASH", ""))
+    admin_ids: tuple[int, ...] = field(default_factory=lambda: tuple(
+        int(x.strip()) for x in os.getenv("TELEGRAM_ADMIN_IDS", "").split(",") if x.strip().isdigit()
+    ))
 
 
 @dataclass(frozen=True)
@@ -92,6 +95,7 @@ class AIConfig:
     aws_region: str = field(default_factory=lambda: os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "ap-south-1")))
     bedrock_model_id: str = field(default_factory=lambda: os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0"))
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+    fail_open_score: int = field(default_factory=lambda: int(os.getenv("AI_FAIL_OPEN_SCORE", "0")))
 
 
 @dataclass(frozen=True)

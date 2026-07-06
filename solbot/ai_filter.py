@@ -200,8 +200,9 @@ class AIFilter:
         if bedrock_score is not None:
             return bedrock_score
         
-        logger.warning("AI scoring failed (API keys invalid or service down). Falling back to passing score 80.")
-        return 80
+        fail_score = getattr(self._config.ai, "fail_open_score", 0) if hasattr(self, "_config") else 0
+        logger.warning("AI scoring failed (API keys invalid or service down). Returning fail-safe score %s.", fail_score)
+        return fail_score
 
     async def detect_rug_risks(self, token_mint: str, creator: str, holders: list, creator_history: list) -> dict:
         """
@@ -330,4 +331,10 @@ class AIFilter:
             except Exception as e:
                 logger.error(f"Primary AI Safety Analysis failed: {e}")
 
-        return {"score": 80, "is_premine": False, "is_honeypot": False, "reason": "Safety scan fallback used (APIs rate-limited or unavailable)."}
+        fail_score = getattr(self._config.ai, "fail_open_score", 0) if hasattr(self, "_config") else 0
+        return {
+            "score": fail_score,
+            "is_premine": True,
+            "is_honeypot": True,
+            "reason": "Safety scan unavailable — fail-closed until AI providers respond.",
+        }

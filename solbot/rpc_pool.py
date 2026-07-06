@@ -18,6 +18,7 @@ class RPCNode:
     status_codes: Dict[int, int] = field(default_factory=dict)
     is_active: bool = True
     error_count: int = 0
+    inactive_since: float = 0.0
 
 class RPCPool:
     """
@@ -32,17 +33,12 @@ class RPCPool:
     async def get_best_node(self) -> str:
         """Returns the best available RPC node based on slot and latency."""
         async with self._lock:
-            # Filter active nodes
             active_nodes = [n for n in self.nodes if n.is_active]
             if not active_nodes:
                 logger.error("No active RPC nodes available! Falling back to first configured node.")
                 return self.nodes[0].url
 
-            # Sort by highest slot (most recent) then lowest latency
-            sorted_nodes = sorted(
-                active_nodes,
-                key=lambda x: (-x.last_slot, x.latency)
-            )
+            sorted_nodes = sorted(active_nodes, key=lambda x: (-x.last_slot, x.latency))
             return sorted_nodes[0].url
 
     async def report_metrics(self, url: str, success: bool, latency: float = 0.0, slot: int = 0, status_code: Optional[int] = None):
@@ -52,50 +48,62 @@ class RPCPool:
                 node.total_requests += 1
                 if slot > 0:
                     node.last_slot = slot
-                
+
                 if status_code:
                     node.status_codes[status_code] = node.status_codes.get(status_code, 0) + 1
 
                 if success:
                     node.latency = (node.latency * 0.8) + (latency * 0.2)
                     node.error_count = max(0, node.error_count - 1)
+                    node.is_active = True
+                    node.inactive_since = 0.0
                 else:
                     node.failed_requests += 1
                     node.error_count += 1
-                
-                # Node health logic
-                if status_code in [429] or (status_code and status_code >= 500) or node.error_count > 10:
+
+                if status_code in [429] or (status_code and status_code >= 500) or node.error_count > 25:
+                    if node.is_active:
+                        node.inactive_since = time.time()
                     node.is_active = False
-                    logger.warning(f"RPC Node {node.name} marked inactive (Status: {status_code}, Errors: {node.error_count})")
-                elif success:
-                    node.is_active = True
+                    logger.warning(
+                        "RPC Node %s marked inactive (Status: %s, Errors: %s)",
+                        node.name, status_code, node.error_count,
+                    )
                 break
 
+    async def _reactivate_stale_nodes(self, cooldown_seconds: int = 120):
+        now = time.time()
+        for node in self.nodes:
+            if not node.is_active and node.inactive_since and (now - node.inactive_since) >= cooldown_seconds:
+                node.is_active = True
+                node.error_count = max(0, node.error_count - 5)
+                node.inactive_since = 0.0
+                logger.info("RPC Node %s reactivated after cooldown.", node.name)
+
     async def monitor_nodes(self):
-        """Checks nodes for slot height and latency periodically."""
+        await self._reactivate_stale_nodes()
         tasks = [self.check_node_health(node) for node in self.nodes]
         await asyncio.gather(*tasks)
 
     async def check_node_health(self, node: RPCNode):
         """Internal check for a single node's health."""
         start_time = time.time()
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getSlot"
-        }
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "getSlot"}
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(node.url, json=payload, timeout=5) as resp:
                     latency = time.time() - start_time
                     if resp.status == 200:
                         data = await resp.json()
-                        slot = data.get("result", 0)
-                        await self.report_metrics(node.url, True, latency, slot, resp.status)
+                        if "error" in data:
+                            await self.report_metrics(node.url, False, latency, status_code=500)
+                        else:
+                            slot = data.get("result", 0)
+                            await self.report_metrics(node.url, True, latency, slot, resp.status)
                     else:
                         await self.report_metrics(node.url, False, latency, status_code=resp.status)
         except Exception as e:
-            logger.debug(f"RPC monitor failed for {node.name}: {e}")
+            logger.debug("RPC monitor failed for %s: %s", node.name, e)
             await self.report_metrics(node.url, False, status_code=500)
 
     async def run_monitor(self, interval: int = 30):
