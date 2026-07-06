@@ -1,4 +1,4 @@
-"""AI-powered token safety filter with NVIDIA NIM, BluesMinds AI, MiniMax, or Amazon Bedrock."""
+"""AI-powered token safety filter with OpenAI and provider fallbacks."""
 
 import aiohttp
 import asyncio
@@ -20,8 +20,14 @@ class AIFilter:
         self._api_key = None
         self._base_url = None
         self._model = None
+        self._openai_api_key = self._config.ai.openai_api_key
+        self._openai_api_url = self._config.ai.openai_api_url
+        self._openai_model = self._config.ai.openai_model
 
-        # Prioritize NVIDIA NIM
+        if self._openai_api_key:
+            logger.info(f"Using OpenAI Responses API for safety analysis: {self._openai_model}")
+
+        # Legacy chat-completions providers
         if self._config.ai.nvidia_api_key:
             self._api_key = self._config.ai.nvidia_api_key
             self._base_url = self._config.ai.nvidia_api_url
@@ -39,8 +45,78 @@ class AIFilter:
             self._base_url = "https://api.minimax.io/v1/chat/completions"
             self._model = "minimax-m3"
             logger.info("Using MiniMax AI.")
-        else:
+        elif not self._openai_api_key:
             logger.info("No primary AI API keys found. Will attempt Bedrock fallback.")
+
+    async def _call_openai_response(self, prompt: str, max_output_tokens: int) -> Optional[str]:
+        if not self._openai_api_key:
+            return None
+
+        payload = {
+            "model": self._openai_model,
+            "input": prompt,
+            "max_output_tokens": max_output_tokens,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self._openai_api_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=20,
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"OpenAI Responses API error: {resp.status}")
+                        return None
+                    data = await resp.json()
+                    return self._extract_response_text(data)
+        except Exception as e:
+            logger.error(f"OpenAI Responses API call failed: {e}")
+            return None
+
+    @staticmethod
+    def _extract_response_text(data: dict) -> str:
+        output_text = data.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text.strip()
+
+        chunks = []
+        for item in data.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                text = content.get("text")
+                if isinstance(text, str):
+                    chunks.append(text)
+        return "\n".join(chunks).strip()
+
+    async def _score_with_openai(self, prompt: str) -> Optional[int]:
+        content = await self._call_openai_response(prompt, max_output_tokens=20)
+        if not content:
+            return None
+        match = re.search(r"\d+", content)
+        if not match:
+            return None
+        score = max(0, min(100, int(match.group())))
+        logger.info(f"OpenAI API scored token: {score}")
+        return score
+
+    async def _analyze_safety_with_openai(self, prompt: str) -> Optional[dict]:
+        content = await self._call_openai_response(prompt, max_output_tokens=300)
+        if not content:
+            return None
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not json_match:
+            return None
+        try:
+            res = json.loads(json_match.group())
+        except json.JSONDecodeError as e:
+            logger.error(f"OpenAI Safety Analysis returned invalid JSON: {e}")
+            return None
+        logger.info(f"OpenAI Safety Analysis: {res}")
+        return _normalize_safety_result(res, provider="openai")
 
     async def _score_with_bedrock(self, prompt: str) -> Optional[int]:
         """
@@ -147,7 +223,8 @@ class AIFilter:
     async def score_token(self, token_data: Dict) -> int:
         """
         Score a token (0-100) based on metadata and sentiment.
-        Attempts Gemini first if key is present, then NVIDIA/BluesMinds/MiniMax, and falls back to Amazon Bedrock.
+        Attempts OpenAI first if key is present, then Gemini, NVIDIA/BluesMinds/MiniMax,
+        and falls back to Amazon Bedrock.
         """
         prompt = f"""
         Analyze this Solana token for safety. Look for rugpull risks or supply splits.
@@ -165,7 +242,11 @@ class AIFilter:
         71-100: Safe/Low risk
         """
 
-        # Try Gemini first as it is configured in VPS .env
+        openai_score = await self._score_with_openai(prompt)
+        if openai_score is not None:
+            return openai_score
+
+        # Try Gemini next as it may be configured in VPS .env.
         if self._config.ai.gemini_api_key:
             gemini_score = await self._score_with_gemini(prompt)
             if gemini_score is not None:
@@ -266,6 +347,10 @@ class AIFilter:
         }}
         """
 
+        openai_result = await self._analyze_safety_with_openai(prompt)
+        if openai_result is not None:
+            return openai_result
+
         # 1. Try Gemini
         api_key = self._config.ai.gemini_api_key
         if api_key:
@@ -286,12 +371,7 @@ class AIFilter:
                             if json_match:
                                 res = json.loads(json_match.group())
                                 logger.info(f"Gemini Safety Analysis for {token_mint}: {res}")
-                                return {
-                                    "score": int(res.get("score", 80)),
-                                    "is_premine": bool(res.get("is_premine", False)),
-                                    "is_honeypot": bool(res.get("is_honeypot", False)),
-                                    "reason": str(res.get("reason", "Analyzed successfully."))
-                                }
+                                return _normalize_safety_result(res, provider="gemini")
                         else:
                             error_text = await resp.text()
                             logger.error(f"Gemini Safety API error: {resp.status} - {error_text}")
@@ -319,15 +399,36 @@ class AIFilter:
                             if json_match:
                                 res = json.loads(json_match.group())
                                 logger.info(f"Primary AI Safety Analysis for {token_mint}: {res}")
-                                return {
-                                    "score": int(res.get("score", 80)),
-                                    "is_premine": bool(res.get("is_premine", False)),
-                                    "is_honeypot": bool(res.get("is_honeypot", False)),
-                                    "reason": str(res.get("reason", "Analyzed successfully."))
-                                }
+                                return _normalize_safety_result(res, provider="primary")
                         else:
                             logger.error(f"Primary AI Safety API error: {resp.status}")
             except Exception as e:
                 logger.error(f"Primary AI Safety Analysis failed: {e}")
 
-        return {"score": 80, "is_premine": False, "is_honeypot": False, "reason": "Safety scan fallback used (APIs rate-limited or unavailable)."}
+        return {
+            "score": 80,
+            "is_premine": False,
+            "is_honeypot": False,
+            "reason": "Safety scan fallback used (APIs rate-limited or unavailable).",
+            "scan_status": "degraded",
+            "is_fallback": True,
+        }
+
+
+def _normalize_safety_result(res: dict, provider: str) -> dict:
+    return {
+        "score": _coerce_score(res.get("score", 80)),
+        "is_premine": bool(res.get("is_premine", False)),
+        "is_honeypot": bool(res.get("is_honeypot", False)),
+        "reason": str(res.get("reason", "Analyzed successfully.")),
+        "scan_status": "ok",
+        "is_fallback": False,
+        "provider": provider,
+    }
+
+
+def _coerce_score(value) -> int:
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return 80

@@ -213,6 +213,37 @@ class Database:
             details TEXT,
             timestamp REAL
         );
+
+        CREATE TABLE IF NOT EXISTS agi_features (
+            token_mint TEXT PRIMARY KEY,
+            price_change_1m REAL DEFAULT 0.0,
+            price_change_5m REAL DEFAULT 0.0,
+            price_change_1h REAL DEFAULT 0.0,
+            volume_change_5m REAL DEFAULT 0.0,
+            volume_change_1h REAL DEFAULT 0.0,
+            holder_growth_1h REAL DEFAULT 0.0,
+            holder_growth_24h REAL DEFAULT 0.0,
+            dev_balance REAL DEFAULT 0.0,
+            social_score REAL DEFAULT 0.0,
+            kol_mention_count INTEGER DEFAULT 0,
+            age_minutes INTEGER DEFAULT 0,
+            market_cap REAL DEFAULT 0.0,
+            liquidity REAL DEFAULT 0.0,
+            volatility_1h REAL DEFAULT 0.0,
+            buy_pressure REAL DEFAULT 0.0,
+            sell_pressure REAL DEFAULT 0.0,
+            timestamp INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS agi_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_mint TEXT,
+            decision TEXT,
+            score REAL,
+            features TEXT,
+            model_version TEXT,
+            timestamp INTEGER
+        );
         """
         await self._execute_write(schemas)
 
@@ -317,3 +348,81 @@ class Database:
         placeholders = ", ".join(["?" for _ in cols])
         query = f"INSERT INTO feature_snapshots ({', '.join(cols)}) VALUES ({placeholders})"
         await self._execute_write(query, tuple(data.values()))
+
+    async def save_agi_features(self, token_mint: str, features: Dict[str, float]):
+        query = """
+            INSERT OR REPLACE INTO agi_features (
+                token_mint, price_change_1m, price_change_5m, price_change_1h,
+                volume_change_5m, volume_change_1h, holder_growth_1h, holder_growth_24h,
+                dev_balance, social_score, kol_mention_count, age_minutes,
+                market_cap, liquidity, volatility_1h, buy_pressure, sell_pressure,
+                timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        import time
+        params = (
+            token_mint,
+            features.get('price_change_1m', 0.0),
+            features.get('price_change_5m', 0.0),
+            features.get('price_change_1h', 0.0),
+            features.get('volume_change_5m', 0.0),
+            features.get('volume_change_1h', 0.0),
+            features.get('holder_growth_1h', 0.0),
+            features.get('holder_growth_24h', 0.0),
+            features.get('dev_balance', 0.0),
+            features.get('social_score', 0.0),
+            int(features.get('kol_mention_count', 0)),
+            int(features.get('age_minutes', 0)),
+            features.get('market_cap', 0.0),
+            features.get('liquidity', 0.0),
+            features.get('volatility_1h', 0.0),
+            features.get('buy_pressure', 0.0),
+            features.get('sell_pressure', 0.0),
+            int(time.time())
+        )
+        await self._execute_write(query, params)
+
+    async def save_agi_decision(self, token_mint: str, decision: str, score: float, features: Dict[str, float], model_version: str):
+        query = """
+            INSERT INTO agi_decisions (token_mint, decision, score, features, model_version, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """
+        import time
+        params = (
+            token_mint,
+            decision,
+            score,
+            json.dumps(features),
+            model_version,
+            int(time.time())
+        )
+        await self._execute_write(query, params)
+
+    async def get_training_data(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT 
+                p.pnl > 0 AS win,
+                f.price_change_1m,
+                f.price_change_5m,
+                f.price_change_1h,
+                f.volume_change_5m,
+                f.volume_change_1h,
+                f.holder_growth_1h,
+                f.holder_growth_24h,
+                f.dev_balance,
+                f.social_score,
+                f.kol_mention_count,
+                f.age_minutes,
+                f.market_cap,
+                f.liquidity,
+                f.volatility_1h,
+                f.buy_pressure,
+                f.sell_pressure
+            FROM positions p
+            JOIN agi_features f ON p.mint = f.token_mint
+            WHERE p.status = 'closed' OR p.status = 'sold'
+            ORDER BY p.timestamp DESC
+        """
+        rows = await self._execute_read(query)
+        return [dict(r) for r in rows]
+

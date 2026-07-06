@@ -35,6 +35,16 @@ from solbot.core.network import NetworkManager
 from solbot.cluster_mapper import ClusterMapper
 from solbot.ai_tuner import AITuner
 from solbot.agi_prebuy_filter import AGIPreBuyFilter
+from solbot.agi_brain import AGIBrain
+
+def _format_tokens(amount: float) -> str:
+    if amount >= 1_000_000_000:
+        return f"{amount / 1_000_000_000:.2f}B"
+    if amount >= 1_000_000:
+        return f"{amount / 1_000_000:.2f}M"
+    if amount >= 1_000:
+        return f"{amount / 1_000:.2f}K"
+    return f"{amount:.2f}"
 
 logger = get_logger("bot")
 
@@ -51,6 +61,8 @@ class Position:
     start_time: float = field(default_factory=time)
     highest_price: float = 0.0
     current_price: float = 0.0
+    position_number: int = 0
+    remaining_fraction: float = 1.0
 
 class Solbot:
     """High-speed DEGEN Sniper with Dev Dump Protection & KOL Coordinated Trading."""
@@ -98,6 +110,7 @@ class Solbot:
         from solbot.db import Database
         from solbot.engines.risk_manager import RiskManager
         self._db = Database()
+        self._brain = AGIBrain(self._db, self._config)
         self._risk_manager = RiskManager()
         # Missed entry tracker: mint -> {symbol, alert_price_usd, alert_time, notified_milestones}
         self._missed_runners: Dict[str, Dict] = {}
@@ -111,6 +124,15 @@ class Solbot:
         self._congestion_level = "low"
         self._dynamic_priority_fee = 0.00001
         self._dynamic_jito_tip = 0.001
+
+        # Dynamic pre-buy filters config (with settings button adjustment capability)
+        self._min_liquidity_sol = 2.0
+        self._min_mcap_sol = 2.0
+        self._max_top10_pct = 40.0
+        self._max_creator_pct = 10.0
+        self._max_largest_holder_pct = 15.0
+        self._cabal_block_enabled = True
+
         # Stalkchain / KOLscan integrations controller
         from solbot.kols_controller import KOLsController
         self._kols_controller = KOLsController(self)
@@ -123,6 +145,7 @@ class Solbot:
         
         # AGI Watch Queue
         self._watch_queue: Dict[str, Dict] = {}
+        self._position_counter = 0
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -141,6 +164,12 @@ class Solbot:
                 "autorunner_amount": self._autorunner_amount,
                 "blacklisted_wallets": list(self._blacklisted_wallets),
                 "kol_threshold": self._kol_threshold,
+                "min_liquidity_sol": self._min_liquidity_sol,
+                "min_mcap_sol": self._min_mcap_sol,
+                "max_top10_pct": self._max_top10_pct,
+                "max_creator_pct": self._max_creator_pct,
+                "max_largest_holder_pct": self._max_largest_holder_pct,
+                "cabal_block_enabled": self._cabal_block_enabled,
                 "config_overrides": {
                     "buy_amount_sol": self._config.jupiter.buy_amount_sol,
                     "trailing_stop_pct": getattr(self._config.strategy, "trailing_stop_pct", 0.20),
@@ -167,7 +196,9 @@ class Solbot:
                     data.pop("tp_sold")
                     if not data.get("tp_targets_hit"):
                         data["tp_targets_hit"] = [0.0]
-                self._positions[mint] = Position(**data)
+                valid_fields = Position.__dataclass_fields__.keys()
+                filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+                self._positions[mint] = Position(**filtered_data)
             
             # Restore intelligence
             if self._filter:
@@ -191,7 +222,11 @@ class Solbot:
             
             # Restore trades
             raw_trades = state.get("trades", [])
-            self._trades = [TradeResult(**t) for t in raw_trades[-100:]]
+            valid_trade_fields = TradeResult.__dataclass_fields__.keys()
+            self._trades = [
+                TradeResult(**{k: v for k, v in t.items() if k in valid_trade_fields})
+                for t in raw_trades[-100:]
+            ]
             
             # Restore AI settings
             self._ai_enabled = state.get("ai_enabled", True)
@@ -200,6 +235,12 @@ class Solbot:
             self._autorunner_enabled = state.get("autorunner_enabled", False)
             self._autorunner_amount = state.get("autorunner_amount", 0.01)
             self._kol_threshold = state.get("kol_threshold", 3)
+            self._min_liquidity_sol = state.get("min_liquidity_sol", 2.0)
+            self._min_mcap_sol = state.get("min_mcap_sol", 2.0)
+            self._max_top10_pct = state.get("max_top10_pct", 40.0)
+            self._max_creator_pct = state.get("max_creator_pct", 10.0)
+            self._max_largest_holder_pct = state.get("max_largest_holder_pct", 15.0)
+            self._cabal_block_enabled = state.get("cabal_block_enabled", True)
             
             # Restore config overrides
             if "config_overrides" in state:
@@ -263,8 +304,10 @@ class Solbot:
             for r in rows:
                 self._processed_mints.add(r['mint'])
             logger.info(f"Loaded {len(self._processed_mints)} historically traded mints into memory.")
+            self._position_counter = len(self._processed_mints)
         except Exception as e:
             logger.error(f"Failed to load historically traded mints: {e}")
+            self._position_counter = max(len(self._processed_mints), len(self._positions))
             
         await self._sync_existing_holdings()
         
@@ -826,11 +869,14 @@ class Solbot:
             )
             if result.success:
                 self._trades.append(result)
+                self._position_counter += 1
                 pos = Position(
                     mint=token.mint, symbol=token.symbol,
                     entry_price=token.market_cap_usd, entry_liq=token.liquidity_sol,
                     creator=token.creator,
-                    size=size
+                    size=size,
+                    position_number=self._position_counter,
+                    remaining_fraction=1.0
                 )
                 pos.current_price = token.market_cap_usd
                 pos.highest_price = token.market_cap_usd
@@ -854,7 +900,42 @@ class Solbot:
                         await status_msg.edit(f"⚡️ <b>TG Manual Buy Clicked!</b>\nTarget: <code>{token.mint}</code>\nAmount: <code>{size} SOL</code>\nStatus: <code>🟢 SUCCESS (Tx: <a href='https://solscan.io/tx/{result.tx_signature}'>{result.tx_signature[:8]}...</a>)</code>", parse_mode='html', link_preview=False)
                     except Exception:
                         pass
-                await self._telegram.send_message(f"📡 <b>BUY ({reason}): {token.symbol}</b>\nMCAP: <code>${token.market_cap_usd:,.0f}</code>")
+                
+                # Wait 1.5 seconds for transaction indexing to fetch exact tokens got
+                await asyncio.sleep(1.5)
+                token_balance = await self._pump_client.get_token_balance(token.mint)
+                got_str = _format_tokens(token_balance)
+                
+                sol_price = getattr(self._telegram, "_sol_price", 150.0) or 150.0
+                mc_sol = token.market_cap_usd / sol_price
+                
+                if token.market_cap_usd >= 1_000_000:
+                    usd_mc_str = f"${token.market_cap_usd / 1_000_000:.1f}M"
+                else:
+                    usd_mc_str = f"${token.market_cap_usd / 1_000:.1f}K"
+                    
+                total_fee = priority_fee_sol + jito_tip_sol + 0.00005
+                short_mint = f"{token.mint[:6]}...{token.mint[-4:]}"
+                
+                bought_msg = (
+                    f"✅ <b>Bought {short_mint}</b>\n"
+                    f"<code>{token.mint}</code>\n\n"
+                    f"💰 Spent: <b>{size:.4f} SOL</b> (+ {total_fee:.5f} fee)\n"
+                    f"🌐 Got: <b>{got_str} tokens</b>\n"
+                    f"📈 MC at entry: <b>{mc_sol:.2f} SOL ({usd_mc_str})</b>\n"
+                    f"📍 Position #{pos.position_number}\n"
+                    f"📊 Phase: <i>submitted</i> . `<a href='https://solscan.io/tx/{result.tx_signature}'>{result.tx_signature[:8]}...</a>`"
+                )
+                
+                from telethon import Button
+                buttons = [
+                    [
+                        Button.inline("Sell 25%", f"sell_0.25_{token.mint}".encode("utf-8")),
+                        Button.inline("Sell 50%", f"sell_0.50_{token.mint}".encode("utf-8")),
+                        Button.inline("Sell ALL", f"sell_1.0_{token.mint}".encode("utf-8"))
+                    ]
+                ]
+                await self._telegram.send_message(bought_msg, buttons=buttons)
             else:
                 logger.error(f"Snipe failed for {token.symbol} ({token.mint}): {result.error}")
                 self._processed_mints.discard(token.mint)
@@ -990,72 +1071,24 @@ class Solbot:
             gain = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
             drawdown = (pos.highest_price - pos.current_price) / pos.highest_price if pos.highest_price > 0 else 0.0
 
-            # V4 exit logic: check if it is already a moonbag or not
-            if pos.is_moonbag:
-                # Trailing stop for moonbags
-                # After 5x: activate 25% trailing stop. After 10x: activate 20% trailing stop.
-                if gain >= 10.0:
-                    pos.trailing_stop_activated = 0.20
-                elif gain >= 5.0 and pos.trailing_stop_activated is None:
-                    pos.trailing_stop_activated = 0.25
-                
-                # Check trailing stop hit
-                if pos.trailing_stop_activated is not None and drawdown >= pos.trailing_stop_activated:
-                    await self._exit_position(pos, f"Moonbag Trailing Stop ({pos.trailing_stop_activated*100:.0f}% hit)", 1.0)
-                    break
-                    
-                # Periodic checks: AI trend reverses or distribution changes
-                if now_ts - last_moonbag_check_time >= 60:
-                    last_moonbag_check_time = now_ts
-                    token_data = {'mint': pos.mint, 'symbol': pos.symbol}
-                    current_score = await self._ai_filter.score_token(token_data)
-                    if current_score < 50:
-                        await self._exit_position(pos, f"Moonbag exit: AI Trend Reverse ({current_score})", 1.0)
-                        break
+            # Option A strategy check:
+            # 1. Take Profit TP1 at 2.0x (gain >= 2.0)
+            if 2.0 not in pos.tp_targets_hit:
+                if gain >= 2.0:
+                    pos.tp_targets_hit.append(2.0)
+                    self._save_state()
+                    await self._exit_position(pos, "Take-profit TP1", 0.50)
+            
+            # 2. Trailing Stop at 20% drawdown after TP1 fires
             else:
-                # Not a moonbag yet. Check TP Presets (Aggressive by default, or Conservative)
-                preset = getattr(strat, "tp_preset", "aggressive")
-                
-                if preset == "conservative":
-                    # Conservative: 2x (sell 25%), 3x (sell 25%), 5x (sell 25%), leave 25% moonbag
-                    if gain >= 2.0 and 2.0 not in pos.tp_targets_hit:
-                        await self._exit_position(pos, "Conservative TP 2x (Sell 25% of initial)", 0.25)
-                        pos.tp_targets_hit.append(2.0)
-                        self._save_state()
-                    elif gain >= 3.0 and 3.0 not in pos.tp_targets_hit:
-                        # 25% of initial = 33.3% of remaining 75%
-                        await self._exit_position(pos, "Conservative TP 3x (Sell 25% of initial)", 0.3333)
-                        pos.tp_targets_hit.append(3.0)
-                        self._save_state()
-                    elif gain >= 5.0 and 5.0 not in pos.tp_targets_hit:
-                        # 25% of initial = 50% of remaining 50%
-                        await self._exit_position(pos, "Conservative TP 5x (Sell 25% of initial, entering Moonbag)", 0.50)
-                        pos.tp_targets_hit.append(5.0)
-                        pos.is_moonbag = True
-                        pos.trailing_stop_activated = 0.25
-                        self._save_state()
-                else:
-                    # Aggressive: 3x (sell 20%), 5x (sell 30%), 10x (sell 20%), leave 30% moonbag
-                    if gain >= 3.0 and 3.0 not in pos.tp_targets_hit:
-                        await self._exit_position(pos, "Aggressive TP 3x (Sell 20% of initial)", 0.20)
-                        pos.tp_targets_hit.append(3.0)
-                        self._save_state()
-                    elif gain >= 5.0 and 5.0 not in pos.tp_targets_hit:
-                        # 30% of initial = 37.5% of remaining 80%
-                        await self._exit_position(pos, "Aggressive TP 5x (Sell 30% of initial)", 0.375)
-                        pos.tp_targets_hit.append(5.0)
-                        self._save_state()
-                    elif gain >= 10.0 and 10.0 not in pos.tp_targets_hit:
-                        # 20% of initial = 40% of remaining 50%
-                        await self._exit_position(pos, "Aggressive TP 10x (Sell 20% of initial, entering Moonbag)", 0.40)
-                        pos.tp_targets_hit.append(10.0)
-                        pos.is_moonbag = True
-                        pos.trailing_stop_activated = 0.20
-                        self._save_state()
+                if drawdown >= 0.20:
+                    await self._exit_position(pos, "Trailing-stop", 1.0)
+                    break
 
-                # Stop loss check for non-moonbag
+            # 3. Stop loss check (only before TP1 fires)
+            if 2.0 not in pos.tp_targets_hit:
                 if gain <= (1.0 - strat.stop_loss_pct):
-                    await self._exit_position(pos, f"STOP LOSS ({strat.stop_loss_pct*100:.0f}% reached)", 1.0)
+                    await self._exit_position(pos, "Stop-loss", 1.0)
                     break
                     
             await asyncio.sleep(5)
@@ -1072,25 +1105,33 @@ class Solbot:
         sell_amount = token_balance * pct
         # We increase priority fee for exits triggered by KOL sales
         priority_fee = 0.01 if "KOL EXIT" in reason else 0.001
+        
+        # Track actual fraction of initial position being sold
+        actual_pct_sold = pct * getattr(pos, "remaining_fraction", 1.0)
+        pos.remaining_fraction = max(0.0, getattr(pos, "remaining_fraction", 1.0) - actual_pct_sold)
+        
         result = await self._pump_client.execute_trade(pos.mint, action="sell", amount=sell_amount, denominated_in_sol=False, priority_fee=priority_fee)
         if result.success:
             self._trades.append(result)
             # Update active position size in RiskManager for partial sells
             if pos.active:
-                self._risk_manager.state.active_positions[pos.mint] = pos.size * (1.0 - pct)
-            if pct >= 0.99 or "moonbag" in reason.lower() or "stop" in reason.lower():
+                self._risk_manager.state.active_positions[pos.mint] = pos.size * pos.remaining_fraction
+            
+            # ROI calculation
+            roi = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
+            
+            # Check if this closes the position
+            if pct >= 0.99 or pos.remaining_fraction <= 0.01:
                 pos.active = False
                 if pos.mint in self._positions: del self._positions[pos.mint]
                 
                 # Update Creator Genome outcome!
                 if hasattr(self, '_creator_genome') and self._creator_genome:
-                    roi = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
                     ath = pos.highest_price / pos.entry_price if pos.entry_price > 0 else 1.0
                     survival_time = time() - pos.start_time
                     asyncio.create_task(self._creator_genome.track_trade_outcome(pos.creator, roi, ath, survival_time))
                 
                 # Update position status in DB
-                roi = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
                 pnl = roi - 1.0
                 asyncio.create_task(self._db.update_position_pnl(pos.mint, pnl, "closed"))
                 
@@ -1101,8 +1142,37 @@ class Solbot:
                 # Check for 100 trades retraining
                 if len(self._trades) > 0 and len(self._trades) % 100 == 0:
                     asyncio.create_task(self._retrain_brain_weights())
+            
             self._save_state()
-            await self._telegram.send_message(f"= <b>SELL ({pct*100:.0f}%): {pos.symbol}</b>\nReason: {reason}")
+            
+            # Format the output notification
+            # Estimated SOL received: pos.size * actual_pct_sold * roi
+            sol_received = pos.size * actual_pct_sold * roi
+            
+            # Format custom message depending on the reason/exit trigger
+            pos_id_str = f" #{pos.position_number}" if getattr(pos, "position_number", 0) > 0 else ""
+            short_mint = f"{pos.mint[:6]}...{pos.mint[-4:]}"
+            
+            if "take-profit tp1" in reason.lower() or "tp1" in reason.lower():
+                emoji = "🎯"
+                title = f"Take-profit TP1 fired on{pos_id_str} ({short_mint})"
+            elif "trailing-stop" in reason.lower() or "trailing stop" in reason.lower():
+                emoji = "📉"
+                title = f"Trailing-stop fired on{pos_id_str} ({short_mint})"
+            elif "stop-loss" in reason.lower() or "stop loss" in reason.lower():
+                emoji = "🚨"
+                title = f"Stop-loss fired on{pos_id_str} ({short_mint})"
+            else:
+                emoji = "💸"
+                title = f"Sell ({pct*100:.0f}%) executed on{pos_id_str} ({short_mint})"
+                
+            tx_part = f"`<a href='https://solscan.io/tx/{result.tx_signature}'>{result.tx_signature[:8]}...</a>`" if result.tx_signature else "N/A"
+            msg = (
+                f"{emoji} <b>{title}</b>\n\n"
+                f"💰 Received: <b>{sol_received:.4f} SOL</b>\n"
+                f"{tx_part}"
+            )
+            await self._telegram.send_message(msg)
 
     async def _sync_existing_holdings(self):
         try:
@@ -1667,6 +1737,40 @@ class Solbot:
             elif self._telegram:
                 await self._telegram.send_message(f"❌ <b>Manual Buy Failed:</b> <code>{e}</code>")
 
+    async def execute_manual_sell(self, mint: str, pct: float, status_msg=None):
+        """Executes a manual sell triggered from Telegram UI buttons."""
+        logger.info(f"Manual sell triggered via TG button for {mint} | Pct: {pct*100:.0f}%")
+        try:
+            pos = self._positions.get(mint)
+            if not pos:
+                raise ValueError("Position not found or already closed.")
+            
+            await self._exit_position(pos, "TG Manual Button", pct)
+            if status_msg:
+                try:
+                    await status_msg.edit(
+                        f"⚡️ <b>TG Manual Sell Clicked!</b>\n"
+                        f"Target: <code>{mint}</code>\n"
+                        f"Percent: <code>{pct*100:.0f}%</code>\n"
+                        f"Status: <code>🟢 SUCCESS</code>",
+                        parse_mode='html'
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.error(f"Error executing manual sell: {e}")
+            if status_msg:
+                try:
+                    await status_msg.edit(
+                        f"⚡️ <b>TG Manual Sell Clicked!</b>\n"
+                        f"Target: <code>{mint}</code>\n"
+                        f"Percent: <code>{pct*100:.0f}%</code>\n"
+                        f"Status: <code>❌ FAILED ({e})</code>",
+                        parse_mode='html'
+                    )
+                except Exception:
+                    pass
+
     async def _retrain_brain_weights(self):
         """Autonomously adapts AGI parameters after every 100 completed trades."""
         logger.info("🧠 AGI BRAIN: Retraining weights and adjusting parameters...")
@@ -1714,6 +1818,12 @@ class Solbot:
                     success, report = await self._ai_tuner.autotune()
                     if success and self._telegram:
                         await self._telegram.send_message(report)
+                    
+                    if getattr(self._config.brain, "enabled", False):
+                        logger.info("Running AGI Brain scheduled autotune/retraining...")
+                        brain_success, brain_report = await self._brain.autotune()
+                        if brain_success and self._telegram:
+                            await self._telegram.send_message(f"🧠 <b>AGI Brain Autotuner:</b> {brain_report}")
             except Exception as e:
                 logger.error(f"Error in AI autotune loop: {e}")
                 await asyncio.sleep(60)

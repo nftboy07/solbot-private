@@ -1,5 +1,9 @@
 # Environment
 .env
+.env.*
+!.env.example
+openai-api-key.txt
+*.key
 .venv/
 venv/
 env/
@@ -26,6 +30,8 @@ Thumbs.db
 
 # Project Specific
 data/state.json
+data/proxies.txt
+data/proxies.local.txt
 *.session
 *.session.backup
 *.db
