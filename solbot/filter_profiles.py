@@ -32,6 +32,10 @@ class FilterProfile:
     skip_agi_prebuy: bool
     require_ai_gate: bool
     skip_ai_safety_screen: bool
+    enforce_creator_blacklist: bool
+    auto_blacklist_after_rugs: int
+    brain_rug_mcap_usd: float
+    brain_scan_min_rugs: int
     buy_amount_sol: float
     trailing_stop_pct: float
     max_cluster_risk: float
@@ -62,6 +66,10 @@ PROFILES: Dict[str, FilterProfile] = {
         skip_agi_prebuy=False,
         require_ai_gate=True,
         skip_ai_safety_screen=False,
+        enforce_creator_blacklist=True,
+        auto_blacklist_after_rugs=5,
+        brain_rug_mcap_usd=15000.0,
+        brain_scan_min_rugs=3,
         buy_amount_sol=0.01,
         trailing_stop_pct=0.05,
         max_cluster_risk=30.0,
@@ -90,6 +98,10 @@ PROFILES: Dict[str, FilterProfile] = {
         skip_agi_prebuy=False,
         require_ai_gate=True,
         skip_ai_safety_screen=False,
+        enforce_creator_blacklist=True,
+        auto_blacklist_after_rugs=10,
+        brain_rug_mcap_usd=10000.0,
+        brain_scan_min_rugs=5,
         buy_amount_sol=0.10,
         trailing_stop_pct=0.10,
         max_cluster_risk=35.0,
@@ -118,6 +130,10 @@ PROFILES: Dict[str, FilterProfile] = {
         skip_agi_prebuy=True,
         require_ai_gate=False,
         skip_ai_safety_screen=True,
+        enforce_creator_blacklist=False,
+        auto_blacklist_after_rugs=20,
+        brain_rug_mcap_usd=3000.0,
+        brain_scan_min_rugs=8,
         buy_amount_sol=0.02,
         trailing_stop_pct=0.20,
         max_cluster_risk=50.0,

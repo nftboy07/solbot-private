@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 from solbot.config import BotConfig, BotMode
 from solbot.filter_profiles import get_profile, default_profile_name
+from solbot.stats_tracker import StatsTracker
 from solbot.filters import TokenFilter
 from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
@@ -133,6 +134,7 @@ class Solbot:
         self._watch_queue: Dict[str, Dict] = {}
         self._pending_evaluations: Set[str] = set()
         self._filter_profile_name = default_profile_name()
+        self._stats = StatsTracker()
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -152,6 +154,8 @@ class Solbot:
                 "blacklisted_wallets": list(self._blacklisted_wallets),
                 "kol_threshold": self._kol_threshold,
                 "filter_profile": self._filter_profile_name,
+                "paper_mode": getattr(self._telegram, "_paper_mode", False) if self._telegram else False,
+                "kill_switch": getattr(self._telegram, "_kill_switch", False) if self._telegram else False,
                 "config_overrides": {
                     "buy_amount_sol": self._config.jupiter.buy_amount_sol,
                     "trailing_stop_pct": getattr(self._config.strategy, "trailing_stop_pct", 0.20),
@@ -212,6 +216,9 @@ class Solbot:
             self._autorunner_amount = state.get("autorunner_amount", 0.01)
             self._kol_threshold = state.get("kol_threshold", 3)
             self._filter_profile_name = state.get("filter_profile", default_profile_name())
+            if self._telegram:
+                self._telegram._paper_mode = bool(state.get("paper_mode", False))
+                self._telegram._kill_switch = bool(state.get("kill_switch", False))
             
             # Restore config overrides
             if "config_overrides" in state:
@@ -280,7 +287,8 @@ class Solbot:
         await self._twitter.start()
         
         self._load_state()
-        self.apply_risk_preset(self._filter_profile_name)
+        self._filter.set_skip_callback(self._stats.record_filter_skip)
+        self.ensure_live_trading()
         self._processed_mints.update(self._positions.keys())
         try:
             rows = await self._db._execute_read("SELECT mint FROM positions")
@@ -440,7 +448,7 @@ class Solbot:
         object.__setattr__(self._config.jupiter, "buy_amount_sol", profile.buy_amount_sol)
         object.__setattr__(self._config.strategy, "trailing_stop_pct", profile.trailing_stop_pct)
         logger.info(
-            "Applied %s preset: delay=%.1fs age=[%.1f,%.1f] mcap=[%.0f,%.0f] ai_min=%d",
+            "Applied %s preset: delay=%.1fs age=[%.1f,%.1f] mcap=[%.0f,%.0f] ai_min=%d blacklist=%s",
             profile.name,
             profile.sniper_delay_seconds,
             profile.min_age_seconds,
@@ -448,8 +456,22 @@ class Solbot:
             profile.min_mcap_sol,
             profile.max_mcap_sol,
             profile.min_ai_score,
+            "enforce" if profile.enforce_creator_blacklist else "soft",
         )
         return profile
+
+    def ensure_live_trading(self) -> None:
+        """Force live trading defaults on startup (autobuy on, paper/kill off)."""
+        self._autobuy_enabled = True
+        self._paused = False
+        if self._telegram:
+            self._telegram._paper_mode = False
+            self._telegram._kill_switch = False
+        if self._risk_manager:
+            self._risk_manager.state.kill_switch_active = False
+        self.apply_risk_preset(self._filter_profile_name or "degen")
+        self._save_state()
+        logger.info("Live trading enforced: autobuy=ON paper=OFF kill=OFF profile=%s", self._filter_profile_name)
 
     async def _refresh_token_metrics(self, token: TokenEvent) -> None:
         """Refresh mcap/liquidity after sniper delay."""
@@ -488,17 +510,20 @@ class Solbot:
             return
 
         profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+        self._stats.bump("tokens_seen")
 
         max_active_positions = getattr(self._config.strategy, "max_active_positions", 100)
         active_count = sum(1 for p in self._positions.values() if p.active)
         if max_active_positions > 0 and active_count >= max_active_positions:
+            self._stats.bump("skip_position_limit")
             logger.warning(
                 "SKIPPING %s: Active positions limit (%s/%s) reached.",
                 token.symbol, active_count, max_active_positions,
             )
             return
 
-        if self.is_blacklisted(token.creator):
+        if profile.enforce_creator_blacklist and self.is_blacklisted(token.creator):
+            self._stats.bump("skip_blacklist")
             logger.warning("SKIPPING %s: Creator %s is blacklisted", token.symbol, token.creator)
             return
 
@@ -538,6 +563,7 @@ class Solbot:
             if genome:
                 c_score = genome.get("creator_score", 50.0)
                 if c_score < profile.min_creator_genome_score:
+                    self._stats.bump("skip_creator_genome")
                     logger.warning(
                         "Creator Genome Score %.1f < %.1f, skipping %s (%s)",
                         c_score, profile.min_creator_genome_score, token.symbol, profile.name,
@@ -556,6 +582,7 @@ class Solbot:
             }
             ai_score = await self._ai_filter.score_token(token_data)
             if ai_score < self._ai_min_score:
+                self._stats.bump("skip_ai")
                 logger.warning(
                     "AI score %s < %s, skipping %s (%s)",
                     ai_score, self._ai_min_score, token.symbol, profile.name,
@@ -567,6 +594,7 @@ class Solbot:
                 "liquidity_sol": token.liquidity_sol,
             })
             if heuristic < profile.heuristic_threshold:
+                self._stats.bump("skip_heuristic")
                 logger.info(
                     "Heuristic inference below threshold for %s (%.2f < %.2f, %s)",
                     token.symbol, heuristic, profile.heuristic_threshold, profile.name,
@@ -592,12 +620,15 @@ class Solbot:
             or meta.get("mayhem_mode") is True
         )
         if is_mayhem:
+            self._stats.bump("skip_mayhem")
             logger.info("SKIPPING %s (%s): Mayhem Mode token detected.", token.symbol, token.mint)
             return
 
+        self._stats.bump("qualified")
         wallet_balance = await self._pump_client.get_sol_balance()
         size = self._risk_manager.calculate_position_size(confidence_score, wallet_balance)
         if size <= 0.0:
+            self._stats.bump("skip_risk")
             logger.info(
                 "Skipping %s: Size calculated to 0.0 SOL (Confidence: %.1f)",
                 token.symbol, confidence_score,
@@ -606,6 +637,7 @@ class Solbot:
 
         allowed, reason = await self._risk_manager.can_trade(token.mint, size, wallet_balance)
         if not allowed:
+            self._stats.bump("skip_risk")
             logger.warning("SKIPPING %s: Risk check failed: %s", token.symbol, reason)
             return
 
@@ -662,6 +694,7 @@ class Solbot:
 
         if self._autobuy_enabled:
             self._active_buys.add(token.mint)
+            self._stats.bump("snipes_started")
             asyncio.create_task(
                 self._execute_snipe(token, size, f"Sniper [{profile.name}] (Conf: {confidence_score:.1f}%)")
             )
@@ -919,6 +952,7 @@ class Solbot:
             return
         blocked = self._trading_blocked()
         if blocked:
+            self._stats.bump("skip_trading_blocked")
             logger.warning("Trade blocked for %s: %s", token.symbol, blocked)
             if self._telegram:
                 await self._telegram.send_message(
@@ -1083,6 +1117,7 @@ class Solbot:
             )
             await self._risk_manager.report_tx_result(result.success)
             if result.success:
+                self._stats.bump("buys_success")
                 self._trades.append(result)
                 pos = Position(
                     mint=token.mint, symbol=token.symbol,
@@ -1122,6 +1157,7 @@ class Solbot:
                         pass
                 await self._telegram.send_message(f"📡 <b>BUY ({reason}): {token.symbol}</b>\nMCAP: <code>${token.market_cap_usd:,.0f}</code>")
             else:
+                self._stats.bump("buys_failed")
                 logger.error(f"Snipe failed for {token.symbol} ({token.mint}): {result.error}")
                 await self._log_trade_event("buy", {
                     "mint": token.mint,
@@ -1517,9 +1553,10 @@ class Solbot:
                                 (mcap, mcap, mcap, roi, mint)
                             )
                             
+                            profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+                            rug_threshold = profile.brain_rug_mcap_usd
                             # Classification Logic
-                            if mcap < 15000.0:
-                                # Classify as RUG
+                            if mcap < rug_threshold:
                                 await self._handle_detected_rug(creator, mint)
                             elif mcap >= 50000.0:
                                 # Classify as RUNNER
@@ -1530,9 +1567,7 @@ class Solbot:
                                     sol_price = getattr(self._telegram, '_sol_price', 150.0)
                                     mcap_sol = mcap / sol_price if sol_price > 0 else 0.0
                                     asyncio.create_task(self._trigger_daily_runner_alert(mint, mcap_sol))
-                    else:
-                        # Fallback: If no metrics are available after 10 minutes, the token likely died/rugged immediately
-                        await self._handle_detected_rug(creator, mint)
+                    # No metrics yet — do not auto-count as rug (was over-blacklisting)
                         
             except Exception as e:
                 logger.error(f"Error in brain tracker loop: {e}")
@@ -1549,8 +1584,8 @@ class Solbot:
             else:
                 await self._db.update_creator(creator, token_count=1, avg_ath=10000.0, rug_count=1, blacklist_score=1.0)
                 
-            # If creator has rugged MORE than 4 times, auto-blacklist!
-            if rug_count > 4:
+            profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+            if rug_count > profile.auto_blacklist_after_rugs:
                 if creator not in self._blacklisted_wallets:
                     self._blacklisted_wallets.add(creator)
                     self._save_state()

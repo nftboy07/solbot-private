@@ -3,7 +3,7 @@ import asyncio
 import aiohttp
 import json
 from dataclasses import dataclass, field
-from typing import Dict, Set, Tuple, List, Optional
+from typing import Callable, Dict, Optional, Set, Tuple, List
 from solbot.models import TokenEvent
 from solbot.config import BotConfig
 from solbot.filter_profiles import FilterProfile, get_profile, default_profile_name
@@ -30,6 +30,7 @@ class TokenFilter:
         self._blacklisted_tokens: Set[str] = set()
         self._bonding_curve_program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
         self._profile: FilterProfile = get_profile(default_profile_name())
+        self._on_skip: Optional[Callable[[str], None]] = None
 
     @property
     def profile(self) -> FilterProfile:
@@ -38,6 +39,14 @@ class TokenFilter:
     def set_profile(self, profile: FilterProfile) -> None:
         self._profile = profile
         logger.info("Filter profile set to %s", profile.name)
+
+    def set_skip_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        self._on_skip = callback
+
+    def _reject(self, reason: str) -> Tuple[bool, float, float]:
+        if self._on_skip:
+            self._on_skip(reason)
+        return False, 0.0, 0.0
 
     async def check_ipfs_metadata(self, uri: str) -> bool:
         """Fetch metadata JSON from IPFS directly to bypass Cloudflare API block."""
@@ -236,7 +245,7 @@ class TokenFilter:
         """Check if a token meets snipe criteria for the active filter profile."""
         p = self._profile
         if token.mint in self._blacklisted_tokens:
-            return False, 0.0, 0.0
+            return self._reject("mint blacklisted")
 
         market_cap_sol = token.market_cap_usd / sol_price if sol_price > 0 else 30.0
         if not (p.min_mcap_sol <= market_cap_sol <= p.max_mcap_sol):
@@ -244,7 +253,7 @@ class TokenFilter:
                 "Skipping %s: Market cap %.2f SOL outside %s range [%.1f, %.1f]",
                 token.symbol, market_cap_sol, p.name, p.min_mcap_sol, p.max_mcap_sol,
             )
-            return False, 0.0, 0.0
+            return self._reject(f"mcap {market_cap_sol:.1f} SOL")
 
         age = token.age_seconds
         if not (p.min_age_seconds <= age <= p.max_age_seconds):
@@ -252,21 +261,21 @@ class TokenFilter:
                 "Skipping %s: Age %.2fs outside %s range [%.1f, %.1f]",
                 token.symbol, age, p.name, p.min_age_seconds, p.max_age_seconds,
             )
-            return False, 0.0, 0.0
+            return self._reject(f"age {age:.1f}s")
 
         if token.liquidity_sol < p.min_liquidity_sol:
             logger.info(
                 "Skipping %s: Liquidity %.2f SOL < %.1f SOL (%s)",
                 token.symbol, token.liquidity_sol, p.min_liquidity_sol, p.name,
             )
-            return False, 0.0, 0.0
+            return self._reject(f"liquidity {token.liquidity_sol:.1f} SOL")
 
         if not (p.min_initial_buy_sol <= token.initial_buy_sol <= p.max_initial_buy_sol):
             logger.info(
                 "Skipping %s: Creator initial buy %.2f SOL outside %s range [%.1f, %.1f]",
                 token.symbol, token.initial_buy_sol, p.name, p.min_initial_buy_sol, p.max_initial_buy_sol,
             )
-            return False, 0.0, 0.0
+            return self._reject(f"initial buy {token.initial_buy_sol:.2f} SOL")
 
         creator_pct = (token.initial_buy_sol / (30.0 + token.initial_buy_sol)) * 1.073 * 100.0
         if creator_pct >= p.max_creator_pct:
@@ -274,13 +283,13 @@ class TokenFilter:
                 "Skipping %s: Creator holds %.2f%% of supply (>= %.1f%%)",
                 token.symbol, creator_pct, p.max_creator_pct,
             )
-            return False, 0.0, 0.0
+            return self._reject(f"creator hold {creator_pct:.1f}%")
 
         if p.require_metadata:
             meta_passed = await self.check_ipfs_metadata(token.uri)
             if not meta_passed:
                 logger.info("Skipping %s: Metadata/image check failed (%s)", token.symbol, p.name)
-                return False, 0.0, 0.0
+                return self._reject("metadata failed")
 
         top10_pct = 0.0
         rpc_url = self._config.solana.rpc_url
@@ -289,7 +298,7 @@ class TokenFilter:
                 authorities_passed = await self.verify_mint_authorities(token.mint, rpc_client)
                 if not authorities_passed:
                     logger.info("Skipping %s: Mint/Freeze authority checks failed (%s)", token.symbol, p.name)
-                    return False, 0.0, 0.0
+                    return self._reject("authorities failed")
 
             if p.require_holder_check:
                 holders_passed, top10_pct = await self.analyze_holders(token.mint, rpc_client)
@@ -298,18 +307,18 @@ class TokenFilter:
                         "Skipping %s: Top 10 holder concentration too high (%.1f%%) (%s)",
                         token.symbol, top10_pct, p.name,
                     )
-                    return False, 0.0, 0.0
+                    return self._reject(f"top10 {top10_pct:.1f}%")
 
             if p.require_bundle_check:
                 bundle_passed = await self.check_bundles(token.mint, rpc_client)
                 if not bundle_passed:
                     logger.info("Skipping %s: Bundled transactions check failed (%s)", token.symbol, p.name)
-                    return False, 0.0, 0.0
+                    return self._reject("bundle detected")
 
         ev, p_win = self.calculate_expected_value(ai_score, creator_score, top10_pct)
         if p.require_ev_positive and ev <= 0.0:
             logger.info("Skipping %s: Expected Value is non-positive (%.4f) (%s)", token.symbol, ev, p.name)
-            return False, 0.0, 0.0
+            return self._reject(f"ev {ev:.3f}")
 
         logger.info(
             "Qualified %s [%s]! EV: %.4f, Win Prob: %.1f%%, Confidence: %.1f%%",

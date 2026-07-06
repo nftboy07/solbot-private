@@ -209,6 +209,10 @@ class TelegramController:
         async def stats_handler(event):
             await self._cmd_stats(event)
 
+        @self._client.on(events.NewMessage(pattern='/live'))
+        async def live_handler(event):
+            await self._cmd_live(event)
+
         @self._client.on(events.NewMessage(pattern='/active'))
         async def active_handler(event):
             await self._cmd_active(event)
@@ -655,8 +659,14 @@ class TelegramController:
                 ticks_count = await db._execute_read("SELECT count(*) FROM ticks")
                 if ticks_count:
                     total_ticks = ticks_count[0][0]
+                min_rugs = 5
+                if getattr(self._bot, "_filter", None):
+                    min_rugs = self._bot._filter.profile.brain_scan_min_rugs
                 rows = await db._execute_read(
-                    "SELECT creator, COUNT(*) as rugs FROM ticks WHERE exit_marketcap < 15000.0 OR max_marketcap < 15000.0 GROUP BY creator"
+                    "SELECT creator, COUNT(*) as rugs FROM ticks "
+                    "WHERE (exit_marketcap < 15000.0 OR max_marketcap < 15000.0) AND creator != 'unknown' "
+                    "GROUP BY creator HAVING rugs >= ?",
+                    (min_rugs,),
                 )
                 db_ruggers = [row['creator'] for row in rows if row['creator'] and row['creator'] != "unknown"]
                 rows = await db._execute_read(
@@ -898,6 +908,8 @@ class TelegramController:
             self._paper_mode = not self._paper_mode
             
         status = "ENABLED" if self._paper_mode else "DISABLED"
+        if hasattr(self._bot, "_save_state"):
+            self._bot._save_state()
         await event.reply(f"🧪 <b>Paper Trading Mode:</b> <code>{status}</code>")
 
     async def _cmd_autobuy(self, event):
@@ -1343,25 +1355,91 @@ class TelegramController:
         else:
             await event.reply("🚀 <b>Current Priority Fee:</b> <code>0.001 SOL</code> (dynamic enabled)")
 
+    async def _cmd_live(self, event):
+        if not await self._require_admin(event):
+            return
+        if hasattr(self._bot, "ensure_live_trading"):
+            self._bot.ensure_live_trading()
+        bal = 0.0
+        if self._bot._pump_client:
+            try:
+                bal = await self._bot._pump_client.get_sol_balance()
+            except Exception:
+                pass
+        await event.reply(
+            "🟢 <b>Live trading enforced</b>\n"
+            f"Autobuy: <code>ON</code>\n"
+            f"Paper: <code>OFF</code>\n"
+            f"Kill: <code>OFF</code>\n"
+            f"Profile: <code>{getattr(self._bot, '_filter_profile_name', 'degen')}</code>\n"
+            f"Wallet: <code>{bal:.4f} SOL</code>"
+        )
+
     async def _cmd_stats(self, event):
         await self.log_brain_event('stats', 'Performance stats requested')
         db = getattr(self._bot, '_db', None)
-        msg = ["<b>📊 PERFORMANCE STATISTICS</b>"]
+        stats = getattr(self._bot, "_stats", None)
+        profile = getattr(self._bot._filter, "profile", None) if getattr(self._bot, "_filter", None) else None
+        uptime_min = stats.uptime_seconds() / 60.0 if stats else 0.0
+
+        msg = [
+            "<b>📊 SNIPER PIPELINE STATS</b>",
+            f"Uptime: <code>{uptime_min:.1f} min</code>",
+            f"Profile: <code>{getattr(self._bot, '_filter_profile_name', 'degen')}</code>",
+            "",
+            "<b>Trading switches</b>",
+            f"Autobuy: <code>{'ON' if getattr(self._bot, '_autobuy_enabled', False) else 'OFF'}</code>",
+            f"Paper: <code>{'ON' if self._paper_mode else 'OFF'}</code>",
+            f"Kill: <code>{'ON' if self._kill_switch else 'OFF'}</code>",
+            f"Blacklist enforce: <code>{'ON' if profile and profile.enforce_creator_blacklist else 'OFF'}</code>",
+        ]
+
+        if self._bot._pump_client:
+            try:
+                bal = await self._bot._pump_client.get_sol_balance()
+                msg.append(f"Wallet SOL: <code>{bal:.4f}</code>")
+            except Exception as e:
+                msg.append(f"Wallet SOL: <code>error ({e})</code>")
+
+        if stats:
+            msg.extend([
+                "",
+                "<b>Session funnel</b>",
+                f"Tokens seen: <code>{stats.tokens_seen}</code>",
+                f"Blacklist skips: <code>{stats.skip_blacklist}</code>",
+                f"Filter skips: <code>{stats.skip_filter}</code>",
+                f"AI skips: <code>{stats.skip_ai}</code>",
+                f"Qualified: <code>{stats.qualified}</code>",
+                f"Snipes started: <code>{stats.snipes_started}</code>",
+                f"Buys OK / fail: <code>{stats.buys_success}</code> / <code>{stats.buys_failed}</code>",
+                f"Trading blocked: <code>{stats.skip_trading_blocked}</code>",
+            ])
+            top = stats.top_filter_reasons(5)
+            if top:
+                msg.append("")
+                msg.append("<b>Top filter blocks</b>")
+                for reason, count in top:
+                    msg.append(f"• <code>{reason}</code>: {count}")
+
         if db:
             try:
                 rows = await db._execute_read("SELECT pnl FROM positions WHERE status = 'closed'")
                 trades = [float(r['pnl']) for r in rows if r['pnl'] is not None]
+                msg.append("")
+                msg.append("<b>All-time closed trades</b>")
                 if trades:
                     wins = sum(1 for t in trades if t > 0)
                     win_rate = wins / len(trades)
                     avg_multiple = sum(t + 1.0 for t in trades) / len(trades)
-                    msg.append(f"Total Completed: <code>{len(trades)}</code>")
-                    msg.append(f"Win Rate: <code>{win_rate*100:.1f}%</code>")
-                    msg.append(f"Average Multiple: <code>{avg_multiple:.2f}x</code>")
+                    msg.append(f"Total: <code>{len(trades)}</code> | Win rate: <code>{win_rate*100:.1f}%</code>")
+                    msg.append(f"Avg multiple: <code>{avg_multiple:.2f}x</code>")
                 else:
-                    msg.append("No completed trades recorded yet.")
+                    msg.append("No completed trades yet.")
             except Exception as e:
-                msg.append(f"Error: {e}")
+                msg.append(f"DB error: {e}")
+
+        blacklisted = len(getattr(self._bot, "_blacklisted_wallets", []))
+        msg.append(f"\nBlacklisted creators (tracked): <code>{blacklisted}</code>")
         await event.reply("\n".join(msg))
 
     async def _cmd_active(self, event):

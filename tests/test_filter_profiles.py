@@ -15,6 +15,8 @@ def test_degen_profile_wider_than_safe():
     assert degen.skip_agi_prebuy is True
     assert degen.require_ai_gate is False
     assert degen.skip_ai_safety_screen is True
+    assert degen.enforce_creator_blacklist is False
+    assert degen.auto_blacklist_after_rugs >= 15
 
 
 def test_get_profile_unknown_defaults_to_degen():
