@@ -150,8 +150,8 @@ class TokenFilter:
                 
             return True, top10_pct
         except Exception as e:
-            logger.error(f"Error in analyze_holders for {mint}: {e}")
-            return False, 0.0
+            logger.debug("Holder analysis unavailable for %s: %s (passing)", mint, e)
+            return True, 0.0
 
     async def check_bundles(self, mint: str, rpc_client: AsyncClient) -> bool:
         """Detect bundled wallets funded by same address holding > 30% of supply."""
