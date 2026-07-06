@@ -158,7 +158,6 @@ class PumpFunClient:
             
             symbol = "???"
             name = "Unknown"
-            mayhem_mode = False
             
             async with self._session.post(url, json=payload) as resp:
                 latency = (time.perf_counter() - start) * 1000
@@ -167,13 +166,7 @@ class PumpFunClient:
                     res_data = await resp.json()
                     value = res_data.get("result", {}).get("value", [])
                     
-                    # 1. Check mint account owner for Token-2022 (Mayhem Mode)
-                    if len(value) > 0 and value[0]:
-                        owner = value[0].get("owner")
-                        if owner == "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb":
-                            mayhem_mode = True
-                            
-                    # 2. Check metadata PDA for symbol/name
+                    # Check metadata PDA for symbol/name
                     if len(value) > 1 and value[1] and value[1].get("data"):
                         b64_data = value[1]["data"][0]
                         data = base64.b64decode(b64_data)
@@ -194,7 +187,7 @@ class PumpFunClient:
                 "creator": "unknown",
                 "market_cap_sol": 0,
                 "liquidity_sol": 0,
-                "mayhem_mode": mayhem_mode
+                "mayhem_mode": False,
             }
         except Exception as e:
             logger.error(f"Error fetching on-chain metadata for {mint}: {e}")
@@ -209,21 +202,28 @@ class PumpFunClient:
         
         import time
         start = time.time()
-        try:
-            async with self._session.get(url, proxy=proxy_url) as resp:
-                if proxy and proxy_url:
-                    proxy.report_result(proxy_url, resp.status == 200, resp.status, time.time() - start)
-                if resp.status == 200:
-                    data = await resp.json()
-                    # If mayhem fields exist, explicitly mark mayhem_mode
-                    if data.get("mayhem") is not None or data.get("mayhem_state") is not None:
-                        data["mayhem_mode"] = True
-                    return data
-        except Exception as e:
-            if proxy and proxy_url:
-                proxy.report_result(proxy_url, False, 500, time.time() - start)
+        for attempt, use_proxy in enumerate((True, False)):
+            current_proxy = proxy_url if use_proxy and attempt == 0 else None
+            try:
+                async with self._session.get(url, proxy=current_proxy, timeout=8) as resp:
+                    if proxy and current_proxy:
+                        proxy.report_result(
+                            current_proxy, resp.status == 200, resp.status, time.time() - start,
+                        )
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("mayhem") is not None or data.get("mayhem_state") is not None:
+                            data["mayhem_mode"] = True
+                        return data
+                    if resp.status in (402, 407) and attempt == 0:
+                        logger.debug("Pump.fun API returned %s via proxy; retrying direct.", resp.status)
+                        continue
+            except Exception:
+                if proxy and current_proxy:
+                    proxy.report_result(current_proxy, False, 500, time.time() - start)
+                if attempt == 0:
+                    continue
         
-        # Fallback to on-chain metadata
         logger.info(f"Frontend API blocked/failed for {mint}. Falling back to on-chain metadata.")
         return await self.get_token_metadata_onchain(mint)
 

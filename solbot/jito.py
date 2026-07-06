@@ -12,8 +12,10 @@ class JitoClient:
         self._config = config
         self._endpoints = [
             "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
+            "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",
             "https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/bundles",
             "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",
+            "https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles",
         ]
         self._tip_accounts = [
             "Cw8CFyMv96H6vS5MktW3NfSAmXF7YmF2W4P5XGvjM4Lp",
@@ -46,7 +48,10 @@ class JitoClient:
         try:
             tasks = [session.post(url, json=payload) for url in self._endpoints]
             responses = await asyncio.gather(*tasks, return_exceptions=True)
-            for resp in responses:
+            for url, resp in zip(self._endpoints, responses):
+                if isinstance(resp, Exception):
+                    logger.debug("Jito endpoint %s error: %s", url, resp)
+                    continue
                 if isinstance(resp, aiohttp.ClientResponse):
                     try:
                         if resp.status == 200:
@@ -54,6 +59,10 @@ class JitoClient:
                             if "result" in data:
                                 bundle_id = data["result"]
                                 break
+                            logger.debug("Jito %s missing result: %s", url, data)
+                        else:
+                            body = await resp.text()
+                            logger.debug("Jito %s HTTP %s: %s", url, resp.status, body[:200])
                     finally:
                         resp.close()
         finally:

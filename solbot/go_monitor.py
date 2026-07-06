@@ -15,8 +15,10 @@ class GoMonitor:
         self._bot = bot
         self._reward_threshold = reward_threshold  # in SOL
         self._poll_interval = poll_interval
-        # Updated to use livestream API to bypass Cloudflare 530 issues on frontend API
-        self._api_url = "https://livestream-api.pump.fun/go/bounties"
+        self._api_urls = [
+            "https://frontend-api-v3.pump.fun/go/bounties",
+            "https://livestream-api.pump.fun/go/bounties",
+        ]
         self._seen_bounties: Set[str] = set()
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
@@ -59,32 +61,47 @@ class GoMonitor:
             "Referer": "https://pump.fun/go"
         }
         
-        try:
-            async with self._session.get(self._api_url, params=params, proxy=proxy_url, headers=headers, timeout=10) as response:
-                if response.status == 530:
-                    logger.error("Cloudflare 530 Error: Request blocked by challenge/firewall. Rotating proxy...")
-                    if proxy and proxy_url:
-                        proxy.report_result(proxy_url, False, 530)
-                    return
-                
-                if response.status != 200:
-                    logger.error(f"Failed to fetch bounties: HTTP {response.status}")
-                    if proxy and proxy_url:
-                        proxy.report_result(proxy_url, False, response.status)
-                    return
-                
-                if proxy and proxy_url:
-                    proxy.report_result(proxy_url, True, response.status)
-                
-                data = await response.json()
-                if not isinstance(data, list):
-                    logger.error("Bounty API returned unexpected format")
-                    return
+        data = None
+        for api_url in self._api_urls:
+            for use_proxy in (True, False):
+                current_proxy = proxy_url if use_proxy else None
+                try:
+                    async with self._session.get(
+                        api_url, params=params, proxy=current_proxy, headers=headers, timeout=10,
+                    ) as response:
+                        if response.status == 530:
+                            if proxy and current_proxy:
+                                proxy.report_result(current_proxy, False, 530)
+                            continue
+                        if response.status != 200:
+                            if proxy and current_proxy:
+                                proxy.report_result(current_proxy, False, response.status)
+                            if response.status in (402, 407) and use_proxy:
+                                continue
+                            logger.debug("GO bounties %s returned HTTP %s", api_url, response.status)
+                            continue
+                        if proxy and current_proxy:
+                            proxy.report_result(current_proxy, True, response.status)
+                        payload = await response.json()
+                        if isinstance(payload, list):
+                            data = payload
+                            break
+                        if isinstance(payload, dict):
+                            items = payload.get("bounties") or payload.get("data") or []
+                            if isinstance(items, list):
+                                data = items
+                                break
+                except Exception as exc:
+                    logger.debug("GO bounty fetch failed (%s, proxy=%s): %s", api_url, use_proxy, exc)
+            if data is not None:
+                break
 
-                for bounty in data:
-                    await self._process_bounty(bounty)
-        except Exception as e:
-            logger.error(f"Exception in GO bounty poll: {e}")
+        if data is None:
+            logger.debug("GO bounty APIs unavailable this poll cycle")
+            return
+
+        for bounty in data:
+            await self._process_bounty(bounty)
 
     async def _process_bounty(self, bounty: Dict[str, Any]):
         """Evaluate a single bounty and trigger sniping if it passes filters."""

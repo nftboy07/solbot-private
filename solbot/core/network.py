@@ -14,7 +14,7 @@ class ProxyNode:
     url: str
     total_requests: int = 0
     success_requests: int = 0
-    error_counts: Dict[int, int] = field(default_factory=lambda: {403: 0, 407: 0, 429: 0, 530: 0})
+    error_counts: Dict[int, int] = field(default_factory=lambda: {402: 0, 403: 0, 407: 0, 429: 0, 530: 0})
     latencies: List[float] = field(default_factory=list)
     cooldown_until: float = 0
     health_score: float = 100.0
@@ -102,8 +102,9 @@ class NetworkManager:
             if status in [403, 429, 530]:
                 penalty = 25.0
                 node.cooldown_until = time.time() + 30 # 30s cooldown
-            elif status == 407:
-                penalty = 50.0 # Auth failure is severe
+            elif status in (402, 407):
+                penalty = 50.0
+                node.cooldown_until = time.time() + 120
                 
             node.health_score = max(0.0, node.health_score - penalty)
 
@@ -112,7 +113,7 @@ class NetworkManager:
         total_reqs = sum(p.total_requests for p in self.proxies)
         total_success = sum(p.success_requests for p in self.proxies)
         
-        errors = {403: 0, 407: 0, 429: 0, 530: 0}
+        errors = {402: 0, 403: 0, 407: 0, 429: 0, 530: 0}
         for p in self.proxies:
             for code in errors:
                 errors[code] += p.error_counts.get(code, 0)

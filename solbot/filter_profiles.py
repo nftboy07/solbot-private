@@ -39,6 +39,10 @@ class FilterProfile:
     buy_amount_sol: float
     trailing_stop_pct: float
     max_cluster_risk: float
+    skip_creator_genome_check: bool
+    skip_mayhem_check: bool
+    use_jito: bool
+    max_trade_pct_wallet: float
 
 
 PROFILES: Dict[str, FilterProfile] = {
@@ -73,6 +77,10 @@ PROFILES: Dict[str, FilterProfile] = {
         buy_amount_sol=0.01,
         trailing_stop_pct=0.05,
         max_cluster_risk=30.0,
+        skip_creator_genome_check=False,
+        skip_mayhem_check=False,
+        use_jito=True,
+        max_trade_pct_wallet=0.02,
     ),
     "normal": FilterProfile(
         name="normal",
@@ -105,6 +113,10 @@ PROFILES: Dict[str, FilterProfile] = {
         buy_amount_sol=0.10,
         trailing_stop_pct=0.10,
         max_cluster_risk=35.0,
+        skip_creator_genome_check=False,
+        skip_mayhem_check=False,
+        use_jito=True,
+        max_trade_pct_wallet=0.02,
     ),
     "degen": FilterProfile(
         name="degen",
@@ -118,7 +130,7 @@ PROFILES: Dict[str, FilterProfile] = {
         max_initial_buy_sol=50.0,
         max_creator_pct=10.0,
         min_ai_score=0,
-        min_creator_genome_score=20.0,
+        min_creator_genome_score=0.0,
         heuristic_threshold=0.10,
         ai_fallback_score=70,
         require_metadata=False,
@@ -137,6 +149,10 @@ PROFILES: Dict[str, FilterProfile] = {
         buy_amount_sol=0.02,
         trailing_stop_pct=0.20,
         max_cluster_risk=50.0,
+        skip_creator_genome_check=True,
+        skip_mayhem_check=True,
+        use_jito=False,
+        max_trade_pct_wallet=0.05,
     ),
 }
 

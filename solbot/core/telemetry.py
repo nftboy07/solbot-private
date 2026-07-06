@@ -64,14 +64,39 @@ class TelemetryManager:
             data['metadata'] = json.dumps(data['metadata'])
         self._enqueue(self.db.log_trade_event, data)
 
+    _SIGNAL_COLUMNS = frozenset({
+        "event_id", "signal_id", "mint", "creator", "wallet_signal",
+        "confidence", "raw_signal_data", "timestamp",
+    })
+
     def log_signal_event(self, event_id: str, signal_id: str, **kwargs):
-        data = kwargs.copy()
-        data['event_id'] = event_id
-        data['signal_id'] = signal_id
-        if 'timestamp' not in data:
-            data['timestamp'] = time.time()
-        if 'raw_signal_data' in data and isinstance(data['raw_signal_data'], (dict, list)):
-            data['raw_signal_data'] = json.dumps(data['raw_signal_data'])
+        extra = {k: v for k, v in kwargs.items() if k not in self._SIGNAL_COLUMNS}
+        data = {k: v for k, v in kwargs.items() if k in self._SIGNAL_COLUMNS}
+        data["event_id"] = event_id
+        data["signal_id"] = signal_id
+        if "timestamp" not in data:
+            data["timestamp"] = time.time()
+        if extra:
+            raw = data.get("raw_signal_data")
+            if isinstance(raw, str):
+                try:
+                    merged = json.loads(raw)
+                    if isinstance(merged, dict):
+                        merged.update(extra)
+                        data["raw_signal_data"] = json.dumps(merged)
+                    else:
+                        data["raw_signal_data"] = json.dumps({"payload": merged, **extra})
+                except json.JSONDecodeError:
+                    data["raw_signal_data"] = json.dumps(extra)
+            elif isinstance(raw, dict):
+                raw.update(extra)
+                data["raw_signal_data"] = json.dumps(raw)
+            elif isinstance(raw, list):
+                data["raw_signal_data"] = json.dumps({"items": raw, **extra})
+            else:
+                data["raw_signal_data"] = json.dumps(extra)
+        elif "raw_signal_data" in data and isinstance(data["raw_signal_data"], (dict, list)):
+            data["raw_signal_data"] = json.dumps(data["raw_signal_data"])
         self._enqueue(self.db.log_signal_event, data)
 
     def log_rpc_call(self, request_id: str, provider: str, method: str, latency_ms: float, **kwargs):

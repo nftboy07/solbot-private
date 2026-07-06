@@ -103,6 +103,7 @@ class RiskManager:
         confidence_score: float,
         wallet_balance: float,
         floor_sol: float = 0.0,
+        max_trade_pct: float = 0.02,
     ) -> float:
         """
         Position size from filter confidence (0-100):
@@ -128,7 +129,8 @@ class RiskManager:
 
         if wallet_balance <= 0:
             return 0.0
-        max_risk_sol = wallet_balance * 0.02
+        pct = max(0.01, min(max_trade_pct, 0.20))
+        max_risk_sol = wallet_balance * pct
         return max(0.0, min(base_size, max_risk_sol))
 
     async def can_trade(self, token_address: str, size_sol: float, wallet_balance: Optional[float] = None) -> tuple[bool, str]:

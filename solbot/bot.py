@@ -567,7 +567,10 @@ class Solbot:
             genome = await self._creator_genome.get_genome(token.creator) or {}
             if genome:
                 c_score = genome.get("creator_score", 50.0)
-                if c_score < profile.min_creator_genome_score:
+                if (
+                    not profile.skip_creator_genome_check
+                    and c_score < profile.min_creator_genome_score
+                ):
                     self._stats.bump("skip_creator_genome")
                     logger.warning(
                         "Creator Genome Score %.1f < %.1f, skipping %s (%s)",
@@ -618,21 +621,25 @@ class Solbot:
         if not qualified:
             return
 
-        meta = await self._pump_client.get_token_metadata(token.mint)
-        is_mayhem = (
-            meta.get("mayhem") is not None
-            or meta.get("mayhem_state") is not None
-            or meta.get("mayhem_mode") is True
-        )
-        if is_mayhem:
-            self._stats.bump("skip_mayhem")
-            logger.info("SKIPPING %s (%s): Mayhem Mode token detected.", token.symbol, token.mint)
-            return
+        if not profile.skip_mayhem_check:
+            meta = await self._pump_client.get_token_metadata(token.mint)
+            is_mayhem = (
+                meta.get("mayhem") is not None
+                or meta.get("mayhem_state") is not None
+                or meta.get("mayhem_mode") is True
+            )
+            if is_mayhem:
+                self._stats.bump("skip_mayhem")
+                logger.info("SKIPPING %s (%s): Mayhem Mode token detected.", token.symbol, token.mint)
+                return
 
         self._stats.bump("qualified")
         wallet_balance = await self._pump_client.get_sol_balance()
         size = self._risk_manager.calculate_position_size(
-            confidence_score, wallet_balance, floor_sol=profile.buy_amount_sol,
+            confidence_score,
+            wallet_balance,
+            floor_sol=profile.buy_amount_sol,
+            max_trade_pct=profile.max_trade_pct_wallet,
         )
         if size <= 0.0:
             self._stats.bump("skip_risk")
@@ -862,11 +869,17 @@ class Solbot:
         if mint in self._positions or mint in self._processed_mints or mint in self._active_buys: return
         self._active_buys.add(mint)
         try:
+            profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
             meta = await self._pump_client.get_token_metadata(mint)
-            is_mayhem = meta.get("mayhem") is not None or meta.get("mayhem_state") is not None or meta.get("mayhem_mode") is True
-            if is_mayhem:
-                logger.info(f"Skipping KOL snipe for {mint} because it is a Mayhem Mode token.")
-                return
+            if not profile.skip_mayhem_check:
+                is_mayhem = (
+                    meta.get("mayhem") is not None
+                    or meta.get("mayhem_state") is not None
+                    or meta.get("mayhem_mode") is True
+                )
+                if is_mayhem:
+                    logger.info(f"Skipping KOL snipe for {mint} because it is a Mayhem Mode token.")
+                    return
             token = TokenEvent(
                 mint=mint,
                 name=meta.get("name", "Unknown"),
@@ -1118,9 +1131,20 @@ class Solbot:
 
             priority_fee_sol = self._dynamic_priority_fee
             jito_tip_sol = self._dynamic_jito_tip
-            logger.info(f"Initiating snipe for {token.symbol} ({token.mint}) | Size: {size} SOL | Dynamic Fee: {priority_fee_sol:.6f} SOL | Jito Tip: {jito_tip_sol:.5f} SOL | Reason: {reason}")
+            use_jito = exec_profile.use_jito
+            logger.info(
+                "Initiating snipe for %s (%s) | Size: %s SOL | Dynamic Fee: %s SOL | Jito: %s | Reason: %s",
+                token.symbol, token.mint, size, f"{priority_fee_sol:.6f}",
+                f"tip {jito_tip_sol:.5f}" if use_jito else "direct RPC",
+                reason,
+            )
             result = await self._pump_client.execute_trade(
-                token.mint, action="buy", amount=size, priority_fee=priority_fee_sol, jito_tip=jito_tip_sol
+                token.mint,
+                action="buy",
+                amount=size,
+                priority_fee=priority_fee_sol,
+                jito_tip=jito_tip_sol,
+                use_jito=use_jito,
             )
             await self._risk_manager.report_tx_result(result.success)
             if result.success:
@@ -1239,8 +1263,14 @@ class Solbot:
                         # Execute buy
                         priority_fee_sol = self._dynamic_priority_fee
                         jito_tip_sol = self._dynamic_jito_tip
+                        watch_profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
                         result = await self._pump_client.execute_trade(
-                            mint, action="buy", amount=adj_size, priority_fee=priority_fee_sol, jito_tip=jito_tip_sol
+                            mint,
+                            action="buy",
+                            amount=adj_size,
+                            priority_fee=priority_fee_sol,
+                            jito_tip=jito_tip_sol,
+                            use_jito=watch_profile.use_jito,
                         )
                         if result.success:
                             self._trades.append(result)
@@ -1626,11 +1656,20 @@ class Solbot:
     async def _trigger_daily_runner_alert(self, mint: str, mcap_sol: Optional[float] = None, reason: Optional[str] = None):
         try:
             # Fetch fresh metadata
+            profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
             meta = await self._pump_client.get_token_metadata(mint)
-            is_mayhem = meta.get("mayhem") is not None or meta.get("mayhem_state") is not None or meta.get("mayhem_mode") is True
-            if is_mayhem:
-                logger.info(f"Skipping daily runner alert for {meta.get('symbol')} ({mint}) because it is a Mayhem Mode token.")
-                return
+            if not profile.skip_mayhem_check:
+                is_mayhem = (
+                    meta.get("mayhem") is not None
+                    or meta.get("mayhem_state") is not None
+                    or meta.get("mayhem_mode") is True
+                )
+                if is_mayhem:
+                    logger.info(
+                        "Skipping daily runner alert for %s (%s) because it is a Mayhem Mode token.",
+                        meta.get("symbol"), mint,
+                    )
+                    return
             name = meta.get("name", "Unknown")
             symbol = meta.get("symbol", "RUNNER")
             creator = meta.get("creator", "unknown")
