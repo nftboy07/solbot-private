@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Set, Tuple, List, Optional
 from solbot.models import TokenEvent
 from solbot.config import BotConfig
+from solbot.filter_profiles import FilterProfile, get_profile, default_profile_name
 from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey
 
@@ -28,6 +29,15 @@ class TokenFilter:
         self._wallet_scores: Dict[str, WalletScore] = {}
         self._blacklisted_tokens: Set[str] = set()
         self._bonding_curve_program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+        self._profile: FilterProfile = get_profile(default_profile_name())
+
+    @property
+    def profile(self) -> FilterProfile:
+        return self._profile
+
+    def set_profile(self, profile: FilterProfile) -> None:
+        self._profile = profile
+        logger.info("Filter profile set to %s", profile.name)
 
     async def check_ipfs_metadata(self, uri: str) -> bool:
         """Fetch metadata JSON from IPFS directly to bypass Cloudflare API block."""
@@ -223,72 +233,88 @@ class TokenFilter:
         return ev, p_win
 
     async def is_qualified(self, token: TokenEvent, sol_price: float = 150.0, ai_score: float = 80.0, creator_score: float = 50.0) -> Tuple[bool, float, float]:
-        """Check if a token meets all snipe criteria. Returns (is_qualified, default_size, confidence_score)."""
+        """Check if a token meets snipe criteria for the active filter profile."""
+        p = self._profile
         if token.mint in self._blacklisted_tokens:
             return False, 0.0, 0.0
 
-        # 1. Marketcap: 25 SOL - 80 SOL
         market_cap_sol = token.market_cap_usd / sol_price if sol_price > 0 else 30.0
-        if not (25.0 <= market_cap_sol <= 80.0):
-            logger.info(f"Skipping {token.symbol}: Market cap {market_cap_sol:.2f} SOL outside V4 range [25, 80]")
+        if not (p.min_mcap_sol <= market_cap_sol <= p.max_mcap_sol):
+            logger.info(
+                "Skipping %s: Market cap %.2f SOL outside %s range [%.1f, %.1f]",
+                token.symbol, market_cap_sol, p.name, p.min_mcap_sol, p.max_mcap_sol,
+            )
             return False, 0.0, 0.0
-        
-        # 2. Age: 5 seconds - 120 seconds
+
         age = token.age_seconds
-        if not (5.0 <= age <= 120.0):
-            logger.info(f"Skipping {token.symbol}: Age {age:.2f}s outside V4 range [5, 120]")
+        if not (p.min_age_seconds <= age <= p.max_age_seconds):
+            logger.info(
+                "Skipping %s: Age %.2fs outside %s range [%.1f, %.1f]",
+                token.symbol, age, p.name, p.min_age_seconds, p.max_age_seconds,
+            )
             return False, 0.0, 0.0
 
-        # 3. Liquidity: minimum 28 SOL
-        if token.liquidity_sol < 28.0:
-            logger.info(f"Skipping {token.symbol}: Liquidity {token.liquidity_sol:.2f} SOL < 28 SOL")
+        if token.liquidity_sol < p.min_liquidity_sol:
+            logger.info(
+                "Skipping %s: Liquidity %.2f SOL < %.1f SOL (%s)",
+                token.symbol, token.liquidity_sol, p.min_liquidity_sol, p.name,
+            )
             return False, 0.0, 0.0
 
-        # 4. Initial Buy: 0.5 SOL - 8 SOL
-        if not (0.5 <= token.initial_buy_sol <= 8.0):
-            logger.info(f"Skipping {token.symbol}: Creator initial buy {token.initial_buy_sol:.2f} SOL outside range [0.5, 8.0]")
+        if not (p.min_initial_buy_sol <= token.initial_buy_sol <= p.max_initial_buy_sol):
+            logger.info(
+                "Skipping %s: Creator initial buy %.2f SOL outside %s range [%.1f, %.1f]",
+                token.symbol, token.initial_buy_sol, p.name, p.min_initial_buy_sol, p.max_initial_buy_sol,
+            )
             return False, 0.0, 0.0
 
-        # 5. Creator Buy: less than 5%
         creator_pct = (token.initial_buy_sol / (30.0 + token.initial_buy_sol)) * 1.073 * 100.0
-        if creator_pct >= 5.0:
-            logger.info(f"Skipping {token.symbol}: Creator holds {creator_pct:.2f}% of supply (>= 5%)")
+        if creator_pct >= p.max_creator_pct:
+            logger.info(
+                "Skipping %s: Creator holds %.2f%% of supply (>= %.1f%%)",
+                token.symbol, creator_pct, p.max_creator_pct,
+            )
             return False, 0.0, 0.0
 
-        # 6. Metadata and Image Check via IPFS gateway
-        meta_passed = await self.check_ipfs_metadata(token.uri)
-        if not meta_passed:
-            logger.info(f"Skipping {token.symbol}: Metadata/image check failed")
-            return False, 0.0, 0.0
+        if p.require_metadata:
+            meta_passed = await self.check_ipfs_metadata(token.uri)
+            if not meta_passed:
+                logger.info("Skipping %s: Metadata/image check failed (%s)", token.symbol, p.name)
+                return False, 0.0, 0.0
 
-        # RPC Checks
+        top10_pct = 0.0
         rpc_url = self._config.solana.rpc_url
         async with AsyncClient(rpc_url) as rpc_client:
-            # 7. No Freeze Authority & Mint Authority Revoked
-            authorities_passed = await self.verify_mint_authorities(token.mint, rpc_client)
-            if not authorities_passed:
-                logger.info(f"Skipping {token.symbol}: Mint/Freeze authority checks failed")
-                return False, 0.0, 0.0
+            if p.require_authorities:
+                authorities_passed = await self.verify_mint_authorities(token.mint, rpc_client)
+                if not authorities_passed:
+                    logger.info("Skipping %s: Mint/Freeze authority checks failed (%s)", token.symbol, p.name)
+                    return False, 0.0, 0.0
 
-            # 8. Holder Analysis
-            holders_passed, top10_pct = await self.analyze_holders(token.mint, rpc_client)
-            if not holders_passed:
-                logger.info(f"Skipping {token.symbol}: Top 10 holder concentration too high ({top10_pct:.1f}%)")
-                return False, 0.0, 0.0
+            if p.require_holder_check:
+                holders_passed, top10_pct = await self.analyze_holders(token.mint, rpc_client)
+                if not holders_passed:
+                    logger.info(
+                        "Skipping %s: Top 10 holder concentration too high (%.1f%%) (%s)",
+                        token.symbol, top10_pct, p.name,
+                    )
+                    return False, 0.0, 0.0
 
-            # 9. Bundle Detector
-            bundle_passed = await self.check_bundles(token.mint, rpc_client)
-            if not bundle_passed:
-                logger.info(f"Skipping {token.symbol}: Bundled transactions check failed")
-                return False, 0.0, 0.0
+            if p.require_bundle_check:
+                bundle_passed = await self.check_bundles(token.mint, rpc_client)
+                if not bundle_passed:
+                    logger.info("Skipping %s: Bundled transactions check failed (%s)", token.symbol, p.name)
+                    return False, 0.0, 0.0
 
-        # 10. Expected Value (EV) check
         ev, p_win = self.calculate_expected_value(ai_score, creator_score, top10_pct)
-        if ev <= 0.0:
-            logger.info(f"Skipping {token.symbol}: Expected Value is non-positive ({ev:.4f})")
+        if p.require_ev_positive and ev <= 0.0:
+            logger.info("Skipping %s: Expected Value is non-positive (%.4f) (%s)", token.symbol, ev, p.name)
             return False, 0.0, 0.0
 
-        logger.info(f"Qualified {token.symbol}! EV: {ev:.4f}, Win Prob: {p_win*100:.1f}%, Confidence: {p_win*100:.1f}%")
+        logger.info(
+            "Qualified %s [%s]! EV: %.4f, Win Prob: %.1f%%, Confidence: %.1f%%",
+            token.symbol, p.name, ev, p_win * 100.0, p_win * 100.0,
+        )
         return True, self._config.jupiter.buy_amount_sol, p_win * 100.0
 
     def add_copy_target(self, address: str):

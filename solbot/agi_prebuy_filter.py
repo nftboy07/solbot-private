@@ -78,8 +78,11 @@ class AGIPreBuyFilter:
                 if score.win_rate > 0.5 or score.total_pnl_usd > 1000:
                     elite_wallets += 1
 
-        if elite_wallets < 2:
-            return "SKIP", 0, 100.0, "Insufficient smart-wallet participation (<2 elite wallets)"
+        min_elite = 2
+        if hasattr(self._bot, "_filter") and self._bot._filter:
+            min_elite = self._bot._filter.profile.min_elite_wallets
+        if elite_wallets < min_elite:
+            return "SKIP", 0, 100.0, f"Insufficient smart-wallet participation (<{min_elite} elite wallets)"
 
         # Calculate Weights
         score = 0

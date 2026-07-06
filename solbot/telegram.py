@@ -615,26 +615,11 @@ class TelegramController:
             status = "ENABLED" if self._bot._autorunner_enabled else "DISABLED"
             await event.answer(f"AutoRunner: {status}")
             
-        elif action == "preset_safe":
-            object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.01)
-            object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.05)
-            self._bot._ai_min_score = 85
+        elif action in ("preset_safe", "preset_normal", "preset_degen"):
+            preset = action.replace("preset_", "")
+            self._bot.apply_risk_preset(preset)
             save()
-            await event.answer("Applied Preset: SAFE")
-            
-        elif action == "preset_normal":
-            object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.10)
-            object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.10)
-            self._bot._ai_min_score = 75
-            save()
-            await event.answer("Applied Preset: NORMAL")
-            
-        elif action == "preset_degen":
-            object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.50)
-            object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.20)
-            self._bot._ai_min_score = 70
-            save()
-            await event.answer("Applied Preset: DEGEN")
+            await event.answer(f"Applied Preset: {preset.upper()}")
             
         elif action == "scan":
             await event.answer("Starting DB Scan...")
@@ -1038,32 +1023,47 @@ class TelegramController:
         # Handle Presets
         if cmd == "/risk" and len(args) > 1:
             preset = args[1].lower()
-            if preset == "safe":
-                object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.01)
-                object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.05)
-                await event.reply("🛡 <b>Preset: SAFE</b>\nMax Position: 0.01 SOL\nDrawdown: 5%")
-            elif preset == "normal":
-                object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.10)
-                object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.10)
-                await event.reply("⚖️ <b>Preset: NORMAL</b>\nMax Position: 0.10 SOL\nDrawdown: 10%")
-            elif preset == "degen":
-                object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", 0.50)
-                object.__setattr__(self._bot._config.strategy, "trailing_stop_pct", 0.20)
-                await event.reply("🌋 <b>Preset: DEGEN</b>\nMax Position: 0.50 SOL\nDrawdown: 20%")
+            if preset in ("safe", "normal", "degen"):
+                profile = self._bot.apply_risk_preset(preset)
+                await event.reply(
+                    f"{'🛡' if preset == 'safe' else '⚖️' if preset == 'normal' else '🌋'} "
+                    f"<b>Preset: {preset.upper()}</b>\n"
+                    f"Filter Profile: <code>{profile.name}</code>\n"
+                    f"Sniper Delay: <code>{profile.sniper_delay_seconds:.1f}s</code>\n"
+                    f"Age Range: <code>{profile.min_age_seconds:.0f}-{profile.max_age_seconds:.0f}s</code>\n"
+                    f"Mcap Range: <code>{profile.min_mcap_sol:.0f}-{profile.max_mcap_sol:.0f} SOL</code>\n"
+                    f"Min Liquidity: <code>{profile.min_liquidity_sol:.0f} SOL</code>\n"
+                    f"AI Min Score: <code>{profile.min_ai_score}</code>\n"
+                    f"Max Position: <code>{profile.buy_amount_sol} SOL</code>\n"
+                    f"Drawdown: <code>{profile.trailing_stop_pct * 100:.0f}%</code>\n"
+                    f"AGI Filter: <code>{'OFF' if profile.skip_agi_prebuy else 'ON'}</code>"
+                )
             else:
                 await event.reply("❌ Unknown preset. Use: safe, normal, degen")
             save()
             return
 
         # Display current risk profile
+        profile = getattr(self._bot._filter, "profile", None) if getattr(self._bot, "_filter", None) else None
         msg = ("<b>🛡 RISK MANAGEMENT ENGINE</b>\n\n"
+               f"Filter Profile: <code>{getattr(self._bot, '_filter_profile_name', 'degen')}</code>\n"
                f"Max Position: <code>{self._bot._config.jupiter.buy_amount_sol} SOL</code>\n"
                f"Max Drawdown: <code>{self._bot._config.strategy.trailing_stop_pct*100:.1f}%</code>\n"
+               f"AI Min Score: <code>{getattr(self._bot, '_ai_min_score', 75)}</code>\n"
                f"Kill Switch: <code>{'ON' if self._kill_switch else 'OFF'}</code>\n"
                f"Paper Mode: <code>{'ON' if self._paper_mode else 'OFF'}</code>\n"
                f"Autobuy: <code>{'ON' if getattr(self._bot, '_autobuy_enabled', False) else 'OFF'}</code>\n"
-               f"AutoRunner: <code>{'ON' if getattr(self._bot, '_autorunner_enabled', False) else 'OFF'}</code> ({getattr(self._bot, '_autorunner_amount', 0.01)} SOL)\n\n"
-               "<b>Presets:</b> <code>/risk <safe|normal|degen></code>")
+               f"AutoRunner: <code>{'ON' if getattr(self._bot, '_autorunner_enabled', False) else 'OFF'}</code> ({getattr(self._bot, '_autorunner_amount', 0.01)} SOL)\n")
+        if profile:
+            msg += (
+                f"\n<b>Active Filters ({profile.name}):</b>\n"
+                f"Sniper Delay: <code>{profile.sniper_delay_seconds:.1f}s</code>\n"
+                f"Age: <code>{profile.min_age_seconds:.0f}-{profile.max_age_seconds:.0f}s</code>\n"
+                f"Mcap: <code>{profile.min_mcap_sol:.0f}-{profile.max_mcap_sol:.0f} SOL</code>\n"
+                f"Liquidity: <code>≥{profile.min_liquidity_sol:.0f} SOL</code>\n"
+                f"AGI Pre-Buy: <code>{'OFF' if profile.skip_agi_prebuy else 'ON'}</code>\n"
+            )
+        msg += "\n<b>Presets:</b> <code>/risk <safe|normal|degen></code>"
         await event.reply(msg)
 
     async def _cmd_why(self, event):
@@ -1561,18 +1561,23 @@ class TelegramController:
         if len(args) > 1:
             mode = args[1].lower()
             if mode in ["safe", "normal", "degen"]:
-                if mode == "safe":
-                    self._bot._ai_min_score = 90
-                elif mode == "normal":
-                    self._bot._ai_min_score = 80
-                elif mode == "degen":
-                    self._bot._ai_min_score = 70
-                if hasattr(self._bot, '_save_state'): self._bot._save_state()
-                await event.reply(f"🧠 <b>Model mode updated:</b> <code>{mode.upper()}</code> (AI Min Score: {self._bot._ai_min_score})")
+                profile = self._bot.apply_risk_preset(mode)
+                if hasattr(self._bot, '_save_state'):
+                    self._bot._save_state()
+                await event.reply(
+                    f"🧠 <b>Model mode updated:</b> <code>{mode.upper()}</code>\n"
+                    f"AI Min Score: <code>{profile.min_ai_score}</code>\n"
+                    f"Filter Profile: <code>{profile.name}</code>\n"
+                    f"Sniper Delay: <code>{profile.sniper_delay_seconds:.1f}s</code>"
+                )
             else:
                 await event.reply("❌ Invalid mode. Use: safe, normal, degen")
         else:
-            await event.reply(f"🧠 <b>Current AI Min Score:</b> <code>{self._bot._ai_min_score}</code>")
+            profile_name = getattr(self._bot, '_filter_profile_name', 'degen')
+            await event.reply(
+                f"🧠 <b>Current Model Mode:</b> <code>{profile_name.upper()}</code>\n"
+                f"AI Min Score: <code>{self._bot._ai_min_score}</code>"
+            )
 
     async def _cmd_missed(self, event):
         await self.log_brain_event('missed', 'Missed entries reviewed')

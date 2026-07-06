@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from solbot.telegram import TelegramManager
 
 from solbot.config import BotConfig, BotMode
+from solbot.filter_profiles import get_profile, default_profile_name
 from solbot.filters import TokenFilter
 from solbot.jupiter import JupiterClient
 from solbot.logger import get_logger, setup_logger
@@ -130,6 +131,8 @@ class Solbot:
         
         # AGI Watch Queue
         self._watch_queue: Dict[str, Dict] = {}
+        self._pending_evaluations: Set[str] = set()
+        self._filter_profile_name = default_profile_name()
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -148,6 +151,7 @@ class Solbot:
                 "autorunner_amount": self._autorunner_amount,
                 "blacklisted_wallets": list(self._blacklisted_wallets),
                 "kol_threshold": self._kol_threshold,
+                "filter_profile": self._filter_profile_name,
                 "config_overrides": {
                     "buy_amount_sol": self._config.jupiter.buy_amount_sol,
                     "trailing_stop_pct": getattr(self._config.strategy, "trailing_stop_pct", 0.20),
@@ -207,6 +211,7 @@ class Solbot:
             self._autorunner_enabled = state.get("autorunner_enabled", False)
             self._autorunner_amount = state.get("autorunner_amount", 0.01)
             self._kol_threshold = state.get("kol_threshold", 3)
+            self._filter_profile_name = state.get("filter_profile", default_profile_name())
             
             # Restore config overrides
             if "config_overrides" in state:
@@ -275,6 +280,7 @@ class Solbot:
         await self._twitter.start()
         
         self._load_state()
+        self.apply_risk_preset(self._filter_profile_name)
         self._processed_mints.update(self._positions.keys())
         try:
             rows = await self._db._execute_read("SELECT mint FROM positions")
@@ -423,6 +429,254 @@ class Solbot:
         """Check if an address is blacklisted."""
         return address in self._blacklisted_wallets
 
+    def apply_risk_preset(self, preset: str):
+        """Apply a full risk/filter preset (safe, normal, degen)."""
+        profile = get_profile(preset)
+        self._filter_profile_name = profile.name
+        if self._filter:
+            self._filter.set_profile(profile)
+        self._ai_min_score = profile.min_ai_score
+        self._ai_filter._fallback_score = profile.ai_fallback_score
+        object.__setattr__(self._config.jupiter, "buy_amount_sol", profile.buy_amount_sol)
+        object.__setattr__(self._config.strategy, "trailing_stop_pct", profile.trailing_stop_pct)
+        logger.info(
+            "Applied %s preset: delay=%.1fs age=[%.1f,%.1f] mcap=[%.0f,%.0f] ai_min=%d",
+            profile.name,
+            profile.sniper_delay_seconds,
+            profile.min_age_seconds,
+            profile.max_age_seconds,
+            profile.min_mcap_sol,
+            profile.max_mcap_sol,
+            profile.min_ai_score,
+        )
+        return profile
+
+    async def _refresh_token_metrics(self, token: TokenEvent) -> None:
+        """Refresh mcap/liquidity after sniper delay."""
+        sol_price = 150.0
+        if self._telegram and getattr(self._telegram, "_sol_price", 0) > 0:
+            sol_price = self._telegram._sol_price
+        if not self._pump_client:
+            return
+        try:
+            mcap_usd = await self._pump_client.get_bonding_curve_mcap(token.mint, sol_price)
+            if mcap_usd > 0:
+                token.market_cap_usd = mcap_usd
+            meta = await self._pump_client.get_token_metadata(token.mint)
+            v_sol = float(
+                meta.get("virtual_sol_reserves")
+                or meta.get("vSolInBondingCurve")
+                or meta.get("liquidity_sol")
+                or 0
+            )
+            if v_sol > 1e6:
+                v_sol /= 1e9
+            if v_sol > 0:
+                token.liquidity_sol = v_sol
+            mcap_sol = float(meta.get("market_cap_sol") or meta.get("marketCapSol") or 0)
+            if mcap_sol > 0:
+                token.market_cap_usd = mcap_sol * sol_price
+        except Exception as e:
+            logger.debug("Could not refresh metrics for %s: %s", token.symbol, e)
+
+    async def _schedule_token_evaluation(self, token: TokenEvent, raw_data: dict):
+        """Wait for sniper delay, refresh metrics, then evaluate filters."""
+        mint = token.mint
+        if not mint or mint in self._pending_evaluations:
+            return
+        if mint in self._processed_mints or mint in self._active_buys:
+            return
+
+        profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+
+        max_active_positions = getattr(self._config.strategy, "max_active_positions", 100)
+        active_count = sum(1 for p in self._positions.values() if p.active)
+        if max_active_positions > 0 and active_count >= max_active_positions:
+            logger.warning(
+                "SKIPPING %s: Active positions limit (%s/%s) reached.",
+                token.symbol, active_count, max_active_positions,
+            )
+            return
+
+        if self.is_blacklisted(token.creator):
+            logger.warning("SKIPPING %s: Creator %s is blacklisted", token.symbol, token.creator)
+            return
+
+        self._pending_evaluations.add(mint)
+        try:
+            if profile.sniper_delay_seconds > 0:
+                logger.debug(
+                    "Scheduling %s for evaluation in %.1fs (%s profile)",
+                    token.symbol, profile.sniper_delay_seconds, profile.name,
+                )
+                await asyncio.sleep(profile.sniper_delay_seconds)
+
+            if not self._running:
+                return
+            if mint in self._processed_mints or mint in self._active_buys:
+                return
+            if token.age_seconds > profile.max_age_seconds:
+                logger.info(
+                    "Skipping %s: exceeded max age %.1fs (%s)",
+                    token.symbol, token.age_seconds, profile.name,
+                )
+                return
+
+            await self._refresh_token_metrics(token)
+            await self._evaluate_token_for_snipe(token, raw_data)
+        finally:
+            self._pending_evaluations.discard(mint)
+
+    async def _evaluate_token_for_snipe(self, token: TokenEvent, raw_data: dict):
+        """Run the full filter chain after sniper delay."""
+        profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+        genome = {}
+
+        c_score = 50.0
+        if hasattr(self, "_creator_genome") and self._creator_genome:
+            genome = await self._creator_genome.get_genome(token.creator) or {}
+            if genome:
+                c_score = genome.get("creator_score", 50.0)
+                if c_score < profile.min_creator_genome_score:
+                    logger.warning(
+                        "Creator Genome Score %.1f < %.1f, skipping %s (%s)",
+                        c_score, profile.min_creator_genome_score, token.symbol, profile.name,
+                    )
+                    return
+
+        ai_score = 80.0
+        if self._ai_enabled:
+            token_data = {
+                "mint": token.mint,
+                "symbol": token.symbol,
+                "name": token.name,
+                "creator": token.creator,
+                "uri": token.uri,
+                "sentiment_text": self._sentiment_for_mint(token.mint),
+            }
+            ai_score = await self._ai_filter.score_token(token_data)
+            if ai_score < self._ai_min_score:
+                logger.warning(
+                    "AI score %s < %s, skipping %s (%s)",
+                    ai_score, self._ai_min_score, token.symbol, profile.name,
+                )
+                return
+            heuristic = self._inference.predict({
+                "ai_score": ai_score,
+                "creator_score": c_score,
+                "liquidity_sol": token.liquidity_sol,
+            })
+            if heuristic < profile.heuristic_threshold:
+                logger.info(
+                    "Heuristic inference below threshold for %s (%.2f < %.2f, %s)",
+                    token.symbol, heuristic, profile.heuristic_threshold, profile.name,
+                )
+                return
+
+        qualified, default_size, confidence_score = await self._filter.is_qualified(
+            token, sol_price=self._telegram._sol_price, ai_score=ai_score, creator_score=c_score
+        )
+
+        if not qualified:
+            return
+
+        meta = await self._pump_client.get_token_metadata(token.mint)
+        is_mayhem = (
+            meta.get("mayhem") is not None
+            or meta.get("mayhem_state") is not None
+            or meta.get("mayhem_mode") is True
+        )
+        if is_mayhem:
+            logger.info("SKIPPING %s (%s): Mayhem Mode token detected.", token.symbol, token.mint)
+            return
+
+        wallet_balance = await self._pump_client.get_sol_balance()
+        size = self._risk_manager.calculate_position_size(confidence_score, wallet_balance)
+        if size <= 0.0:
+            logger.info(
+                "Skipping %s: Size calculated to 0.0 SOL (Confidence: %.1f)",
+                token.symbol, confidence_score,
+            )
+            return
+
+        allowed, reason = await self._risk_manager.can_trade(token.mint, size, wallet_balance)
+        if not allowed:
+            logger.warning("SKIPPING %s: Risk check failed: %s", token.symbol, reason)
+            return
+
+        if self._obs:
+            await self._obs.record_signal_async(
+                token.mint,
+                "pump_ws",
+                ai_score=ai_score,
+                creator_score=c_score,
+                confidence=confidence_score,
+            )
+            await self._obs.capture_features(
+                token.mint,
+                ai_score=ai_score,
+                creator_score=c_score,
+                liquidity_sol=token.liquidity_sol,
+                market_cap_usd=token.market_cap_usd,
+            )
+
+        if c_score >= 85 and confidence_score >= 85:
+            from telethon import Button
+            buttons = [
+                [Button.inline("Buy 0.1 SOL 🟢", f"buy_0.1_{token.mint}")],
+                [Button.inline("Buy 0.3 SOL 🟡", f"buy_0.3_{token.mint}")],
+                [Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{token.mint}")],
+                [Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{token.mint}")],
+            ]
+            market_cap_sol = (
+                token.market_cap_usd / self._telegram._sol_price
+                if (self._telegram and self._telegram._sol_price > 0)
+                else float(raw_data.get("marketCapSol", 0) or 0.0)
+            )
+            alert_msg = (
+                f"🚨 <b>10x/100x POTENTIAL RUNNER DETECTED!</b> 🚨\n\n"
+                f"Token: <b>{token.symbol}</b> ({token.name})\n"
+                f"Mint: <code>{token.mint}</code>\n"
+                f"Market Cap: <code>{market_cap_sol:.1f} SOL</code> (${token.market_cap_usd:,.0f})\n"
+                f"Creator Genome Score: <code>{c_score:.1f}/100</code>\n"
+                f"Confidence: <code>{confidence_score:.1f}%</code>\n"
+                f"Reason: <i>High-quality developer profile (Avg ATH: {genome.get('avg_ath', 0.0):.1f}x)</i>\n\n"
+                f"👉 <a href='https://pump.fun/{token.mint}'>Buy on pump.fun</a>"
+            )
+            asyncio.create_task(self._telegram.send_message(alert_msg, buttons=buttons))
+            if not self._autobuy_enabled:
+                self._missed_runners[token.mint] = {
+                    "symbol": token.symbol,
+                    "name": token.name,
+                    "alert_price_usd": token.market_cap_usd,
+                    "alert_time": time(),
+                    "notified_milestones": set(),
+                    "c_score": c_score,
+                    "confidence": confidence_score,
+                }
+
+        if self._autobuy_enabled:
+            self._active_buys.add(token.mint)
+            asyncio.create_task(
+                self._execute_snipe(token, size, f"Sniper [{profile.name}] (Conf: {confidence_score:.1f}%)")
+            )
+        elif not (c_score >= 85 and confidence_score >= 85):
+            await self._telegram.send_message(
+                f"🔔 <b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\n"
+                f"Mint: <code>{token.mint}</code>\n"
+                f"Profile: <code>{profile.name}</code>\n"
+                f"Confidence: <code>{confidence_score:.1f}%</code>"
+            )
+            self._missed_runners.setdefault(token.mint, {
+                "symbol": token.symbol,
+                "name": token.name,
+                "alert_price_usd": token.market_cap_usd,
+                "alert_time": time(),
+                "notified_milestones": set(),
+                "c_score": c_score,
+                "confidence": confidence_score,
+            })
+
     async def _process_events(self):
         while self._running:
             if self._paused:
@@ -436,150 +690,8 @@ class Solbot:
                 elif data.get("mint") and (tx_type == "create" or tx_type is None):
                     token = self._parse_token_event(data)
                     asyncio.create_task(self._db_log_launch(token))
+                    asyncio.create_task(self._schedule_token_evaluation(token, data))
 
-                    # Duplicate check
-                    if token.mint in self._processed_mints or token.mint in self._active_buys:
-                        continue
-
-                    # Active positions limit check
-                    max_active_positions = getattr(self._config.strategy, "max_active_positions", 100)
-                    active_count = sum(1 for p in self._positions.values() if p.active)
-                    if max_active_positions > 0 and active_count >= max_active_positions:
-                        logger.warning(f"SKIPPING {token.symbol}: Active positions limit ({active_count}/{max_active_positions}) reached.")
-                        continue
-
-                    # Blacklist check
-                    if self.is_blacklisted(token.creator):
-                        logger.warning(f"SKIPPING {token.symbol}: Creator {token.creator} is blacklisted")
-                        continue
-
-                    # 1. Fetch Creator Score
-                    c_score = 50.0
-                    if hasattr(self, '_creator_genome') and self._creator_genome:
-                        genome = await self._creator_genome.get_genome(token.creator)
-                        if genome:
-                            c_score = genome.get("creator_score", 50.0)
-                            if c_score < 40.0:
-                                logger.warning(f"Creator Genome Score {c_score} < 40, skipping {token.symbol}")
-                                continue
-
-                    # 2. Fetch AI score
-                    ai_score = 80.0
-                    if self._ai_enabled:
-                        token_data = {
-                            "mint": token.mint,
-                            "symbol": token.symbol,
-                            "name": token.name,
-                            "creator": token.creator,
-                            "uri": token.uri,
-                            "sentiment_text": self._sentiment_for_mint(token.mint),
-                        }
-                        ai_score = await self._ai_filter.score_token(token_data)
-                        heuristic = self._inference.predict({
-                            "ai_score": ai_score,
-                            "creator_score": c_score,
-                            "liquidity_sol": token.liquidity_sol,
-                        })
-                        if heuristic < 0.35:
-                            logger.info("Heuristic inference below threshold for %s (%.2f)", token.symbol, heuristic)
-                            continue
-
-                    # 3. Check V4 Buy Strategy
-                    qualified, default_size, confidence_score = await self._filter.is_qualified(
-                        token, sol_price=self._telegram._sol_price, ai_score=ai_score, creator_score=c_score
-                    )
-                    
-                    if qualified:
-                        # Skip Mayhem Mode tokens
-                        meta = await self._pump_client.get_token_metadata(token.mint)
-                        is_mayhem = meta.get("mayhem") is not None or meta.get("mayhem_state") is not None or meta.get("mayhem_mode") is True
-                        if is_mayhem:
-                            logger.info(f"SKIPPING {token.symbol} ({token.mint}): Mayhem Mode token detected.")
-                            continue
-
-                        # 4. Fetch Wallet SOL Balance for Sizing and Risk Checks
-                        wallet_balance = await self._pump_client.get_sol_balance()
-                        
-                        # 5. Calculate position size using V4 sizing rules (0.02, 0.01, 0.005 capped at 2% wallet)
-                        size = self._risk_manager.calculate_position_size(confidence_score, wallet_balance)
-                        if size <= 0.0:
-                            logger.info(f"Skipping {token.symbol}: Size calculated to 0.0 SOL (Confidence: {confidence_score:.1f})")
-                            continue
-                            
-                        # 6. Risk Check
-                        allowed, reason = await self._risk_manager.can_trade(token.mint, size, wallet_balance)
-                        if not allowed:
-                            logger.warning(f"SKIPPING {token.symbol}: Risk check failed: {reason}")
-                            continue
-
-                        if self._obs:
-                            await self._obs.record_signal_async(
-                                token.mint,
-                                "pump_ws",
-                                ai_score=ai_score,
-                                creator_score=c_score,
-                                confidence=confidence_score,
-                            )
-                            await self._obs.capture_features(
-                                token.mint,
-                                ai_score=ai_score,
-                                creator_score=c_score,
-                                liquidity_sol=token.liquidity_sol,
-                                market_cap_usd=token.market_cap_usd,
-                            )
-
-                        # 7. 10x/100x Potential Runner Alert Trigger with inline buttons
-                        if c_score >= 85 and confidence_score >= 85:
-                            from telethon import Button
-                            buttons = [
-                                [Button.inline("Buy 0.1 SOL 🟢", f"buy_0.1_{token.mint}")],
-                                [Button.inline("Buy 0.3 SOL 🟡", f"buy_0.3_{token.mint}")],
-                                [Button.inline("Buy 0.5 SOL 🟠", f"buy_0.5_{token.mint}")],
-                                [Button.inline("Buy 1.0 SOL 🔥", f"buy_1.0_{token.mint}")]
-                            ]
-                            market_cap_sol = token.market_cap_usd / self._telegram._sol_price if (self._telegram and self._telegram._sol_price > 0) else float(data.get("marketCapSol", 0) or 0.0)
-                            alert_msg = (
-                                f"🚨 <b>10x/100x POTENTIAL RUNNER DETECTED!</b> 🚨\n\n"
-                                f"Token: <b>{token.symbol}</b> ({token.name})\n"
-                                f"Mint: <code>{token.mint}</code>\n"
-                                f"Market Cap: <code>{market_cap_sol:.1f} SOL</code> (${token.market_cap_usd:,.0f})\n"
-                                f"Creator Genome Score: <code>{c_score:.1f}/100</code>\n"
-                                f"Confidence: <code>{confidence_score:.1f}%</code>\n"
-                                f"Reason: <i>High-quality developer profile (Avg ATH: {genome.get('avg_ath', 0.0):.1f}x)</i>\n\n"
-                                f"👉 <a href='https://pump.fun/{token.mint}'>Buy on pump.fun</a>"
-                            )
-                            asyncio.create_task(self._telegram.send_message(alert_msg, buttons=buttons))
-                            # Track as missed entry if NOT autobought — bot will regret-alert later
-                            if not self._autobuy_enabled:
-                                self._missed_runners[token.mint] = {
-                                    'symbol': token.symbol,
-                                    'name': token.name,
-                                    'alert_price_usd': token.market_cap_usd,
-                                    'alert_time': time(),
-                                    'notified_milestones': set(),
-                                    'c_score': c_score,
-                                    'confidence': confidence_score,
-                                }
-
-                        # Snipe only if autobuy is enabled
-                        if self._autobuy_enabled:
-                             self._active_buys.add(token.mint)
-                             asyncio.create_task(self._execute_snipe(token, size, f"Sniper (Conf: {confidence_score:.1f}%)"))
-                        else:
-                             if not (c_score >= 85 and confidence_score >= 85):
-                                 # Standard qualified notifications
-                                 await self._telegram.send_message(f"🔔 <b>Qualified Token (Auto-buy OFF):</b> {token.symbol}\nMint: <code>{token.mint}</code>\nConfidence: <code>{confidence_score:.1f}%</code>")
-                                 # Track all qualified tokens as potential missed entries too
-                                 self._missed_runners.setdefault(token.mint, {
-                                     'symbol': token.symbol,
-                                     'name': token.name,
-                                     'alert_price_usd': token.market_cap_usd,
-                                     'alert_time': time(),
-                                     'notified_milestones': set(),
-                                     'c_score': c_score,
-                                     'confidence': confidence_score,
-                                 })
-                             
             except asyncio.TimeoutError:
                 continue
 
@@ -871,7 +983,10 @@ class Solbot:
                 except Exception as e:
                     logger.error(f"Cluster analysis failed: {e}")
 
-                if cluster_risk >= 30.0:
+                max_cluster = 30.0
+                if self._filter:
+                    max_cluster = self._filter.profile.max_cluster_risk
+                if cluster_risk >= max_cluster:
                     cluster_reason = f"Stealth developer wallet cluster detected. Clustered wallets control {cluster_risk/2:.1f}% of supply."
                     logger.warning(f"❌ AI SAFETY CLUSTER SCREEN FAILED for {token.symbol}: Cluster Risk={cluster_risk:.1f}% | Size={cluster_size} | Reason: {cluster_reason}")
                     if status_msg:
@@ -906,37 +1021,48 @@ class Solbot:
                     self._active_buys.discard(token.mint)
                     return
 
-                # AGI Pre-Buy Filter Execution
-                agi_action, agi_score, _, agi_reason = await self._agi_prebuy_filter.evaluate_token(token.mint, {
-                    "market_cap_usd": token.market_cap_usd,
-                    "liquidity_sol": token.liquidity_sol,
-                    "creator": token.creator
-                })
+                skip_agi = self._filter.profile.skip_agi_prebuy if self._filter else False
+                if not skip_agi:
+                    agi_action, agi_score, _, agi_reason = await self._agi_prebuy_filter.evaluate_token(token.mint, {
+                        "market_cap_usd": token.market_cap_usd,
+                        "liquidity_sol": token.liquidity_sol,
+                        "creator": token.creator,
+                    })
 
-                if agi_action == "SKIP":
-                    logger.warning(f"❌ AGI PRE-BUY FILTER FAILED for {token.symbol}: {agi_reason}")
-                    if self._telegram:
-                        await self._telegram.send_message(f"🚫 <b>AGI Pre-Buy Filter Rejected:</b> {token.symbol}\nReason: <i>{agi_reason}</i>")
-                    self._processed_mints.discard(token.mint)
-                    self._active_buys.discard(token.mint)
-                    return
-                elif agi_action == "WATCH":
-                    logger.info(f"👀 AGI PRE-BUY FILTER WATCHING {token.symbol}: {agi_reason}")
-                    self._watch_queue[token.mint] = {
-                        "token": token,
-                        "size": size,
-                        "reason": reason,
-                        "added_at": time.time()
-                    }
-                    if self._telegram:
-                        await self._telegram.send_message(f"👀 <b>AGI Pre-Buy Added to WATCH Queue:</b> {token.symbol}\nScore: <code>{agi_score}</code>\nReason: <i>{agi_reason}</i>")
-                    self._active_buys.discard(token.mint)
-                    return
-                elif agi_action == "BUY_HALF":
-                    logger.info(f"⚖️ AGI PRE-BUY FILTER BUY_HALF for {token.symbol}: {agi_reason}")
-                    size = size * 0.5
-                elif agi_action == "BUY_FULL":
-                    logger.info(f"✅ AGI PRE-BUY FILTER BUY_FULL for {token.symbol}: {agi_reason}")
+                    if agi_action == "SKIP":
+                        logger.warning(f"❌ AGI PRE-BUY FILTER FAILED for {token.symbol}: {agi_reason}")
+                        if self._telegram:
+                            await self._telegram.send_message(
+                                f"🚫 <b>AGI Pre-Buy Filter Rejected:</b> {token.symbol}\nReason: <i>{agi_reason}</i>"
+                            )
+                        self._processed_mints.discard(token.mint)
+                        self._active_buys.discard(token.mint)
+                        return
+                    if agi_action == "WATCH":
+                        logger.info(f"👀 AGI PRE-BUY FILTER WATCHING {token.symbol}: {agi_reason}")
+                        self._watch_queue[token.mint] = {
+                            "token": token,
+                            "size": size,
+                            "reason": reason,
+                            "added_at": time.time(),
+                        }
+                        if self._telegram:
+                            await self._telegram.send_message(
+                                f"👀 <b>AGI Pre-Buy Added to WATCH Queue:</b> {token.symbol}\n"
+                                f"Score: <code>{agi_score}</code>\nReason: <i>{agi_reason}</i>"
+                            )
+                        self._active_buys.discard(token.mint)
+                        return
+                    if agi_action == "BUY_HALF":
+                        logger.info(f"⚖️ AGI PRE-BUY FILTER BUY_HALF for {token.symbol}: {agi_reason}")
+                        size = size * 0.5
+                    elif agi_action == "BUY_FULL":
+                        logger.info(f"✅ AGI PRE-BUY FILTER BUY_FULL for {token.symbol}: {agi_reason}")
+                else:
+                    logger.info(
+                        "AGI pre-buy filter skipped (%s profile) for %s",
+                        self._filter.profile.name, token.symbol,
+                    )
 
             priority_fee_sol = self._dynamic_priority_fee
             jito_tip_sol = self._dynamic_jito_tip

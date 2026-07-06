@@ -20,6 +20,7 @@ class AIFilter:
         self._api_key = None
         self._base_url = None
         self._model = None
+        self._fallback_score: Optional[int] = None
 
         # Prioritize NVIDIA NIM
         if self._config.ai.nvidia_api_key:
@@ -144,10 +145,36 @@ class AIFilter:
             logger.error(f"Gemini API call failed: {e}")
         return None
 
+    async def _score_with_primary(self, prompt: str) -> Optional[int]:
+        if not self._api_key:
+            return None
+        try:
+            payload = {
+                "model": self._model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+            }
+            headers = {
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self._base_url, json=payload, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        content = data["choices"][0]["message"]["content"].strip()
+                        match = re.search(r"\d+", content)
+                        if match:
+                            return int(match.group())
+                    else:
+                        logger.error("Primary AI API error: %s", resp.status)
+        except Exception as e:
+            logger.error("Primary AI scoring failed: %s", e)
+        return None
+
     async def score_token(self, token_data: Dict) -> int:
         """
-        Score a token (0-100) based on metadata and sentiment.
-        Attempts Gemini first if key is present, then NVIDIA/BluesMinds/MiniMax, and falls back to Amazon Bedrock.
+        Score a token (0-100). Primary provider (NVIDIA/etc) first, then Gemini, then Bedrock.
         """
         prompt = f"""
         Analyze this Solana token for safety. Look for rugpull risks or supply splits.
@@ -165,42 +192,24 @@ class AIFilter:
         71-100: Safe/Low risk
         """
 
-        # Try Gemini first as it is configured in VPS .env
+        primary_score = await self._score_with_primary(prompt)
+        if primary_score is not None:
+            return primary_score
+
         if self._config.ai.gemini_api_key:
             gemini_score = await self._score_with_gemini(prompt)
             if gemini_score is not None:
                 return gemini_score
 
-        if self._api_key:
-            try:
-                payload = {
-                    "model": self._model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1
-                }
-                headers = {
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json"
-                }
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(self._base_url, json=payload, headers=headers) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            content = data['choices'][0]['message']['content'].strip()
-                            match = re.search(r'\d+', content)
-                            if match:
-                                return int(match.group())
-                        else:
-                            logger.error(f"Primary AI API error: {resp.status}")
-            except Exception as e:
-                logger.error(f"Primary AI scoring failed: {e}")
-
         logger.info("Attempting Amazon Bedrock fallback...")
         bedrock_score = await self._score_with_bedrock(prompt)
         if bedrock_score is not None:
             return bedrock_score
-        
-        fail_score = getattr(self._config.ai, "fail_open_score", 0) if hasattr(self, "_config") else 0
+
+        if self._fallback_score is not None:
+            fail_score = self._fallback_score
+        else:
+            fail_score = getattr(self._config.ai, "fail_open_score", 0) if hasattr(self, "_config") else 0
         logger.warning("AI scoring failed (API keys invalid or service down). Returning fail-safe score %s.", fail_score)
         return fail_score
 
