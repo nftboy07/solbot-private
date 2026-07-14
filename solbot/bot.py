@@ -286,7 +286,7 @@ class Solbot:
             self._wallet_graph.bot = self
             
         from solbot.telegram import TelegramManager
-        self._telegram = TelegramManager(self._config.telegram)
+        self._telegram = TelegramManager(self._config.telegram, self)
         await self._telegram.start(self)
         
         # New Module Starts

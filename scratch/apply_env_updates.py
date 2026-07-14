@@ -2,9 +2,9 @@ import subprocess
 import os
 import sys
 
-VPS_HOST = "REDACTED_VPS_HOST"
+VPS_HOST = "13.201.69.107"
 VPS_USER = "root"
-KEY_PATH = r"C:\Users\91907\.ssh\REDACTED_SSH_KEY"
+KEY_PATH = r"C:\Users\91907\.ssh\id_ed25519"
 LOCAL_DIR = r"C:\Users\91907\Documents\New project\solbot-private-ai-fix"
 
 env_updates = """

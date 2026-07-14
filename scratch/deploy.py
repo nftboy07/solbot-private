@@ -11,8 +11,8 @@ def run_local_cmd(cmd):
     return res.returncode == 0
 
 def main():
-    key_path = r"C:\Users\91907\.ssh\REDACTED_SSH_KEY"
-    vps_ip = "REDACTED_VPS_HOST"
+    key_path = r"C:\Users\91907\.ssh\id_ed25519"
+    vps_ip = "13.201.69.107"
     
     # SCP all modified files to the production directory as root
     files_to_sync = [

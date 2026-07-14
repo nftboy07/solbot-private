@@ -15,6 +15,7 @@ from typing import Optional, Any, List, Dict
 
 from telethon import TelegramClient, events, Button
 from solbot.config import TelegramConfig
+from solbot.auditor import SolanaAuditor
 
 logger = logging.getLogger("solbot.ui.telegram")
 
@@ -40,9 +41,13 @@ class TelegramController:
             [Button.text("📊 Dashboard"), Button.text("⚙️ Settings")],
             [Button.text("📍 Portfolio"), Button.text("🚨 Kill Switch")]
         ]
+        
+        self._auditor = SolanaAuditor(self._bot._config) if self._bot else None
 
     async def start(self):
         """Initialize and start the Telethon client."""
+        if not self._auditor and self._bot:
+            self._auditor = SolanaAuditor(self._bot._config)
         if not self._config.token or not self._config.api_id or not self._config.api_hash:
             logger.error("Telegram credentials missing in config.")
             return
@@ -169,6 +174,10 @@ class TelegramController:
         @self._client.on(events.NewMessage(pattern='/alpha'))
         async def alpha_handler(event):
             await self._cmd_alpha(event)
+
+        @self._client.on(events.NewMessage(pattern='/audit'))
+        async def audit_handler(event):
+            await self._cmd_audit(event)
 
         @self._client.on(events.NewMessage(pattern='/runner'))
         async def runner_handler(event):
@@ -427,7 +436,8 @@ class TelegramController:
             "  /autotune — View performance KPIs and run AI parameter tuning\n"
             "  /rpcbalancer — Check latency and status of Solana RPC nodes\n"
             "  /clustermap <token> — Run stealth funding genesis checks\n"
-            "  /visualize <token> — Render visual ASCII holder relationship map\n\n"
+            "  /visualize <token> — Render visual ASCII holder relationship map\n"
+            "  /audit [file|repo] — Run security review of Solana Rust/Python code or GitHub repo\n\n"
             "<b>🚀 INLINE BUY BUTTONS (Runner Alerts)</b>\n"
             "  Tap buttons when runner alert fires:\n"
             "  🟢 Buy 0.1 SOL  🟡 Buy 0.3 SOL  🟠 Buy 0.5 SOL  🔥 Buy 1.0 SOL\n\n"
@@ -1743,6 +1753,66 @@ class TelegramController:
             lines.append("No active signals captured in database yet.")
             
         await event.reply("\n".join(lines), parse_mode='html', link_preview=False)
+
+    async def _cmd_audit(self, event):
+        await self.log_brain_event('audit', 'Security audit requested')
+        args = event.message.text.split()
+        
+        status_msg = await event.reply("🔍 **Initializing Solana Program Auditor...**")
+        
+        target = None
+        if len(args) > 1:
+            target = args[1]
+            
+        if not target:
+            files_to_audit = ["solbot/bot.py", "solbot/telegram.py", "solbot/agi_prebuy_filter.py"]
+            await status_msg.edit(f"🧠 **Auditing core codebase ({len(files_to_audit)} files)...**")
+            
+            merged_content = []
+            for filepath in files_to_audit:
+                if os.path.exists(filepath):
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            merged_content.append(f"### File: `{filepath}`\n```python\n" + f.read()[:5000] + "\n```")
+                    except Exception as e:
+                        logger.error(f"Error reading local file {filepath}: {e}")
+            
+            report = await self._auditor.audit_code("Solbot V4 Core", "\n\n".join(merged_content))
+            
+        elif target.startswith("http://") or target.startswith("https://") or "github.com" in target:
+            async def update_status(text):
+                await status_msg.edit(text)
+                
+            success, report = await self._auditor.audit_github_repo(target, progress_callback=update_status)
+            if not success:
+                await status_msg.edit(f"❌ **Audit Failed**: {report}")
+                return
+        else:
+            if not os.path.exists(target):
+                await status_msg.edit(f"❌ **Error**: File path `{target}` does not exist.")
+                return
+                
+            await status_msg.edit(f"🧠 **Reading and analyzing `{target}`...**")
+            try:
+                with open(target, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+            except Exception as e:
+                await status_msg.edit(f"❌ **Error reading file**: {e}")
+                return
+                
+            report = await self._auditor.audit_code(target, content)
+
+        header = f"🛡️ **SOLANA SECURITY AUDIT REPORT**\nTarget: `{target or 'Solbot V4 Core'}`\n\n"
+        full_text = header + report
+        
+        limit = 4000
+        if len(full_text) <= limit:
+            await status_msg.edit(full_text, parse_mode='markdown')
+        else:
+            await status_msg.delete()
+            for i in range(0, len(full_text), limit):
+                chunk = full_text[i:i+limit]
+                await event.respond(chunk, parse_mode='markdown')
 
     async def _send_to_admin(self, text: str, buttons=None):
         if self._client and self._config.chat_id:
