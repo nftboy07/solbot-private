@@ -70,7 +70,7 @@ class AITuner:
                     "SELECT exit_marketcap, max_marketcap FROM ticks ORDER BY timestamp DESC LIMIT 50"
                 )
                 if rows:
-                    runners = sum(1 for r in rows if max(r.get('max_marketcap') or 0.0, r.get('exit_marketcap') or 0.0) >= 50000.0)
+                    runners = sum(1 for r in rows if max(dict(r).get('max_marketcap') or 0.0, dict(r).get('exit_marketcap') or 0.0) >= 50000.0)
                     market_success_rate = (runners / len(rows)) * 100.0
             except Exception as e:
                 logger.error(f"Error reading ticks for AI Tuner: {e}")

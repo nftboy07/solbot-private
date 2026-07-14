@@ -495,8 +495,8 @@ class TelegramController:
                     scanned_count = len(rows)
                     runners = 0
                     for r in rows:
-                        max_cap = r.get('max_marketcap') or 0.0
-                        exit_cap = r.get('exit_marketcap') or 0.0
+                        max_cap = dict(r).get('max_marketcap') or 0.0
+                        exit_cap = dict(r).get('exit_marketcap') or 0.0
                         if max(max_cap, exit_cap) >= 50000.0:
                             runners += 1
                     success_rate = (runners / len(rows)) * 100.0
@@ -513,7 +513,7 @@ class TelegramController:
                 )
                 if rows:
                     total_closed = len(rows)
-                    wins = sum(1 for r in rows if (r.get('pnl') or 0.0) > 0.0)
+                    wins = sum(1 for r in rows if (dict(r).get('pnl') or 0.0) > 0.0)
                     win_rate = (wins / total_closed) * 100.0
             except Exception as e:
                 logger.error(f"Error calculating dashboard win rate: {e}")

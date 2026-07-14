@@ -29,6 +29,7 @@ class RPCPool:
     def __init__(self, nodes: List[Dict[str, str]]):
         self.nodes = [RPCNode(url=n["url"], name=n["name"]) for n in nodes]
         self._lock = asyncio.Lock()
+        self._last_error_log_time = 0.0
 
     async def get_best_node(self) -> str:
         """Returns the best available RPC node based on slot and latency."""
@@ -44,7 +45,10 @@ class RPCPool:
                 sorted_nodes = sorted(active_nodes, key=lambda x: (-x.last_slot, x.latency))
                 return [n.url for n in sorted_nodes]
             if self.nodes:
-                logger.error("No active RPC nodes available! Falling back to all configured nodes.")
+                now = time.time()
+                if now - self._last_error_log_time >= 30.0:
+                    logger.error("No active RPC nodes available! Falling back to all configured nodes.")
+                    self._last_error_log_time = now
                 return [n.url for n in self.nodes]
             return []
 
