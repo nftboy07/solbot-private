@@ -300,10 +300,23 @@ class Solbot:
         self.ensure_live_trading()
         self._processed_mints.update(self._positions.keys())
         try:
-            rows = await self._db._execute_read("SELECT mint FROM positions")
+            rows = await self._db._execute_read("SELECT mint, status FROM positions")
+            db_statuses = {}
             for r in rows:
                 self._processed_mints.add(r['mint'])
+                db_statuses[r['mint']] = r['status']
             logger.info(f"Loaded {len(self._processed_mints)} historically traded mints into memory.")
+            
+            reconciled_count = 0
+            for mint, pos in list(self._positions.items()):
+                status = db_statuses.get(mint)
+                if status == 'closed':
+                    pos.active = False
+                    self._positions.pop(mint, None)
+                    reconciled_count += 1
+            if reconciled_count > 0:
+                logger.info(f"Reconciled {reconciled_count} positions against database (marked closed).")
+                self._save_state()
         except Exception as e:
             logger.error(f"Failed to load historically traded mints: {e}")
             
