@@ -2221,7 +2221,7 @@ class Solbot:
                     self._save_state()
                     
                     logger.info(f"🧠 AGI AUTO-ADJUSTED RISK: Shifted to {mode_str}. Size: {new_buy} SOL, Trailing Stop: {new_stop*100:.0f}%")
-                    if self._telegram:
+                    if self._telegram and os.getenv("AGI_NOTIFICATIONS", "true").lower() == "true":
                         await self._telegram.send_message(
                             f"🧠 <b>AGI Sentiment Shift & Self-Correction</b>\n"
                             f"Evaluated last 50 launches: <code>{success_rate*100:.1f}%</code> success rate.\n"
@@ -2380,7 +2380,7 @@ class Solbot:
                 self._ai_min_score = max(65, self._ai_min_score - 5)
                 
             # Log to Telegram
-            if self._telegram:
+            if self._telegram and os.getenv("AGI_NOTIFICATIONS", "true").lower() == "true":
                 await self._telegram.send_message(
                     f"🧠 <b>SOLBOT AGI BRAIN V4 RETRAINED</b>\n\n"
                     f"Processed Trades: <code>{len(trades)}</code>\n"
@@ -2400,7 +2400,7 @@ class Solbot:
                 if self._ai_enabled:
                     logger.info("Running scheduled AI Autotuning...")
                     success, report = await self._ai_tuner.autotune()
-                    if success and self._telegram:
+                    if success and self._telegram and os.getenv("AGI_NOTIFICATIONS", "true").lower() == "true":
                         await self._telegram.send_message(report)
             except Exception as e:
                 logger.error(f"Error in AI autotune loop: {e}")
