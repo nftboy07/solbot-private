@@ -1,38 +1,56 @@
-# Environment & secrets — NEVER commit
+# Environments
 .env
 .env.*
 !.env.example
 .secrets/
 secrets/
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
+openai-api-key.txt
+*.key
 .venv/
 venv/
 env/
 
-# Logs & runtime data
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Databases & logs
 *.log
-data/state.json
-data/proxies.txt
 data/*.db
 data/*.sqlite
-data/*.sqlite3
-*.session
-*.session-journal
-*.session.backup
 
-# IDE & OS
-.idea/
-.vscode/
-*.swp
-*.swo
+# OS
 .DS_Store
 Thumbs.db
+
+# Project Specific
+data/state.json
+data/proxies.txt
+data/proxies.local.txt
+*.session
+*.session.backup
+*.db
 
 # Local deploy config
 deploy.local.env

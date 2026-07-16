@@ -16,6 +16,7 @@ from typing import Optional, Any, List, Dict
 from telethon import TelegramClient, events, Button
 from solbot.config import TelegramConfig
 from solbot.capital_strategy import dynamic_max_positions
+from solbot.auditor import SolanaAuditor
 
 logger = logging.getLogger("solbot.ui.telegram")
 
@@ -36,6 +37,14 @@ class TelegramController:
         # Prices (mocked or synced from bot)
         self._sol_price = 150.0 # Placeholder, should ideally be synced
 
+        # Persistent bottom reply keyboard menu buttons
+        self._menu_buttons = [
+            [Button.text("📊 Dashboard"), Button.text("⚙️ Settings")],
+            [Button.text("📍 Portfolio"), Button.text("🚨 Kill Switch")]
+        ]
+        
+        self._auditor = SolanaAuditor(self._bot._config) if self._bot else None
+
     def _authorized_admin_ids(self) -> set[int]:
         ids = set(self._config.admin_ids)
         if self._config.chat_id and str(self._config.chat_id).isdigit():
@@ -55,6 +64,8 @@ class TelegramController:
 
     async def start(self):
         """Initialize and start the Telethon client."""
+        if not self._auditor and self._bot:
+            self._auditor = SolanaAuditor(self._bot._config)
         if not self._config.token or not self._config.api_id or not self._config.api_hash:
             logger.error("Telegram credentials missing in config.")
             return
@@ -110,9 +121,29 @@ class TelegramController:
         async def backtest_handler(event):
             await event.reply("🧪 <b>Backtest Engine</b>\nRunning historical simulation for: <code>Strategy_V3_Alpha</code>\nStatus: <code>PENDING</code>")
 
-        @self._client.on(events.NewMessage(pattern='/model|/brain'))
+        @self._client.on(events.NewMessage(pattern='(?i)/panel|/menu'))
+        async def panel_handler(event):
+            await self._cmd_panel(event)
+
+        @self._client.on(events.NewMessage(pattern='(?i)/model|/brain|📊 Dashboard'))
         async def model_handler(event):
-            await self._cmd_model(event)
+            await self._cmd_panel(event, tab="brain")
+
+        @self._client.on(events.NewMessage(pattern='(?i)/settings|/strategy|⚙️ Settings'))
+        async def settings_handler(event):
+            await self._cmd_panel(event, tab="settings")
+
+        @self._client.on(events.NewMessage(pattern='/brain_status'))
+        async def brain_status_handler(event):
+            await self._cmd_brain_status(event)
+
+        @self._client.on(events.NewMessage(pattern='/brain_train'))
+        async def brain_train_handler(event):
+            await self._cmd_brain_train(event)
+
+        @self._client.on(events.NewMessage(pattern='/brain_predict'))
+        async def brain_predict_handler(event):
+            await self._cmd_brain_predict(event)
 
         @self._client.on(events.NewMessage(pattern='/creator'))
         async def creator_handler(event):
@@ -130,9 +161,9 @@ class TelegramController:
         async def signals_handler(event):
             await self._cmd_signals(event)
 
-        @self._client.on(events.NewMessage(pattern='/portfolio|/positions|/history|/pnl|/exposure'))
+        @self._client.on(events.NewMessage(pattern='(?i)/portfolio|/positions|/history|/pnl|/exposure|📍 Portfolio'))
         async def portfolio_handler(event):
-            await self._cmd_portfolio(event)
+            await self._cmd_panel(event, tab="portfolio")
 
         @self._client.on(events.NewMessage(pattern='/rpc|/proxies|/proxy|/latency|/telemetry|/queue'))
         async def execution_handler(event):
@@ -150,7 +181,7 @@ class TelegramController:
         async def autorunner_handler(event):
             await self._cmd_autorunner(event)
 
-        @self._client.on(events.NewMessage(pattern='/risk|/kill|/pause|/resume|/max_position|/max_drawdown|/buy|/drawdown'))
+        @self._client.on(events.NewMessage(pattern='(?i)/risk|/kill|/pause|/resume|/max_position|/max_drawdown|/buy|/drawdown|🚨 Kill Switch'))
         async def risk_handler(event):
             await self._cmd_risk(event)
 
@@ -161,6 +192,10 @@ class TelegramController:
         @self._client.on(events.NewMessage(pattern='/alpha'))
         async def alpha_handler(event):
             await self._cmd_alpha(event)
+
+        @self._client.on(events.NewMessage(pattern='/audit'))
+        async def audit_handler(event):
+            await self._cmd_audit(event)
 
         @self._client.on(events.NewMessage(pattern='/runner'))
         async def runner_handler(event):
@@ -296,12 +331,41 @@ class TelegramController:
                     except Exception as e:
                         logger.error(f"Callback buy error: {e}")
                         await event.answer(f"Error: {e}")
+            elif data.startswith("sell_"):
+                parts = data.split("_")
+                if len(parts) == 3:
+                    try:
+                        pct = float(parts[1])
+                        mint = parts[2]
+                        status_msg = await event.respond(f"⚡️ <b>TG Manual Sell Clicked!</b>\nTarget: <code>{mint}</code>\nPercent: <code>{pct*100:.0f}%</code>\nStatus: <code>SUBMITTING</code>", parse_mode='html')
+                        asyncio.create_task(self._bot.execute_manual_sell(mint, pct, status_msg))
+                        await event.answer("Sell order submitted!")
+                    except Exception as e:
+                        logger.error(f"Callback sell error: {e}")
+                        await event.answer(f"Error: {e}")
             elif data.startswith("brain_"):
                 try:
                     action = data.split("_", 1)[1]
                     await self._handle_brain_callback(event, action)
                 except Exception as e:
                     logger.error(f"Callback brain error: {e}")
+                    await event.answer(f"Error: {e}")
+            elif data.startswith("settings_"):
+                try:
+                    action = data.split("_", 1)[1]
+                    await self._handle_settings_callback(event, action)
+                except Exception as e:
+                    logger.error(f"Callback settings error: {e}")
+                    await event.answer(f"Error: {e}")
+            elif data.startswith("panel_tab_"):
+                try:
+                    tab = data.split("_")[-1]
+                    self._active_panel_tab = tab
+                    msg, buttons = await self._get_panel_tab_content(tab)
+                    await event.edit(msg, buttons=buttons, parse_mode='html')
+                    await event.answer(f"Switched to {tab.upper()}")
+                except Exception as e:
+                    logger.error(f"Callback panel tab error: {e}")
                     await event.answer(f"Error: {e}")
             elif data.startswith("kols_"):
                 try:
@@ -322,10 +386,11 @@ class TelegramController:
 
     async def _cmd_start(self, event):
         await self.log_brain_event('start', 'Start Command executed')
-        msg = ("<b>🦅 Solbot V3 | Command Center OS</b>\n"
+        msg = ("<b>🦅 Solbot V4 | Command Center OS</b>\n"
                "The ultimate asynchronous terminal for Solana dominance.\n\n"
-               "Type /help to see all systems.")
-        await event.reply(msg)
+               "Type /help to see all systems or use the quick menu buttons below.")
+        await event.reply(msg, buttons=self._menu_buttons, parse_mode='html')
+        await self._cmd_panel(event, tab="settings")
 
     async def _cmd_help(self, event):
         await self.log_brain_event('help', 'Help Registry checked')
@@ -396,14 +461,15 @@ class TelegramController:
             "  /autotune — View performance KPIs and run AI parameter tuning\n"
             "  /rpcbalancer — Check latency and status of Solana RPC nodes\n"
             "  /clustermap <token> — Run stealth funding genesis checks\n"
-            "  /visualize <token> — Render visual ASCII holder relationship map\n\n"
+            "  /visualize <token> — Render visual ASCII holder relationship map\n"
+            "  /audit [file|repo] — Run security review of Solana Rust/Python code or GitHub repo\n\n"
             "<b>🚀 INLINE BUY BUTTONS (Runner Alerts)</b>\n"
             "  Tap buttons when runner alert fires:\n"
             "  🟢 Buy 0.1 SOL  🟡 Buy 0.3 SOL  🟠 Buy 0.5 SOL  🔥 Buy 1.0 SOL\n\n"
             "<b>Total: 48+ commands — all logged to /brain for AGI learning 🧠</b>"
         )
         await event.reply(msg1, parse_mode='html')
-        await event.reply(msg2, parse_mode='html')
+        await event.reply(msg2, buttons=self._menu_buttons, parse_mode='html')
 
     async def _cmd_status(self, event):
         await self.log_brain_event('status', 'System Status requested')
@@ -480,7 +546,551 @@ class TelegramController:
         msg, buttons = await self._get_brain_dashboard_content()
         await event.reply(msg, buttons=buttons, parse_mode='html')
 
+    async def _cmd_panel(self, event, tab=None):
+        await self.log_brain_event('panel', 'Unified Panel command executed')
+        if not tab:
+            tab = getattr(self, "_active_panel_tab", "settings")
+        self._active_panel_tab = tab
+
+        msg, buttons = await self._get_panel_tab_content(tab)
+        await event.reply(msg, buttons=buttons, parse_mode='html')
+
+    async def _get_panel_tab_content(self, tab_name: str) -> tuple[str, list]:
+        tab_row = [
+            Button.inline("• 🧠 AGI Brain •" if tab_name == "brain" else "🧠 AGI Brain", b"panel_tab_brain"),
+            Button.inline("• ⚙️ Config •" if tab_name == "settings" else "⚙️ Config", b"panel_tab_settings"),
+            Button.inline("• 📍 Port •" if tab_name == "portfolio" else "📍 Port", b"panel_tab_portfolio"),
+            Button.inline("• ⚡ Exec •" if tab_name == "execution" else "⚡ Exec", b"panel_tab_execution")
+        ]
+
+        if tab_name == "brain":
+            msg, child_buttons = await self._get_brain_dashboard_content_raw()
+            buttons = [tab_row] + child_buttons
+            return msg, buttons
+
+        elif tab_name == "settings":
+            msg, child_buttons = await self._get_settings_dashboard_content_raw()
+            buttons = [tab_row] + child_buttons
+            return msg, buttons
+
+        elif tab_name == "portfolio":
+            msg, child_buttons = await self._get_portfolio_dashboard_content_raw()
+            buttons = [tab_row] + child_buttons
+            return msg, buttons
+
+        else:
+            msg, child_buttons = await self._get_execution_dashboard_content_raw()
+            buttons = [tab_row] + child_buttons
+            return msg, buttons
+
+    async def _get_portfolio_dashboard_content_raw(self) -> tuple[str, list]:
+        positions = getattr(self._bot, "_positions", {})
+        total_closed = len(getattr(self._bot, "_trades", []))
+        
+        wins = sum(1 for t in self._bot._trades if getattr(t, 'pnl', 0.0) > 0.0)
+        win_rate = (wins / max(1, total_closed)) * 100.0
+        realized_sol = sum(getattr(t, 'pnl', 0.0) for t in self._bot._trades)
+        
+        lines = [
+            "📍 <b>SOLBOT PORTFOLIO MANAGER</b>\n",
+            f"Active Positions: <code>{len(positions)}</code>",
+            f"Closed Trades (Cache): <code>{total_closed}</code>",
+            f"Win Rate: <code>{win_rate:.1f}%</code>",
+            f"Realized PnL: <code>{realized_sol:+.3f} SOL</code>\n",
+            "<b>Active Position Details:</b>"
+        ]
+
+        buttons = []
+        if not positions:
+            lines.append("  <i>No active positions.</i>")
+        else:
+            for mint, pos in list(positions.items())[:6]:
+                entry = getattr(pos, 'entry_price', 0.0)
+                current = getattr(pos, 'current_price', 0.0)
+                roi = ((current / entry) - 1.0) * 100.0 if entry > 0 else 0.0
+                symbol = getattr(pos, 'symbol', '???')
+                lines.append(f"• <b>{symbol}</b> (<code>{mint[:6]}</code>) | ROI: <code>{roi:+.1f}%</code>")
+                
+                buttons.append([
+                    Button.inline(f"Sell 50% {symbol}", f"sell_0.5_{mint}"),
+                    Button.inline(f"Sell 100% {symbol}", f"sell_1.0_{mint}")
+                ])
+                
+        buttons.append([
+            Button.inline("❌ Sell ALL Open Positions", b"settings_sell_all_open"),
+            Button.inline("🔄 Refresh Portfolio", b"panel_tab_portfolio")
+        ])
+        
+        return "\n".join(lines), buttons
+
+    async def _get_execution_dashboard_content_raw(self) -> tuple[str, list]:
+        avg_latency = 45.0
+        active_proxies = 0
+        total_proxies = 0
+        success_rate = 100.0
+        
+        if hasattr(self._bot, '_network_manager') and self._bot._network_manager:
+            try:
+                stats = await self._bot._network_manager.get_stats()
+                total_proxies = stats.get("total_proxies", 0)
+                import time
+                now = time.time()
+                active_proxies = sum(1 for p in self._bot._network_manager.proxies if p.cooldown_until < now and p.health_score > 20)
+                success_rate = stats.get("success_rate", 0.0)
+            except Exception as e:
+                logger.error(f"Error fetching proxy stats: {e}")
+                
+        if hasattr(self._bot, '_rpc_pool') and self._bot._rpc_pool:
+            try:
+                latencies = [n.latency * 1000 for n in self._bot._rpc_pool.nodes if n.is_active and n.latency > 0]
+                if latencies:
+                    avg_latency = sum(latencies) / len(latencies)
+            except Exception as e:
+                logger.error(f"Error fetching RPC pool metrics: {e}")
+
+        jito_tip = getattr(self._bot, "_dynamic_jito_tip", 0.001)
+
+        msg = (
+            "⚡ <b>SOLBOT CORE EXECUTION METRICS</b>\n\n"
+            f"🌐 <b>Avg RPC Latency</b>: <code>{avg_latency:.1f}ms</code>\n"
+            f"🛡️ <b>Active Proxies</b>: <code>{active_proxies}/{total_proxies}</code> (Success: <code>{success_rate:.1f}%</code>)\n"
+            f"💡 <b>Jito Bundle Tip</b>: <code>{jito_tip:.5f} SOL</code>\n"
+            f"📊 <b>Telemetry Queue Depth</b>: <code>0</code>\n\n"
+            "<i>Use the controls below to adjust Jito execution tips.</i>"
+        )
+        
+        buttons = [
+            [
+                Button.inline("Jito Tip: -0.0005 SOL", b"settings_tip_dec_0005"),
+                Button.inline("+0.0005 SOL", b"settings_tip_inc_0005"),
+            ],
+            [
+                Button.inline("Jito Tip: -0.005 SOL", b"settings_tip_dec_005"),
+                Button.inline("+0.005 SOL", b"settings_tip_inc_005"),
+            ],
+            [
+                Button.inline("🔄 Refresh Latencies", b"panel_tab_execution")
+            ]
+        ]
+        return msg, buttons
+
+    async def _cmd_settings(self, event):
+        await self.log_brain_event('settings', 'Settings command requested')
+        msg, buttons = await self._get_settings_dashboard_content()
+        await event.reply(msg, buttons=buttons, parse_mode='html')
+
+    async def _get_settings_dashboard_content(self) -> tuple[str, list]:
+        msg, child_buttons = await self._get_settings_dashboard_content_raw()
+        tab_row = [
+            Button.inline("🧠 AGI Brain", b"panel_tab_brain"),
+            Button.inline("• ⚙️ Config •", b"panel_tab_settings"),
+            Button.inline("📍 Port", b"panel_tab_portfolio"),
+            Button.inline("⚡ Exec", b"panel_tab_execution")
+        ]
+        return msg, [tab_row] + child_buttons
+
+    async def _get_settings_dashboard_content_raw(self) -> tuple[str, list]:
+        buy_amount = self._bot._config.jupiter.buy_amount_sol
+        slippage_bps = self._bot._config.jupiter.slippage_bps
+        min_liq = getattr(self._bot, "_min_liquidity_sol", 2.0)
+        min_mcap = getattr(self._bot, "_min_mcap_sol", 2.0)
+        max_top10 = getattr(self._bot, "_max_top10_pct", 40.0)
+        max_creator = getattr(self._bot, "_max_creator_pct", 10.0)
+        cabal_enabled = getattr(self._bot, "_cabal_block_enabled", True)
+        autobuy_enabled = getattr(self._bot, "_autobuy_enabled", False)
+
+        msg = (
+            "⚙️ <b>SOLBOT SNIPER CONFIG PANEL</b>\n\n"
+            f"🤖 <b>AutoBuy Snipe</b>: <code>{'🟢 ENABLED' if autobuy_enabled else '🔴 DISABLED'}</code>\n"
+            f"🛡️ <b>Cabal Cluster Blocking</b>: <code>{'🟢 ENABLED' if cabal_enabled else '🔴 DISABLED'}</code>\n\n"
+            f"💰 <b>Buy Sizing</b>: <code>{buy_amount:.3f} SOL</code>\n"
+            f"⚙️ <b>Jupiter Slippage</b>: <code>{slippage_bps} BPS</code> ({slippage_bps/100:.1f}%)\n"
+            f"💧 <b>Min Liquidity Target</b>: <code>{min_liq:.1f} SOL</code>\n"
+            f"📈 <b>Min Market Cap Target</b>: <code>{min_mcap:.1f} SOL</code>\n"
+            f"📊 <b>Max Top 10 Holds Limit</b>: <code>{max_top10:.1f}%</code>\n"
+            f"🧬 <b>Max Creator holding Limit</b>: <code>{max_creator:.1f}%</code>\n\n"
+            "<i>Interact with the buttons below to tune settings dynamically.</i>"
+        )
+
+        buttons = [
+            [
+                Button.inline(f"🤖 AutoBuy: {'ON' if autobuy_enabled else 'OFF'}", b"settings_toggle_autobuy"),
+                Button.inline(f"🛡️ Cabal: {'ON' if cabal_enabled else 'OFF'}", b"settings_toggle_cabal"),
+            ],
+            [
+                Button.inline("💰 Buy Size: -0.01", b"settings_buy_dec_01"),
+                Button.inline("+0.01", b"settings_buy_inc_01"),
+                Button.inline("-0.10", b"settings_buy_dec_10"),
+                Button.inline("+0.10", b"settings_buy_inc_10"),
+            ],
+            [
+                Button.inline("⚙️ Slippage: -50", b"settings_slip_dec_50"),
+                Button.inline("+50", b"settings_slip_inc_50"),
+                Button.inline("-200", b"settings_slip_dec_200"),
+                Button.inline("+200", b"settings_slip_inc_200"),
+            ],
+            [
+                Button.inline("💧 Min Liq: -0.5", b"settings_liq_dec_05"),
+                Button.inline("+0.5", b"settings_liq_inc_05"),
+                Button.inline("-5.0", b"settings_liq_dec_50"),
+                Button.inline("+5.0", b"settings_liq_inc_50"),
+            ],
+            [
+                Button.inline("📈 Min MCap: -0.5", b"settings_mcap_dec_05"),
+                Button.inline("+0.5", b"settings_mcap_inc_05"),
+                Button.inline("-5.0", b"settings_mcap_dec_50"),
+                Button.inline("+5.0", b"settings_mcap_inc_50"),
+            ],
+            [
+                Button.inline("📊 Max Top 10: -5%", b"settings_top10_dec_5"),
+                Button.inline("+5%", b"settings_top10_inc_5"),
+                Button.inline("🧬 Max Dev: -1%", b"settings_dev_dec_1"),
+                Button.inline("+1%", b"settings_dev_inc_1"),
+            ],
+            [
+                Button.inline("🛡 Preset: Safe", b"settings_preset_safe"),
+                Button.inline("⚖️ Normal", b"settings_preset_normal"),
+                Button.inline("🌋 Degen", b"settings_preset_degen"),
+            ],
+            [
+                Button.inline("🔄 Refresh Settings Panel", b"settings_refresh")
+            ]
+        ]
+        return msg, buttons
+
+    async def _handle_settings_callback(self, event, action):
+        def save():
+            if hasattr(self._bot, "_save_state"):
+                self._bot._save_state()
+
+        jupiter = self._bot._config.jupiter
+        min_liq = getattr(self._bot, "_min_liquidity_sol", 2.0)
+        min_mcap = getattr(self._bot, "_min_mcap_sol", 2.0)
+        max_top10 = getattr(self._bot, "_max_top10_pct", 40.0)
+        max_creator = getattr(self._bot, "_max_creator_pct", 10.0)
+
+        # Toggle AutoBuy
+        if action == "toggle_autobuy":
+            self._bot._autobuy_enabled = not getattr(self._bot, "_autobuy_enabled", False)
+            save()
+            await event.answer(f"Autobuy: {'ENABLED' if self._bot._autobuy_enabled else 'DISABLED'}")
+        
+        # Toggle Cabal
+        elif action == "toggle_cabal":
+            self._bot._cabal_block_enabled = not getattr(self._bot, "_cabal_block_enabled", True)
+            save()
+            await event.answer(f"Cabal blocking: {'ENABLED' if self._bot._cabal_block_enabled else 'DISABLED'}")
+
+        # Buy sizing actions
+        elif action == "buy_dec_01":
+            object.__setattr__(jupiter, "buy_amount_sol", max(0.005, jupiter.buy_amount_sol - 0.01))
+            save()
+            await event.answer(f"Buy Size: {jupiter.buy_amount_sol:.3f} SOL")
+        elif action == "buy_inc_01":
+            object.__setattr__(jupiter, "buy_amount_sol", jupiter.buy_amount_sol + 0.01)
+            save()
+            await event.answer(f"Buy Size: {jupiter.buy_amount_sol:.3f} SOL")
+        elif action == "buy_dec_10":
+            object.__setattr__(jupiter, "buy_amount_sol", max(0.005, jupiter.buy_amount_sol - 0.10))
+            save()
+            await event.answer(f"Buy Size: {jupiter.buy_amount_sol:.3f} SOL")
+        elif action == "buy_inc_10":
+            object.__setattr__(jupiter, "buy_amount_sol", jupiter.buy_amount_sol + 0.10)
+            save()
+            await event.answer(f"Buy Size: {jupiter.buy_amount_sol:.3f} SOL")
+
+        # Slippage actions
+        elif action == "slip_dec_50":
+            object.__setattr__(jupiter, "slippage_bps", max(10, jupiter.slippage_bps - 50))
+            save()
+            await event.answer(f"Slippage: {jupiter.slippage_bps} BPS")
+        elif action == "slip_inc_50":
+            object.__setattr__(jupiter, "slippage_bps", min(9900, jupiter.slippage_bps + 50))
+            save()
+            await event.answer(f"Slippage: {jupiter.slippage_bps} BPS")
+        elif action == "slip_dec_200":
+            object.__setattr__(jupiter, "slippage_bps", max(10, jupiter.slippage_bps - 200))
+            save()
+            await event.answer(f"Slippage: {jupiter.slippage_bps} BPS")
+        elif action == "slip_inc_200":
+            object.__setattr__(jupiter, "slippage_bps", min(9900, jupiter.slippage_bps + 200))
+            save()
+            await event.answer(f"Slippage: {jupiter.slippage_bps} BPS")
+
+        # Min Liquidity actions
+        elif action == "liq_dec_05":
+            self._bot._min_liquidity_sol = max(0.0, min_liq - 0.5)
+            save()
+            await event.answer(f"Min Liquidity: {self._bot._min_liquidity_sol:.1f} SOL")
+        elif action == "liq_inc_05":
+            self._bot._min_liquidity_sol = min_liq + 0.5
+            save()
+            await event.answer(f"Min Liquidity: {self._bot._min_liquidity_sol:.1f} SOL")
+        elif action == "liq_dec_50":
+            self._bot._min_liquidity_sol = max(0.0, min_liq - 5.0)
+            save()
+            await event.answer(f"Min Liquidity: {self._bot._min_liquidity_sol:.1f} SOL")
+        elif action == "liq_inc_50":
+            self._bot._min_liquidity_sol = min_liq + 5.0
+            save()
+            await event.answer(f"Min Liquidity: {self._bot._min_liquidity_sol:.1f} SOL")
+
+        # Min Market Cap actions
+        elif action == "mcap_dec_05":
+            self._bot._min_mcap_sol = max(0.0, min_mcap - 0.5)
+            save()
+            await event.answer(f"Min MCap: {self._bot._min_mcap_sol:.1f} SOL")
+        elif action == "mcap_inc_05":
+            self._bot._min_mcap_sol = min_mcap + 0.5
+            save()
+            await event.answer(f"Min MCap: {self._bot._min_mcap_sol:.1f} SOL")
+        elif action == "mcap_dec_50":
+            self._bot._min_mcap_sol = max(0.0, min_mcap - 5.0)
+            save()
+            await event.answer(f"Min MCap: {self._bot._min_mcap_sol:.1f} SOL")
+        elif action == "mcap_inc_50":
+            self._bot._min_mcap_sol = min_mcap + 5.0
+            save()
+            await event.answer(f"Min MCap: {self._bot._min_mcap_sol:.1f} SOL")
+
+        # Top 10 limit actions
+        elif action == "top10_dec_5":
+            self._bot._max_top10_pct = max(5.0, max_top10 - 5.0)
+            save()
+            await event.answer(f"Max Top 10 hold: {self._bot._max_top10_pct:.0f}%")
+        elif action == "top10_inc_5":
+            self._bot._max_top10_pct = min(100.0, max_top10 + 5.0)
+            save()
+            await event.answer(f"Max Top 10 hold: {self._bot._max_top10_pct:.0f}%")
+
+        # Creator limit actions
+        elif action == "dev_dec_1":
+            self._bot._max_creator_pct = max(0.0, max_creator - 1.0)
+            save()
+            await event.answer(f"Max Dev hold: {self._bot._max_creator_pct:.0f}%")
+        elif action == "dev_inc_1":
+            self._bot._max_creator_pct = min(100.0, max_creator + 1.0)
+            save()
+            await event.answer(f"Max Dev hold: {self._bot._max_creator_pct:.0f}%")
+
+        # Preset actions
+        elif action == "preset_safe":
+            object.__setattr__(jupiter, "buy_amount_sol", 0.01)
+            object.__setattr__(jupiter, "slippage_bps", 100)
+            self._bot._min_liquidity_sol = 5.0
+            self._bot._min_mcap_sol = 5.0
+            self._bot._max_top10_pct = 30.0
+            self._bot._max_creator_pct = 5.0
+            self._bot._cabal_block_enabled = True
+            save()
+            await event.answer("Applied SAFE configuration preset")
+        elif action == "preset_normal":
+            object.__setattr__(jupiter, "buy_amount_sol", 0.05)
+            object.__setattr__(jupiter, "slippage_bps", 300)
+            self._bot._min_liquidity_sol = 2.0
+            self._bot._min_mcap_sol = 2.0
+            self._bot._max_top10_pct = 40.0
+            self._bot._max_creator_pct = 10.0
+            self._bot._cabal_block_enabled = True
+            save()
+            await event.answer("Applied NORMAL configuration preset")
+        elif action == "preset_degen":
+            object.__setattr__(jupiter, "buy_amount_sol", 0.15)
+            object.__setattr__(jupiter, "slippage_bps", 800)
+            self._bot._min_liquidity_sol = 0.5
+            self._bot._min_mcap_sol = 0.5
+            self._bot._max_top10_pct = 55.0
+            self._bot._max_creator_pct = 20.0
+            self._bot._cabal_block_enabled = False
+            save()
+            await event.answer("Applied DEGEN configuration preset")
+
+        # Tip sizing and manual mass sell controls
+        elif action == "sell_all_open":
+            positions = getattr(self._bot, "_positions", {})
+            if not positions:
+                await event.answer("No open positions to sell.")
+                return
+            count = len(positions)
+            for mint in list(positions.keys()):
+                status_msg = await event.respond(f"⚡️ <b>Selling open position</b>: <code>{mint[:8]}</code>...", parse_mode='html')
+                asyncio.create_task(self._bot.execute_manual_sell(mint, 1.0, status_msg))
+            await event.answer(f"Triggered sells for {count} positions!")
+
+        elif action == "tip_dec_0005":
+            self._bot._dynamic_jito_tip = max(0.00001, self._bot._dynamic_jito_tip - 0.0005)
+            save()
+            await event.answer(f"Jito Tip: {self._bot._dynamic_jito_tip:.5f} SOL")
+        elif action == "tip_inc_0005":
+            self._bot._dynamic_jito_tip = self._bot._dynamic_jito_tip + 0.0005
+            save()
+            await event.answer(f"Jito Tip: {self._bot._dynamic_jito_tip:.5f} SOL")
+        elif action == "tip_dec_005":
+            self._bot._dynamic_jito_tip = max(0.00001, self._bot._dynamic_jito_tip - 0.005)
+            save()
+            await event.answer(f"Jito Tip: {self._bot._dynamic_jito_tip:.5f} SOL")
+        elif action == "tip_inc_005":
+            self._bot._dynamic_jito_tip = self._bot._dynamic_jito_tip + 0.005
+            save()
+            await event.answer(f"Jito Tip: {self._bot._dynamic_jito_tip:.5f} SOL")
+
+        elif action == "refresh":
+            await event.answer("Settings refreshed")
+
+        # Re-render UI
+        tab = getattr(self, "_active_panel_tab", "settings")
+        msg, buttons = await self._get_panel_tab_content(tab)
+        await event.edit(msg, buttons=buttons, parse_mode='html')
+
+    async def _cmd_brain_status(self, event):
+        brain = getattr(self._bot, "_brain", None)
+        if not brain:
+            await event.reply("❌ <b>AGI Brain is not initialized.</b>")
+            return
+
+        db = getattr(self._bot, "_db", None)
+        total_samples = 0
+        if db:
+            try:
+                rows = await db.get_training_data()
+                total_samples = len(rows)
+            except Exception as e:
+                logger.error(f"Error checking brain status: {e}")
+
+        model_loaded = "🟢 Active" if brain.model is not None else "🔴 Not Trained"
+        total_predictions = getattr(brain, "total_predictions", 0)
+
+        # Build feature importance list
+        importance_lines = []
+        if brain.features_importance:
+            sorted_importances = sorted(brain.features_importance.items(), key=lambda x: x[1], reverse=True)
+            for feat, imp in sorted_importances[:6]:
+                importance_lines.append(f"  • <code>{feat}</code>: <code>{imp:.1%}</code>")
+        else:
+            importance_lines.append("  • <i>No importance metrics available (model not trained)</i>")
+
+        msg = (
+            "🧠 <b>SOLBOT AGI ML BRAIN STATUS</b>\n\n"
+            f"  Model Type: <code>RandomForestClassifier</code>\n"
+            f"  Status: {model_loaded}\n"
+            f"  Training Samples: <code>{total_samples}</code> closed trades\n"
+            f"  Total Live Predictions: <code>{total_predictions}</code>\n\n"
+            "<b>Top 6 Feature Importances:</b>\n" + "\n".join(importance_lines)
+        )
+        await event.reply(msg, parse_mode="html")
+
+    async def _cmd_brain_train(self, event):
+        brain = getattr(self._bot, "_brain", None)
+        if not brain:
+            await event.reply("❌ <b>AGI Brain is not initialized.</b>")
+            return
+
+        status_msg = await event.reply("🧠 <b>Training AGI Brain ML model...</b>\nQuerying SQLite historical features and fitting RandomForest...")
+        success, report = await brain.train_model()
+        
+        status_str = "🟢 SUCCESS" if success else "❌ FAILED"
+        msg = (
+            "🧠 <b>AGI BRAIN TRAINING</b>\n\n"
+            f"  Status: <b>{status_str}</b>\n"
+            f"  Details: <code>{report}</code>"
+        )
+        await status_msg.edit(msg, parse_mode="html")
+
+    async def _cmd_brain_predict(self, event):
+        args = event.message.text.split()
+        if len(args) < 2:
+            await event.reply("Usage: <code>/brain_predict &lt;mint&gt;</code>", parse_mode="html")
+            return
+
+        mint = args[1]
+        brain = getattr(self._bot, "_brain", None)
+        prebuy = getattr(self._bot, "_agi_prebuy_filter", None)
+        if not brain or not prebuy:
+            await event.reply("❌ <b>AGI Brain or prebuy filter not initialized.</b>")
+            return
+
+        status_msg = await event.reply(f"📡 <b>Scanning token metrics for AGI Brain:</b> <code>{mint[:8]}...</code>")
+        try:
+            # Fetch price metrics
+            dex_data = await self._bot._dexscreener.get_price_metrics(mint)
+            if not dex_data:
+                await status_msg.edit("❌ Failed: Could not fetch DexScreener metrics for this token.")
+                return
+
+            sol_price = self._sol_price
+            market_cap_sol = float(dex_data.get("market_cap_usd") or 0.0) / sol_price
+            liquidity_sol = float(dex_data.get("liquidity_usd") or 0.0) / sol_price
+            txns_m5 = dex_data.get("txns_m5", {})
+            buys = txns_m5.get("buys", 0)
+            sells = txns_m5.get("sells", 0)
+
+            # Get cluster distribution
+            _, _, cluster_details = await self._bot._cluster_mapper.analyze_token_cluster(mint, await self._bot._pump_client._get_rpc_url())
+            top10_pct = sum([d.get("share_pct", 0) for d in cluster_details])
+            creator_holding = next((d.get("share_pct", 0) for d in cluster_details if d.get("address") == dex_data.get("creator")), 0.0)
+
+            kol_mentions = 0.0
+            if hasattr(self._bot, "_kol_mentions") and isinstance(self._bot._kol_mentions, dict):
+                kol_mentions = float(len(self._bot._kol_mentions.get(mint, {})))
+
+            price_change_m5 = float(dex_data.get("price_change_m5") or 0.0)
+            price_change_1h = float(dex_data.get("price_change_1h") or 0.0)
+            volume_m5_usd = float(dex_data.get("volume_m5") or 0.0)
+            volume_h1_usd = float(dex_data.get("volume_h1") or 0.0)
+
+            features = {
+                "price_change_1m": price_change_m5 / 5.0,
+                "price_change_5m": price_change_m5,
+                "price_change_1h": price_change_1h,
+                "volume_change_5m": volume_m5_usd / sol_price,
+                "volume_change_1h": volume_h1_usd / sol_price,
+                "holder_growth_1h": float(buys + sells),
+                "holder_growth_24h": 0.0,
+                "dev_balance": float(creator_holding),
+                "social_score": kol_mentions,
+                "kol_mention_count": kol_mentions,
+                "age_minutes": 5.0, # Default mock
+                "market_cap": float(market_cap_sol),
+                "liquidity": float(liquidity_sol),
+                "volatility_1h": abs(price_change_1h),
+                "buy_pressure": float(buys),
+                "sell_pressure": float(sells)
+            }
+
+            # Predict
+            pred = await brain.predict(mint, features)
+            trained_status = "Trained Model" if pred.get("trained", False) else "Fallback Heuristic"
+
+            msg = (
+                f"🧠 <b>AGI ML PREDICTION REPORT: {mint[:8]}...</b>\n"
+                f"  Classify Source: <code>{trained_status}</code>\n"
+                f"  Win Probability Score: <code>{pred.get('score'):.1f}%</code>\n"
+                f"  AGI Decision: <b>{pred.get('decision')}</b>\n"
+                f"  Confidence: <code>{pred.get('confidence')*100:.0f}%</code>\n\n"
+                f"📊 <b>Scanned Metrics:</b>\n"
+                f"  • Mcap: <code>{market_cap_sol:.1f} SOL</code>\n"
+                f"  • Liquidity: <code>{liquidity_sol:.1f} SOL</code>\n"
+                f"  • Top 10 holds: <code>{top10_pct:.1f}%</code>\n"
+                f"  • Buys/Sells (m5): <code>{buys}/{sells}</code>\n"
+                f"  • Price Chg m5: <code>{price_change_m5:+.1f}%</code>\n"
+                f"  • KOL Mentions: <code>{kol_mentions:.0f}</code>"
+            )
+            await status_msg.edit(msg, parse_mode="html")
+        except Exception as e:
+            logger.error(f"Error executing brain predict: {e}")
+            await status_msg.edit(f"❌ <b>Error:</b> <code>{e}</code>")
+
     async def _get_brain_dashboard_content(self) -> tuple[str, list]:
+        msg, child_buttons = await self._get_brain_dashboard_content_raw()
+        tab_row = [
+            Button.inline("• 🧠 AGI Brain •", b"panel_tab_brain"),
+            Button.inline("⚙️ Config", b"panel_tab_settings"),
+            Button.inline("📍 Port", b"panel_tab_portfolio"),
+            Button.inline("⚡ Exec", b"panel_tab_execution")
+        ]
+        return msg, [tab_row] + child_buttons
+
+    async def _get_brain_dashboard_content_raw(self) -> tuple[str, list]:
         db = getattr(self._bot, '_db', None)
         
         # 1. Fetch recent launch success rate
@@ -644,7 +1254,8 @@ class TelegramController:
         elif action == "refresh":
             await event.answer("Dashboard Refreshed")
 
-        msg, buttons = await self._get_brain_dashboard_content()
+        tab = getattr(self, "_active_panel_tab", "brain")
+        msg, buttons = await self._get_panel_tab_content(tab)
         await event.edit(msg, buttons=buttons, parse_mode='html')
 
     async def _run_brain_scan_via_callback(self, event):
@@ -730,6 +1341,16 @@ class TelegramController:
         success = False
         details = ""
         try:
+            # 1. Train the RandomForest Classifier model
+            brain = getattr(self._bot, "_brain", None)
+            if brain:
+                brain_success, brain_report = await brain.train_model()
+                if brain_success:
+                    details += f"• AGI Brain ML trained: <code>{brain_report}</code>\n"
+                    success = True
+                else:
+                    details += f"• AGI Brain ML skipped: <code>{brain_report}</code>\n"
+
             db = getattr(self._bot, '_db', None)
             if db:
                 rows = await db._execute_read(
@@ -737,7 +1358,7 @@ class TelegramController:
                 )
                 trades = [dict(r) for r in rows]
                 if len(trades) < 10:
-                    details = f"Not enough closed trades (need at least 10, have {len(trades)})."
+                    details += f"• Heuristic tuning skipped: Not enough closed trades (need at least 10, have {len(trades)})."
                 else:
                     wins = [t for t in trades if (t.get('pnl') or 0.0) > 0.0]
                     win_rate = len(wins) / len(trades)
@@ -751,14 +1372,13 @@ class TelegramController:
                         self._bot._save_state()
                         
                     success = True
-                    details = (f"Analyzed trades: <code>{len(trades)}</code>\n"
-                               f"Win Rate: <code>{win_rate*100:.1f}%</code>\n"
-                               f"AI Threshold: <code>{old_ai_threshold}</code> ➔ <code>{self._bot._ai_min_score}</code>")
+                    details += (f"• Heuristic tuning win rate: <code>{win_rate*100:.1f}%</code>\n"
+                                f"• AI Threshold: <code>{old_ai_threshold}</code> ➔ <code>{self._bot._ai_min_score}</code>")
             else:
-                details = "Database connection unavailable."
+                details += "• Database connection unavailable."
         except Exception as e:
             logger.error(f"Error retraining weights: {e}")
-            details = f"Error: {e}"
+            details += f"\nError: {e}"
             
         result_msg = (f"🧠 <b>BRAIN RETRAINING RESULT</b>\n\n"
                       f"Status: <code>{'SUCCESS' if success else 'SKIPPED'}</code>\n"
@@ -1176,6 +1796,66 @@ class TelegramController:
             lines.append("No active signals captured in database yet.")
             
         await event.reply("\n".join(lines), parse_mode='html', link_preview=False)
+
+    async def _cmd_audit(self, event):
+        await self.log_brain_event('audit', 'Security audit requested')
+        args = event.message.text.split()
+        
+        status_msg = await event.reply("🔍 **Initializing Solana Program Auditor...**")
+        
+        target = None
+        if len(args) > 1:
+            target = args[1]
+            
+        if not target:
+            files_to_audit = ["solbot/bot.py", "solbot/telegram.py", "solbot/agi_prebuy_filter.py"]
+            await status_msg.edit(f"🧠 **Auditing core codebase ({len(files_to_audit)} files)...**")
+            
+            merged_content = []
+            for filepath in files_to_audit:
+                if os.path.exists(filepath):
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            merged_content.append(f"### File: `{filepath}`\n```python\n" + f.read()[:5000] + "\n```")
+                    except Exception as e:
+                        logger.error(f"Error reading local file {filepath}: {e}")
+            
+            report = await self._auditor.audit_code("Solbot V4 Core", "\n\n".join(merged_content))
+            
+        elif target.startswith("http://") or target.startswith("https://") or "github.com" in target:
+            async def update_status(text):
+                await status_msg.edit(text)
+                
+            success, report = await self._auditor.audit_github_repo(target, progress_callback=update_status)
+            if not success:
+                await status_msg.edit(f"❌ **Audit Failed**: {report}")
+                return
+        else:
+            if not os.path.exists(target):
+                await status_msg.edit(f"❌ **Error**: File path `{target}` does not exist.")
+                return
+                
+            await status_msg.edit(f"🧠 **Reading and analyzing `{target}`...**")
+            try:
+                with open(target, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+            except Exception as e:
+                await status_msg.edit(f"❌ **Error reading file**: {e}")
+                return
+                
+            report = await self._auditor.audit_code(target, content)
+
+        header = f"🛡️ **SOLANA SECURITY AUDIT REPORT**\nTarget: `{target or 'Solbot V4 Core'}`\n\n"
+        full_text = header + report
+        
+        limit = 4000
+        if len(full_text) <= limit:
+            await status_msg.edit(full_text, parse_mode='markdown')
+        else:
+            await status_msg.delete()
+            for i in range(0, len(full_text), limit):
+                chunk = full_text[i:i+limit]
+                await event.respond(chunk, parse_mode='markdown')
 
     async def _send_to_admin(self, text: str, buttons=None):
         if self._client and self._config.chat_id:
