@@ -79,6 +79,46 @@ class TestPasteTradeClient(unittest.IsolatedAsyncioTestCase):
 
         await client.close()
 
+    async def test_post_trade_sell_success(self):
+        client = PasteTradeClient(key="my_secret_key", url="https://test.paste.trade", handle="@mybot")
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(return_value='{"id": "trade123"}')
+        mock_response.json = AsyncMock(return_value={"id": "trade123", "warnings": []})
+
+        class MockPostContext:
+            async def __aenter__(self):
+                return mock_response
+            async def __aexit__(self, exc_type, exc, tb):
+                pass
+
+        mock_session = MagicMock()
+        mock_session.post = MagicMock(return_value=MockPostContext())
+
+        with patch.object(client, "get_session", return_value=mock_session):
+            success = await client.post_trade(
+                ticker="SOL",
+                direction="short",
+                author_price=160.0,
+                thesis="Take Profit TP1"
+            )
+            self.assertTrue(success)
+
+            # Check payload fields passed to session.post
+            mock_session.post.assert_called_once()
+            args, kwargs = mock_session.post.call_args
+            url = args[0]
+            self.assertEqual(url, "https://test.paste.trade/api/trades")
+            payload = kwargs["json"]
+            self.assertEqual(payload["ticker"], "SOL")
+            self.assertEqual(payload["direction"], "short")
+            self.assertEqual(payload["author_price"], 160.0)
+            self.assertEqual(payload["thesis"], "Take Profit TP1")
+            self.assertEqual(payload["headline_quote"], "Solbot closed/reduced position on SOL")
+
+        await client.close()
+
     async def test_post_trade_failure(self):
         client = PasteTradeClient(key="my_secret_key", url="https://test.paste.trade")
 

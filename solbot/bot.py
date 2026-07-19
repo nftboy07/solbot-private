@@ -1867,6 +1867,14 @@ class Solbot:
                 "reason": reason,
                 "latency_ms": result.latency_ms,
             })
+            if hasattr(self, '_paste_trade') and self._paste_trade:
+                current_price = getattr(pos, "current_price", 0.0) or pos.entry_price
+                asyncio.create_task(self._paste_trade.post_trade(
+                    ticker=pos.symbol,
+                    direction="short",
+                    author_price=current_price,
+                    thesis=reason
+                ))
             # Update active position size in RiskManager for partial sells
             if pos.active:
                 self._risk_manager.state.active_positions[pos.mint] = pos.size * pos.remaining_fraction

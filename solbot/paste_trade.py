@@ -80,14 +80,16 @@ class PasteTradeClient:
 
         # Map buy/long -> long, sell/short -> short
         norm_dir = "long"
+        headline = f"Solbot opened a long position on {ticker.upper()}"
         if direction.lower() in ("sell", "short"):
             norm_dir = "short"
+            headline = f"Solbot closed/reduced position on {ticker.upper()}"
 
         payload = {
             "ticker": ticker.upper(),
             "direction": norm_dir,
             "thesis": thesis,
-            "headline_quote": f"Solbot opened a {norm_dir} position on {ticker.upper()}",
+            "headline_quote": headline,
             "author_handle": author_handle or self.handle,
             "author_price": author_price,
             "platform": "solana",
