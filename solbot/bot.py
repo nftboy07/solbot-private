@@ -382,6 +382,10 @@ class Solbot:
         # Start watch queue manager
         asyncio.create_task(self._watch_queue_manager())
         
+        # Pre-provision paste.trade key if needed
+        if hasattr(self, '_paste_trade') and self._paste_trade:
+            asyncio.create_task(self._paste_trade.ensure_key())
+        
         await self._telegram.send_message("<b>Solbot Sniper (Coordinated KOL Tracking) started!</b>")
 
         loop = asyncio.get_running_loop()
