@@ -174,6 +174,13 @@ class BrainConfig:
 
 
 @dataclass(frozen=True)
+class PasteTradeConfig:
+    api_key: str = field(default_factory=lambda: os.getenv("PASTE_TRADE_KEY", os.getenv("PASTE_TRADE_API_KEY", "")))
+    api_url: str = field(default_factory=lambda: os.getenv("PASTE_TRADE_URL", os.getenv("BOARD_URL", "https://paste.trade")))
+    handle: str = field(default_factory=lambda: os.getenv("PASTE_TRADE_HANDLE", "@solbot"))
+
+
+@dataclass(frozen=True)
 class BotConfig:
     solana: SolanaConfig = field(default_factory=SolanaConfig)
     pumpfun: PumpFunConfig = field(default_factory=PumpFunConfig)
@@ -186,6 +193,7 @@ class BotConfig:
     arbitrage: ArbitrageConfig = field(default_factory=ArbitrageConfig)
     cabal: CabalConfig = field(default_factory=CabalConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
+    paste_trade: PasteTradeConfig = field(default_factory=PasteTradeConfig)
     proxy_url: str = field(default_factory=lambda: os.getenv("PROXY_URL", ""))
     proxy_list_path: str = field(default_factory=lambda: os.getenv("PROXY_LIST_PATH", "data/proxies.txt"))
     residential_proxy: str = field(default_factory=lambda: os.getenv("RESIDENTIAL_PROXY", ""))

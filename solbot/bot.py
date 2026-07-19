@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 from solbot.config import BotConfig, BotMode
 from solbot.filter_profiles import get_profile, default_profile_name
+from solbot.paste_trade import PasteTradeClient
 from solbot.capital_strategy import (
     RecycleSettings,
     active_position_count,
@@ -167,6 +168,11 @@ class Solbot:
         self._filter_profile_name = default_profile_name()
         self._stats = StatsTracker()
         self._position_counter = 0
+        self._paste_trade = PasteTradeClient(
+            key=self._config.paste_trade.api_key,
+            url=self._config.paste_trade.api_url,
+            handle=self._config.paste_trade.handle,
+        )
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -671,6 +677,8 @@ class Solbot:
     async def stop(self):
         self._running = False
         self._save_state()
+        if hasattr(self, '_paste_trade') and self._paste_trade:
+            await self._paste_trade.close()
         if self._autotune_poller:
             self._autotune_poller.cancel()
         await self._kols_controller.stop()
@@ -1453,6 +1461,13 @@ class Solbot:
                 pos.highest_price = token.market_cap_usd
                 self._positions[token.mint] = pos
                 asyncio.create_task(self._db.save_position(token.mint, token.market_cap_usd, size, "open", reason))
+                if hasattr(self, '_paste_trade') and self._paste_trade:
+                    asyncio.create_task(self._paste_trade.post_trade(
+                        ticker=token.symbol,
+                        direction="long",
+                        author_price=token.market_cap_usd,
+                        thesis=reason
+                    ))
                 self._spawn_position_manager(pos)
                 await self._log_trade_event("buy", {
                     "mint": token.mint,
@@ -1612,6 +1627,13 @@ class Solbot:
                             pos.highest_price = token.market_cap_usd
                             self._positions[mint] = pos
                             asyncio.create_task(self._db.save_position(mint, token.market_cap_usd, adj_size, "open", f"{reason} (Watch Queue: {agi_score})"))
+                            if hasattr(self, '_paste_trade') and self._paste_trade:
+                                asyncio.create_task(self._paste_trade.post_trade(
+                                    ticker=token.symbol,
+                                    direction="long",
+                                    author_price=token.market_cap_usd,
+                                    thesis=f"{reason} (Watch Queue: {agi_score})"
+                                ))
                             asyncio.create_task(self._position_manager(pos))
                             await self._risk_manager.on_position_opened(mint, adj_size)
                             self._save_state()
