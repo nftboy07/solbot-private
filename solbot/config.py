@@ -134,6 +134,9 @@ class AIConfig:
     aws_region: str = field(default_factory=lambda: os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "ap-south-1")))
     bedrock_model_id: str = field(default_factory=lambda: os.getenv("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0"))
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+    openrouter_api_key: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""))
+    openrouter_api_url: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_URL", "https://openrouter.ai/api/v1/chat/completions"))
+    openrouter_model: str = field(default_factory=lambda: os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free"))
     fail_open_score: int = field(default_factory=lambda: int(os.getenv("AI_FAIL_OPEN_SCORE", "0")))
 
 

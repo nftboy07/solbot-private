@@ -220,6 +220,92 @@ class AIFilter:
             logger.error(f"Gemini API call failed: {e}")
         return None
 
+    async def _call_openrouter(self, prompt: str) -> Optional[str]:
+        if not self._config.ai.openrouter_api_key:
+            return None
+
+        # Build fallback model pool
+        primary = self._config.ai.openrouter_model
+        fallbacks = [
+            "meta-llama/llama-3-8b-instruct:free",
+            "nvidia/nemotron-4-340b-instruct:free",
+            "google/gemma-2-9b-it:free",
+            "qwen/qwen-2.5-72b-instruct:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "microsoft/phi-3-medium-128k-instruct:free"
+        ]
+        
+        # Ensure primary model is first, and deduplicate
+        models = [primary]
+        for fb in fallbacks:
+            if fb not in models:
+                models.append(fb)
+
+        headers = {
+            "Authorization": f"Bearer {self._config.ai.openrouter_api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/oblien/openship",
+            "X-Title": "Solbot Sniper"
+        }
+
+        for model in models:
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1
+            }
+            logger.info(f"[OpenRouter] Querying model {model}...")
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self._config.ai.openrouter_api_url,
+                        json=payload,
+                        headers=headers,
+                        timeout=15
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            content = data['choices'][0]['message']['content'].strip()
+                            if content:
+                                logger.info(f"[OpenRouter] Success with model: {model}")
+                                return content
+                        elif resp.status == 429:
+                            logger.warning(f"[OpenRouter] Rate limited (429) for model: {model}. Trying fallback...")
+                        else:
+                            error_text = await resp.text()
+                            logger.warning(f"[OpenRouter] Error {resp.status} for model {model}: {error_text}. Trying fallback...")
+            except Exception as e:
+                logger.error(f"[OpenRouter] Failed calling model {model}: {e}")
+
+        logger.error("[OpenRouter] All models in the pool failed or returned rate limits.")
+        return None
+
+    async def _score_with_openrouter(self, prompt: str) -> Optional[int]:
+        content = await self._call_openrouter(prompt)
+        if not content:
+            return None
+        match = re.search(r"\d+", content)
+        if not match:
+            return None
+        score = max(0, min(100, int(match.group())))
+        logger.info(f"OpenRouter API scored token: {score}")
+        return score
+
+    async def _analyze_safety_with_openrouter(self, prompt: str) -> Optional[dict]:
+        content = await self._call_openrouter(prompt)
+        if not content:
+            return None
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if not json_match:
+            return None
+        try:
+            res = json.loads(json_match.group())
+        except json.JSONDecodeError as e:
+            logger.error(f"OpenRouter Safety Analysis returned invalid JSON: {e}")
+            return None
+        logger.info(f"OpenRouter Safety Analysis: {res}")
+        return _normalize_safety_result(res, provider="openrouter")
+
     async def score_token(self, token_data: Dict) -> int:
         """
         Score a token (0-100) based on metadata and sentiment.
@@ -245,6 +331,11 @@ class AIFilter:
         openai_score = await self._score_with_openai(prompt)
         if openai_score is not None:
             return openai_score
+
+        if self._config.ai.openrouter_api_key:
+            openrouter_score = await self._score_with_openrouter(prompt)
+            if openrouter_score is not None:
+                return openrouter_score
 
         # Try Gemini next as it may be configured in VPS .env.
         if self._config.ai.gemini_api_key:
@@ -350,6 +441,11 @@ class AIFilter:
         openai_result = await self._analyze_safety_with_openai(prompt)
         if openai_result is not None:
             return openai_result
+
+        if self._config.ai.openrouter_api_key:
+            openrouter_result = await self._analyze_safety_with_openrouter(prompt)
+            if openrouter_result is not None:
+                return openrouter_result
 
         # 1. Try Gemini
         api_key = self._config.ai.gemini_api_key
