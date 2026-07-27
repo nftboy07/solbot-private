@@ -41,6 +41,99 @@ class PumpFunClient:
         self._observability = None
         self._tip_estimator = JitoTipEstimator()
 
+        # --- paper trading ledger -------------------------------------------
+        # When DRY_RUN is set the client answers balance queries and trade
+        # submissions from this ledger instead of the chain, so the strategy,
+        # position manager, TP ladder and moonbag logic all run untouched
+        # against live prices without signing anything.
+        self._paper_enabled = bool(getattr(config.strategy, "dry_run", False))
+        self._paper_sol = float(getattr(config.strategy, "dry_run_start_sol", 1.0))
+        self._paper_tokens: Dict[str, float] = {}
+        self._paper_basis: Dict[str, float] = {}
+        self._paper_marks: Dict[str, float] = {}
+        self._paper_fills = 0
+        if self._paper_enabled:
+            logger.warning(
+                "DRY_RUN active — no transaction will be signed or broadcast. "
+                "Paper wallet starts at %.4f SOL.", self._paper_sol,
+            )
+
+    # Token quantities are notional in paper mode: profit and loss is driven by
+    # the marked ROI, not by a simulated token count.
+    PAPER_TOKENS_PER_SOL = 1_000_000.0
+
+    @property
+    def paper_enabled(self) -> bool:
+        return self._paper_enabled
+
+    def set_paper_mark(self, mint: str, roi: float) -> None:
+        """Record the live ROI so a paper sell credits realistic proceeds."""
+        if self._paper_enabled and roi > 0:
+            self._paper_marks[mint] = float(roi)
+
+    def paper_summary(self) -> Dict[str, float]:
+        held = sum(self._paper_basis.values())
+        return {
+            "sol": self._paper_sol,
+            "open_basis_sol": held,
+            "equity_sol": self._paper_sol + held,
+            "fills": self._paper_fills,
+        }
+
+    def _paper_trade(self, mint, action, amount, denominated_in_sol, start_time) -> TradeResult:
+        latency = (time.perf_counter() - start_time) * 1000
+        self._paper_fills += 1
+        signature = f"DRYRUN-{action}-{mint[:8]}-{self._paper_fills}"
+
+        if action == "buy":
+            cost = float(amount)
+            if cost > self._paper_sol:
+                return TradeResult(
+                    success=False, token_mint=mint,
+                    error=f"Paper wallet short: need {cost:.4f} SOL, have {self._paper_sol:.4f}",
+                    latency_ms=latency,
+                )
+            qty = cost * self.PAPER_TOKENS_PER_SOL
+            self._paper_sol -= cost
+            self._paper_tokens[mint] = self._paper_tokens.get(mint, 0.0) + qty
+            self._paper_basis[mint] = self._paper_basis.get(mint, 0.0) + cost
+            logger.info(
+                "[DRY_RUN] BUY %s for %.4f SOL | paper wallet %.4f SOL",
+                mint[:8], cost, self._paper_sol,
+            )
+            return TradeResult(
+                success=True, token_mint=mint, tx_signature=signature,
+                amount_in=cost, amount_out=qty, latency_ms=latency,
+            )
+
+        held = self._paper_tokens.get(mint, 0.0)
+        if held <= 0:
+            return TradeResult(
+                success=False, token_mint=mint, error="Paper position already closed",
+                latency_ms=latency,
+            )
+        qty = min(float(amount), held) if not denominated_in_sol else held
+        fraction = qty / held if held else 0.0
+        basis_portion = self._paper_basis.get(mint, 0.0) * fraction
+        roi = self._paper_marks.get(mint, 1.0)
+        proceeds = basis_portion * roi
+
+        self._paper_sol += proceeds
+        self._paper_tokens[mint] = held - qty
+        self._paper_basis[mint] = self._paper_basis.get(mint, 0.0) - basis_portion
+        if self._paper_tokens[mint] <= 0:
+            self._paper_tokens.pop(mint, None)
+            self._paper_basis.pop(mint, None)
+            self._paper_marks.pop(mint, None)
+        logger.info(
+            "[DRY_RUN] SELL %s %.1f%% at %.2fx | +%.4f SOL | paper wallet %.4f SOL",
+            mint[:8], fraction * 100, roi, proceeds, self._paper_sol,
+        )
+        return TradeResult(
+            success=True, token_mint=mint, tx_signature=signature,
+            amount_in=qty, amount_out=proceeds, latency_ms=latency,
+        )
+
     def _rpc_success(self, data: dict, http_status: int) -> bool:
         return http_status == 200 and "error" not in data
 
@@ -119,6 +212,8 @@ class PumpFunClient:
 
     async def get_sol_balance(self) -> float:
         """Fetch the current SOL balance for the wallet."""
+        if self._paper_enabled:
+            return self._paper_sol
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -133,6 +228,13 @@ class PumpFunClient:
 
     async def get_all_token_balances(self) -> Dict[str, Dict]:
         """Fetch all SPL and Token-2022 balances with metadata."""
+        if self._paper_enabled:
+            # Without this the startup reconcile would treat every paper bag as a
+            # ghost with no on-chain balance and purge it immediately.
+            return {
+                mint: {"balance": qty, "program": TOKEN_PROGRAMS[0]}
+                for mint, qty in self._paper_tokens.items() if qty > 0
+            }
         programs = list(TOKEN_PROGRAMS)
         balances = {}
         
@@ -163,6 +265,55 @@ class PumpFunClient:
         
         return balances
 
+    async def token_2022_block_reason(self, mint: str) -> Optional[str]:
+        """Why a Token-2022 mint cannot be sold, or None if it is fine.
+
+        pump.fun issues ordinary new mints under Token-2022 (they carry only
+        metadataPointer/tokenMetadata), so the program ID alone says nothing about
+        sellability. Only specific extensions actually block a transfer. When the
+        lookup fails we return None: we already hold the bag, and attempting a sell
+        is strictly better than abandoning it on an unverified suspicion.
+        """
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getAccountInfo",
+            "params": [mint, {"encoding": "jsonParsed"}],
+        }
+        data, _, _ = await self._rpc_post(payload, method="getAccountInfo")
+        if not data:
+            return None
+        value = (data.get("result", {}) or {}).get("value") or {}
+        if value.get("owner") != TOKEN_2022_PROGRAM:
+            return None
+        info = ((value.get("data") or {}).get("parsed") or {}).get("info") or {}
+
+        if info.get("freezeAuthority"):
+            return "freeze authority is set"
+
+        for ext in info.get("extensions") or []:
+            name = ext.get("extension")
+            state = ext.get("state") or {}
+            if name == "nonTransferable":
+                return "mint is non-transferable"
+            if name == "transferHook" and state.get("programId"):
+                return f"transfer hook {str(state.get('programId'))[:8]}"
+            if name == "permanentDelegate" and state.get("delegate"):
+                return "permanent delegate can seize the balance"
+            if name == "defaultAccountState" and str(state.get("accountState", "")).lower() == "frozen":
+                return "token accounts default to frozen"
+            if name == "transferFeeConfig":
+                bps = 0
+                for key in ("newerTransferFee", "olderTransferFee"):
+                    fee = state.get(key) or {}
+                    try:
+                        bps = max(bps, int(fee.get("transferFeeBasisPoints", 0) or 0))
+                    except (TypeError, ValueError):
+                        continue
+                if bps >= 5000:
+                    return f"confiscatory transfer fee ({bps} bps)"
+        return None
+
     async def _mint_uses_token_2022(self, mint: str) -> bool:
         payload = {
             "jsonrpc": "2.0",
@@ -183,7 +334,11 @@ class PumpFunClient:
         meta = await self.get_token_metadata(mint)
         if metadata_indicates_mayhem(meta):
             return True
-        return await self._mint_uses_token_2022(mint)
+        reason = await self.token_2022_block_reason(mint)
+        if reason:
+            logger.warning("Token %s is unsellable: %s", mint[:8], reason)
+            return True
+        return False
 
     async def get_token_metadata_onchain(self, mint: str) -> Dict:
         """Fetch token metadata on-chain from Solana RPC via Metaplex Metadata PDA."""
@@ -213,7 +368,9 @@ class PumpFunClient:
             
             symbol = "???"
             name = "Unknown"
-            mayhem_mode = await self._mint_uses_token_2022(mint)
+            # Not "is this Token-2022" — pump.fun's ordinary mints are. Only a
+            # blocking extension makes a token genuinely unsellable.
+            mayhem_mode = bool(await self.token_2022_block_reason(mint))
 
             async with self._session.post(url, json=payload) as resp:
                 latency = (time.perf_counter() - start) * 1000
@@ -332,6 +489,8 @@ class PumpFunClient:
 
     async def get_token_balance(self, mint: str) -> float:
         """Fetch the current token balance for the wallet."""
+        if self._paper_enabled:
+            return self._paper_tokens.get(mint, 0.0)
         for program_id in TOKEN_PROGRAMS:
             payload = {
                 "jsonrpc": "2.0",
@@ -395,7 +554,13 @@ class PumpFunClient:
         
         amount = amount or self._jupiter_config.buy_amount_sol
         slippage = slippage or self._jupiter_config.slippage_bps
-        
+        # Config carries basis points; PumpPortal's `slippage` field is a percent.
+        # Sending bps straight through asks for 300% tolerance instead of 3%.
+        slippage_pct = slippage / 100.0
+
+        if self._paper_enabled:
+            return self._paper_trade(mint, action, amount, denominated_in_sol, start_time)
+
         # 1. Dynamic prioritization fee estimation
         if priority_fee is None:
             priority_fee = await self.get_recent_prioritization_fee(mint)
@@ -406,7 +571,7 @@ class PumpFunClient:
             "mint": mint,
             "denominatedInSol": "true" if denominated_in_sol else "false",
             "amount": amount,
-            "slippage": slippage,
+            "slippage": slippage_pct,
             "priorityFee": priority_fee,
             "pool": "auto"
         }

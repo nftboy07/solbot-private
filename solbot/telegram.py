@@ -54,7 +54,15 @@ class TelegramController:
     async def _require_admin(self, event) -> bool:
         allowed = self._authorized_admin_ids()
         if not allowed:
-            return True
+            # Fail closed. An empty allowlist used to mean "anyone", which handed
+            # trading and file-read commands to any stranger who found the bot.
+            logger.error(
+                "Refusing privileged command: no TELEGRAM_ADMIN_IDS or TELEGRAM_CHAT_ID configured."
+            )
+            await event.reply(
+                "⛔️ No admins are configured. Set TELEGRAM_ADMIN_IDS in .env to use this command."
+            )
+            return False
         sender = await event.get_sender()
         sender_id = getattr(sender, "id", None)
         if sender_id not in allowed:
@@ -316,10 +324,13 @@ class TelegramController:
         @self._client.on(events.CallbackQuery)
         async def callback_handler(event):
             data = event.data.decode("utf-8")
+            # Gate every callback, not just buy_. The sell_ and settings_ branches
+            # can liquidate the portfolio or change buy size and slippage, and were
+            # reachable by anyone able to see one of the bot's inline buttons.
+            if not await self._require_admin(event):
+                await event.answer("Unauthorized", alert=True)
+                return
             if data.startswith("buy_"):
-                if not await self._require_admin(event):
-                    await event.answer("Unauthorized", alert=True)
-                    return
                 parts = data.split("_")
                 if len(parts) == 3:
                     try:
@@ -1798,9 +1809,11 @@ class TelegramController:
         await event.reply("\n".join(lines), parse_mode='html', link_preview=False)
 
     async def _cmd_audit(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('audit', 'Security audit requested')
         args = event.message.text.split()
-        
+
         status_msg = await event.reply("🔍 **Initializing Solana Program Auditor...**")
         
         target = None
@@ -1831,13 +1844,29 @@ class TelegramController:
                 await status_msg.edit(f"❌ **Audit Failed**: {report}")
                 return
         else:
-            if not os.path.exists(target):
+            # Only source files inside the project may be audited. The report is sent
+            # to a third-party LLM, so an unrestricted path here leaks .env — and with
+            # it WALLET_PRIVATE_KEY — to anyone who can run the command.
+            repo_root = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+            resolved = os.path.abspath(os.path.join(repo_root, target))
+            try:
+                inside = os.path.commonpath([repo_root, resolved]) == repo_root
+            except ValueError:
+                inside = False  # different drive on Windows
+            if not inside:
+                await status_msg.edit("❌ **Error**: Only files inside the project can be audited.")
+                return
+            if not resolved.endswith(".py"):
+                await status_msg.edit("❌ **Error**: Only `.py` source files can be audited.")
+                return
+            target = os.path.relpath(resolved, repo_root)
+            if not os.path.exists(resolved):
                 await status_msg.edit(f"❌ **Error**: File path `{target}` does not exist.")
                 return
-                
+
             await status_msg.edit(f"🧠 **Reading and analyzing `{target}`...**")
             try:
-                with open(target, "r", encoding="utf-8", errors="ignore") as f:
+                with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
             except Exception as e:
                 await status_msg.edit(f"❌ **Error reading file**: {e}")

@@ -12,9 +12,18 @@ class AITuner:
     Analyzes historical trade metrics and invokes Gemini AI model
     to suggest and dynamically apply optimal strategy parameters.
     """
+    # The tuner rewrites live trading parameters from raw model output, so its
+    # ceiling is anchored to the operator's configured size rather than an
+    # absolute cap. Without this, one bad number could raise a 0.005 SOL position
+    # to 1.5 SOL — a 300x jump — with nobody in the loop.
+    MAX_BUY_MULTIPLE = 2.0
+    ABSOLUTE_MAX_BUY_SOL = 1.5
+
     def __init__(self, bot_instance):
         self._bot = bot_instance
         self.last_run_timestamp = 0
+        # Captured once, before any tuning, so repeated runs cannot ratchet upward.
+        self._baseline_buy_sol = float(bot_instance._config.jupiter.buy_amount_sol)
 
     async def get_closed_trades_summary(self) -> Tuple[List[dict], dict]:
         """Fetches recent closed positions from the database and returns a summary KPI dict."""
@@ -182,12 +191,24 @@ class AITuner:
                 return False, "Failed to generate suggestions. No trades or API error."
 
             # Clamping parameters to safety boundaries
-            new_buy = max(0.005, min(1.5, float(suggestions.get("buy_amount_sol", 0.05))))
+            buy_ceiling = min(
+                self._baseline_buy_sol * self.MAX_BUY_MULTIPLE, self.ABSOLUTE_MAX_BUY_SOL
+            )
+            new_buy = max(0.005, min(buy_ceiling, float(suggestions.get("buy_amount_sol", 0.05))))
             new_stop = max(0.05, min(0.35, float(suggestions.get("trailing_stop_pct", 0.20))))
             new_slippage = max(100, min(1500, int(suggestions.get("slippage_bps", 300))))
             new_ai_min = max(60, min(95, int(suggestions.get("ai_min_score", 75))))
             new_kol_threshold = max(1, min(5, int(suggestions.get("kol_threshold", 2))))
             reason = suggestions.get("reason", "Autotuning triggered.")
+
+            prev_buy = float(self._bot._config.jupiter.buy_amount_sol)
+            prev_slippage = int(self._bot._config.jupiter.slippage_bps)
+            logger.warning(
+                "AI tuner applying live parameter change: buy_amount_sol %.4f -> %.4f "
+                "(baseline %.4f, ceiling %.4f), slippage_bps %s -> %s, reason: %s",
+                prev_buy, new_buy, self._baseline_buy_sol, buy_ceiling,
+                prev_slippage, new_slippage, reason,
+            )
 
             # Apply using object.__setattr__ to bypass dataclass freeze
             object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", new_buy)

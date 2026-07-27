@@ -372,8 +372,15 @@ class AIFilter:
         if bedrock_score is not None:
             return bedrock_score
         
-        logger.warning("AI scoring failed (API keys invalid or service down). Falling back to passing score 80.")
-        return 80
+        # AI_FAIL_OPEN_SCORE defaults to 0 so an outage rejects rather than waves
+        # every launch through: a passing score here means a dead provider chain
+        # silently disables the safety filter entirely.
+        fail_score = int(getattr(self._config.ai, "fail_open_score", 0))
+        logger.warning(
+            "AI scoring failed (API keys invalid or service down). Falling back to score %s.",
+            fail_score,
+        )
+        return fail_score
 
     async def detect_rug_risks(self, token_mint: str, creator: str, holders: list, creator_history: list) -> dict:
         """

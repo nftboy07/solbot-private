@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict
 
 
@@ -215,7 +215,17 @@ PROFILES: Dict[str, FilterProfile] = {
 
 def get_profile(name: str) -> FilterProfile:
     key = (name or "degen").lower()
-    return PROFILES.get(key, PROFILES["degen"])
+    profile = PROFILES.get(key, PROFILES["degen"])
+    # RECYCLE_MODE lets an operator turn off capital rotation without editing a
+    # profile. With it on, hitting the position cap force-sells an existing bag to
+    # fund the next snipe, so positions are churned out within seconds and never
+    # live long enough to reach the first take-profit rung.
+    override = os.getenv("RECYCLE_MODE", "").strip().lower()
+    if override in ("0", "false", "off", "no"):
+        profile = replace(profile, recycle_mode=False)
+    elif override in ("1", "true", "on", "yes"):
+        profile = replace(profile, recycle_mode=True)
+    return profile
 
 
 def default_profile_name() -> str:

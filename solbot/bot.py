@@ -299,7 +299,10 @@ class Solbot:
 
         if self._owns_db:
             await self._db.connect()
-        self._wallet = Wallet(self._config.solana)
+        self._wallet = Wallet(
+            self._config.solana,
+            allow_ephemeral=getattr(self._config.strategy, "dry_run", False),
+        )
         self._filter = TokenFilter(self._config)
         self._pump_client = PumpFunClient(self._config, self._wallet)
         self._pump_client._network_manager = self._network_manager
@@ -347,11 +350,15 @@ class Solbot:
         self.ensure_live_trading()
         self._processed_mints.update(self._positions.keys())
         try:
-            rows = await self._db._execute_read("SELECT mint, status FROM positions")
+            rows = await self._db._execute_read(
+                "SELECT mint, status, entry_price, size, timestamp, reason FROM positions"
+            )
             db_statuses = {}
+            db_rows = {}
             for r in rows:
                 self._processed_mints.add(r['mint'])
                 db_statuses[r['mint']] = r['status']
+                db_rows[r['mint']] = r
             logger.info(f"Loaded {len(self._processed_mints)} historically traded mints into memory.")
             reconciled_count = 0
             for mint, pos in list(self._positions.items()):
@@ -360,7 +367,10 @@ class Solbot:
                     pos.active = False
                     self._positions.pop(mint, None)
                     reconciled_count += 1
-            if reconciled_count > 0:
+
+            restored_count = self._restore_orphaned_open_positions(db_statuses, db_rows)
+
+            if reconciled_count > 0 or restored_count > 0:
                 logger.info(f"Reconciled {reconciled_count} positions against database (marked closed).")
                 self._save_state()
             self._position_counter = len(self._processed_mints)
@@ -440,6 +450,42 @@ class Solbot:
             except Exception as exc:
                 logger.debug("Heartbeat error: %s", exc)
             await asyncio.sleep(10)
+
+    def _restore_orphaned_open_positions(self, db_statuses: Dict[str, str], db_rows: Dict[str, Any]) -> int:
+        """Bring back open positions the database knows about but state.json lost.
+
+        state.json is not the only record of an open bag. If it is truncated, lost,
+        or written during a crash, any position missing from it never gets a
+        position manager, so no stop-loss, take-profit or trailing stop can ever
+        evaluate it and the bag can never be exited. The on-chain reconcile that
+        runs straight after this drops anything no longer actually held.
+        """
+        restored = 0
+        for mint, status in db_statuses.items():
+            if status != 'open' or mint in self._positions:
+                continue
+            row = db_rows.get(mint)
+            if row is None:
+                continue
+            try:
+                self._positions[mint] = Position(
+                    mint=mint,
+                    symbol=mint[:8],
+                    entry_price=float(row['entry_price'] or 0.0),
+                    entry_liq=0.0,
+                    creator="",
+                    size=float(row['size'] or 0.0),
+                    start_time=float(row['timestamp'] or time()),
+                )
+                restored += 1
+            except Exception as e:
+                logger.error(f"Could not restore orphaned position {mint[:8]}: {e}")
+        if restored:
+            logger.warning(
+                f"Restored {restored} open positions present in the database but missing from "
+                f"{self._state_file} — these had no position manager and could not be exited."
+            )
+        return restored
 
     def _spawn_position_manager(self, pos: Position):
         existing = self._position_manager_tasks.get(pos.mint)
@@ -584,14 +630,19 @@ class Solbot:
                 continue
             chain = on_chain.get(mint, {})
             balance = float(chain.get("balance", 0) or 0)
+            # Token-2022 on its own is not a problem — pump.fun mints new tokens
+            # under it. Only specific extensions actually block a sell.
+            block_reason = None
             if chain.get("program") == "Token-2022":
+                block_reason = await self._pump_client.token_2022_block_reason(mint)
+            if block_reason:
                 pos.is_mayhem = True
                 pos.active = False
                 self._positions.pop(mint, None)
                 purged.append(mint)
                 logger.warning(
-                    "Untracking mayhem bag %s (%s) — unsellable Token-2022",
-                    pos.symbol, mint[:8],
+                    "Untracking mayhem bag %s (%s) — %s",
+                    pos.symbol, mint[:8], block_reason,
                 )
                 asyncio.create_task(self._db.update_position_pnl(mint, 0.0, "closed"))
             elif balance <= 0:
@@ -1847,6 +1898,11 @@ class Solbot:
         pos.remaining_fraction = max(0.0, getattr(pos, "remaining_fraction", 1.0) - actual_pct_sold)
         
         sell_profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+        # In paper mode the client has no price feed of its own; hand it the live
+        # ROI so simulated proceeds track the real market.
+        if getattr(self._pump_client, "paper_enabled", False) and pos.entry_price > 0:
+            current = getattr(pos, "current_price", 0.0) or pos.entry_price
+            self._pump_client.set_paper_mark(pos.mint, current / pos.entry_price)
         result = await self._pump_client.execute_trade(
             pos.mint,
             action="sell",

@@ -13,6 +13,21 @@ from solders.pubkey import Pubkey
 
 logger = logging.getLogger("bot.filters")
 
+# Major established mints. These are never a "new pump.fun launch", and buying one
+# corrupts everything downstream: a live paper run sniped USDC, whose multi-billion
+# market cap against a fresh-launch entry price booked a 2,200,000x ROI, which would
+# trip every take-profit rung at once and poison the stats the AI tuner reads.
+ESTABLISHED_MINTS: Set[str] = {
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+    "So11111111111111111111111111111111111111112",   # wSOL
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
+    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",   # JUP
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",   # mSOL
+    "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",  # ETH (Wormhole)
+    "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",  # BTC (Sollet)
+}
+
 @dataclass
 class WalletScore:
     address: str
@@ -253,6 +268,12 @@ class TokenFilter:
     async def is_qualified(self, token: TokenEvent, sol_price: float = 150.0, ai_score: float = 80.0, creator_score: float = 50.0) -> Tuple[bool, float, float]:
         """Check if a token meets snipe criteria for the active filter profile."""
         p = self._profile
+        if token.mint in ESTABLISHED_MINTS:
+            logger.warning(
+                "Skipping %s (%s): established mint, not a new launch",
+                token.symbol, token.mint[:8],
+            )
+            return self._reject("established mint")
         if token.mint in self._blacklisted_tokens:
             return self._reject("mint blacklisted")
 

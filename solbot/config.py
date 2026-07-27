@@ -79,6 +79,13 @@ class JupiterConfig:
 @dataclass(frozen=True)
 class StrategyConfig:
     mode: BotMode = BotMode.NORMAL
+    # Paper trading: run the full decision, entry and exit lifecycle against live
+    # market prices but never sign or broadcast a transaction. Lets the strategy
+    # be proven end to end before the wallet is funded.
+    dry_run: bool = field(default_factory=lambda: _env_bool("DRY_RUN", False))
+    dry_run_start_sol: float = field(
+        default_factory=lambda: float(os.getenv("DRY_RUN_START_SOL", "1.0"))
+    )
     min_confidence_score: int = 75
     tp_targets: list[dict] = field(default_factory=lambda: [
         {"multiplier": 1.3, "sell_pct": 0.25},
@@ -203,7 +210,7 @@ class BotConfig:
 
     def validate(self) -> list[str]:
         errors = []
-        if not self.solana.private_key:
+        if not self.solana.private_key and not self.strategy.dry_run:
             errors.append("WALLET_PRIVATE_KEY is required")
         if self.jupiter.slippage_bps < 0 or self.jupiter.slippage_bps > 10000:
             errors.append("SLIPPAGE_BPS must be between 0 and 10000")
