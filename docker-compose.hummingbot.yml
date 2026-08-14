@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  hummingbot-gateway:
+    image: hummingbot/gateway:latest
+    container_name: hummingbot-gateway
+    restart: unless-stopped
+    ports:
+      - "15888:15888"
+    environment:
+      - GATEWAY_PASSPHRASE=${HUMMINGBOT_PASSPHRASE:-solbot_gateway_passphrase}
+    volumes:
+      - ./data/gateway/conf:/home/gateway/conf
+      - ./data/gateway/certs:/home/gateway/certs
+      - ./data/gateway/logs:/home/gateway/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:15888/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  hummingbot-client:
+    image: hummingbot/hummingbot:latest
+    container_name: hummingbot-client
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      - CONFIG_PASSWORD=${HUMMINGBOT_PASSPHRASE:-solbot_gateway_passphrase}
+    volumes:
+      - ./data/hummingbot/conf:/home/hummingbot/conf
+      - ./data/hummingbot/logs:/home/hummingbot/logs
+      - ./data/hummingbot/scripts:/home/hummingbot/scripts
+      - ./data/gateway/certs:/home/hummingbot/certs
+    depends_on:
+      - hummingbot-gateway

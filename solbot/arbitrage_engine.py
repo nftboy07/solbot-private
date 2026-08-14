@@ -186,6 +186,32 @@ class DEXArbitrageEngine:
             async with self._session.get(f"{base_url}/quote", params=params) as resp:
                 if resp.status != 200:
                     logger.debug("Quote miss for %s route %s -> %s: %s", dex, input_mint, output_mint, resp.status)
+                    # Attempt Hummingbot Gateway quote fallback if enabled
+                    if (
+                        hasattr(self._bot, "_hummingbot_gateway")
+                        and self._bot._hummingbot_gateway
+                        and getattr(self._bot._config, "hummingbot", None)
+                        and self._bot._config.hummingbot.enabled
+                    ):
+                        gw_connector = dex.lower().replace(".", "").replace(" ", "")
+                        gw_quote = await self._bot._hummingbot_gateway.get_quote(
+                            connector=gw_connector,
+                            base_token=output_mint if input_mint == SOL_MINT else input_mint,
+                            quote_token="SOL",
+                            amount=amount / 1e9 if input_mint == SOL_MINT else float(amount),
+                            side="BUY" if input_mint == SOL_MINT else "SELL",
+                        )
+                        if gw_quote and "expectedOutput" in gw_quote:
+                            out_amt = int(float(gw_quote["expectedOutput"]) * (1e9 if output_mint == SOL_MINT else 1))
+                            if out_amt > 0:
+                                return RouteQuote(
+                                    dex=dex,
+                                    input_mint=input_mint,
+                                    output_mint=output_mint,
+                                    in_amount=amount,
+                                    out_amount=out_amt,
+                                    quote=gw_quote,
+                                )
                     return None
                 quote = await resp.json()
         except Exception as exc:

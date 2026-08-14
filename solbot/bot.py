@@ -49,6 +49,8 @@ from solbot.agi_prebuy_filter import AGIPreBuyFilter
 from solbot.observability import ObservabilityHub
 from solbot.ml.inference import InferenceEngine
 from solbot.agi_brain import AGIBrain
+from solbot.hummingbot_gateway import HummingbotGatewayClient
+from solbot.hummingbot_pmm import HummingbotPMMManager
 
 def _format_tokens(amount: float) -> str:
     if amount >= 1_000_000_000:
@@ -173,6 +175,8 @@ class Solbot:
             url=self._config.paste_trade.api_url,
             handle=self._config.paste_trade.handle,
         )
+        self._hummingbot_gateway = HummingbotGatewayClient(self._config.hummingbot)
+        self._hummingbot_pmm = HummingbotPMMManager(self, self._config.hummingbot)
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -428,6 +432,8 @@ class Solbot:
         self._congestion_poller = asyncio.create_task(self._poll_network_congestion())
         self._autotune_poller = asyncio.create_task(self._ai_autotune_loop())
         asyncio.create_task(self._component_heartbeat_loop())
+        if self._config.hummingbot.enabled:
+            await self._hummingbot_pmm.start()
 
     def _sentiment_for_mint(self, mint: str) -> str:
         info = self._kol_mentions.get(mint)
@@ -2807,6 +2813,26 @@ class Solbot:
                         
             except Exception as e:
                 logger.error(f"Error handling coordinated KOL mention trigger: {e}")
+
+    async def stop(self):
+        """Gracefully stop Solbot and all child services."""
+        self._running = False
+        if hasattr(self, "_hummingbot_pmm") and self._hummingbot_pmm:
+            await self._hummingbot_pmm.stop()
+        if hasattr(self, "_hummingbot_gateway") and self._hummingbot_gateway:
+            await self._hummingbot_gateway.close()
+        if hasattr(self, "_paste_trade") and self._paste_trade:
+            await self._paste_trade.close()
+        if self._monitor:
+            self._monitor.stop()
+        if self._pump_client:
+            await self._pump_client.close()
+        if self._jupiter:
+            await self._jupiter.close()
+        if self._telegram:
+            await self._telegram.stop()
+        self._save_state()
+        logger.info("Solbot stopped gracefully.")
 
 async def run_bot():
     config = BotConfig()

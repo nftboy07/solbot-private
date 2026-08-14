@@ -191,6 +191,20 @@ class PasteTradeConfig:
 
 
 @dataclass(frozen=True)
+class HummingbotConfig:
+    enabled: bool = field(default_factory=lambda: _env_bool("HUMMINGBOT_ENABLED", False))
+    gateway_url: str = field(default_factory=lambda: os.getenv("HUMMINGBOT_GATEWAY_URL", "http://127.0.0.1:15888"))
+    network: str = field(default_factory=lambda: os.getenv("HUMMINGBOT_NETWORK", "mainnet-beta"))
+    cert_path: str = field(default_factory=lambda: os.getenv("HUMMINGBOT_CERT_PATH", ""))
+    key_path: str = field(default_factory=lambda: os.getenv("HUMMINGBOT_KEY_PATH", ""))
+    passphrase: str = field(default_factory=lambda: os.getenv("HUMMINGBOT_PASSPHRASE", ""))
+    timeout_seconds: float = field(default_factory=lambda: float(os.getenv("HUMMINGBOT_TIMEOUT_SECONDS", "10.0")))
+    pmm_default_spread_bps: int = field(default_factory=lambda: int(os.getenv("HUMMINGBOT_PMM_SPREAD_BPS", "150")))
+    pmm_order_refresh_seconds: float = field(default_factory=lambda: float(os.getenv("HUMMINGBOT_PMM_REFRESH_SECONDS", "15.0")))
+    pmm_max_inventory_sol: float = field(default_factory=lambda: float(os.getenv("HUMMINGBOT_PMM_MAX_INVENTORY_SOL", "0.5")))
+
+
+@dataclass(frozen=True)
 class BotConfig:
     solana: SolanaConfig = field(default_factory=SolanaConfig)
     pumpfun: PumpFunConfig = field(default_factory=PumpFunConfig)
@@ -204,6 +218,7 @@ class BotConfig:
     cabal: CabalConfig = field(default_factory=CabalConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
     paste_trade: PasteTradeConfig = field(default_factory=PasteTradeConfig)
+    hummingbot: HummingbotConfig = field(default_factory=HummingbotConfig)
     proxy_url: str = field(default_factory=lambda: os.getenv("PROXY_URL", ""))
     proxy_list_path: str = field(default_factory=lambda: os.getenv("PROXY_LIST_PATH", "data/proxies.txt"))
     residential_proxy: str = field(default_factory=lambda: os.getenv("RESIDENTIAL_PROXY", ""))

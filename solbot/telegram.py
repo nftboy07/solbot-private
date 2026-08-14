@@ -309,6 +309,18 @@ class TelegramController:
         async def autotune_handler(event):
             await self._cmd_autotune(event)
 
+        @self._client.on(events.NewMessage(pattern='/hummingbot'))
+        async def hummingbot_handler(event):
+            await self._cmd_hummingbot(event)
+
+        @self._client.on(events.NewMessage(pattern='/pmm'))
+        async def pmm_handler(event):
+            await self._cmd_pmm(event)
+
+        @self._client.on(events.NewMessage(pattern='/stoppmm'))
+        async def stoppmm_handler(event):
+            await self._cmd_stoppmm(event)
+
         @self._client.on(events.NewMessage(pattern='/rpcbalancer'))
         async def rpcbalancer_handler(event):
             await self._cmd_rpcbalancer(event)
@@ -2704,6 +2716,83 @@ class TelegramController:
 
         report = await mapper.get_holder_relationship_map(mint_address, rpc_url)
         await event.reply(report, parse_mode='html')
+
+    async def _cmd_hummingbot(self, event):
+        if not await self._require_admin(event):
+            return
+        gw = getattr(self._bot, "_hummingbot_gateway", None)
+        pmm = getattr(self._bot, "_hummingbot_pmm", None)
+        gw_status = "❌ Not Initialized"
+        connectors_str = "None"
+        if gw:
+            status_info = await gw.get_status()
+            if status_info.get("reachable"):
+                gw_status = f"🟢 Connected ({status_info.get('gateway_url')})"
+                connectors = status_info.get("connectors", [])
+                if connectors:
+                    connectors_str = ", ".join(c.get("name", str(c)) for c in connectors[:5])
+            else:
+                gw_status = f"🔴 Unreachable ({status_info.get('gateway_url')})"
+
+        sessions_count = len(pmm.get_sessions()) if pmm else 0
+        text = (
+            "🤖 <b>Hummingbot Gateway & PMM Status</b>\n\n"
+            f"• <b>Gateway Status:</b> {gw_status}\n"
+            f"• <b>Network:</b> <code>{getattr(self._bot._config.hummingbot, 'network', 'mainnet-beta')}</code>\n"
+            f"• <b>Connected DEXes:</b> <i>{connectors_str}</i>\n"
+            f"• <b>Active PMM Sessions:</b> <code>{sessions_count}</code>\n\n"
+            "<b>Commands:</b>\n"
+            "• <code>/pmm &lt;mint&gt; [spread_bps] [amount_sol]</code> — Start Pure Market Making / Grid\n"
+            "• <code>/stoppmm &lt;mint&gt;</code> — Stop active PMM session"
+        )
+        await event.reply(text, parse_mode="html")
+
+    async def _cmd_pmm(self, event):
+        if not await self._require_admin(event):
+            return
+        args = event.message.text.split()
+        if len(args) < 2:
+            await event.reply(
+                "📈 <b>Pure Market Making / Grid Trading</b>\n"
+                "Usage: <code>/pmm &lt;mint&gt; [spread_bps] [amount_sol]</code>\n"
+                "Example: <code>/pmm 7xKX... 150 0.1</code> (1.5% spread, 0.1 SOL order size)",
+                parse_mode="html",
+            )
+            return
+        mint = args[1]
+        spread_bps = int(args[2]) if len(args) > 2 and args[2].isdigit() else None
+        amount_sol = float(args[3]) if len(args) > 3 else None
+        pmm = getattr(self._bot, "_hummingbot_pmm", None)
+        if not pmm:
+            await event.reply("❌ Hummingbot PMM engine is not initialized.")
+            return
+        session = await pmm.start_session(mint=mint, base_spread_bps=spread_bps, order_amount_sol=amount_sol)
+        await event.reply(
+            f"✅ <b>Hummingbot PMM Launched!</b>\n\n"
+            f"• <b>Mint:</b> <code>{mint}</code>\n"
+            f"• <b>Base Spread:</b> <code>{session.base_spread_bps} bps</code> ({session.base_spread_bps/100:.2f}%)\n"
+            f"• <b>Order Size:</b> <code>{session.order_amount_sol:.4f} SOL</code>\n"
+            f"• <b>Inventory Skew:</b> Enabled",
+            parse_mode="html",
+        )
+
+    async def _cmd_stoppmm(self, event):
+        if not await self._require_admin(event):
+            return
+        args = event.message.text.split()
+        if len(args) < 2:
+            await event.reply("Usage: <code>/stoppmm &lt;mint&gt;</code>", parse_mode="html")
+            return
+        mint = args[1]
+        pmm = getattr(self._bot, "_hummingbot_pmm", None)
+        if not pmm:
+            await event.reply("❌ Hummingbot PMM engine is not initialized.")
+            return
+        stopped = await pmm.stop_session(mint)
+        if stopped:
+            await event.reply(f"⏹ <b>PMM Session stopped for:</b> <code>{mint}</code>", parse_mode="html")
+        else:
+            await event.reply(f"⚠️ No active PMM session found for <code>{mint}</code>.", parse_mode="html")
 
 
 class TelegramManager(TelegramController):
