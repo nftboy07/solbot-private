@@ -325,6 +325,10 @@ class TelegramController:
         async def runners_handler(event):
             await self._cmd_runners(event)
 
+        @self._client.on(events.NewMessage(pattern='/demostats'))
+        async def demostats_handler(event):
+            await self._cmd_demostats(event)
+
         @self._client.on(events.NewMessage(pattern='/rpcbalancer'))
         async def rpcbalancer_handler(event):
             await self._cmd_rpcbalancer(event)
@@ -2807,6 +2811,38 @@ class TelegramController:
             return
         report = engine.get_summary_report()
         await event.reply(report, parse_mode="html")
+
+    async def _cmd_demostats(self, event):
+        if not await self._require_admin(event):
+            return
+        is_dry_run = getattr(self._bot._config.strategy, "dry_run", False)
+        start_sol = getattr(self._bot._config.strategy, "dry_run_start_sol", 5.0)
+        current_sol = getattr(self._bot._risk_manager, "bankroll_sol", start_sol)
+        net_pnl = current_sol - start_sol
+        pnl_pct = (net_pnl / max(start_sol, 0.001)) * 100.0
+
+        positions = list(self._bot._positions.values())
+        active_positions = [p for p in positions if getattr(p, "active", True)]
+        closed_positions = [p for p in positions if not getattr(p, "active", True)]
+
+        wins = [p for p in closed_positions if getattr(p, "highest_price", 0) > getattr(p, "entry_price", 1)]
+        win_rate = (len(wins) / len(closed_positions) * 100) if closed_positions else 0.0
+
+        status_emoji = "🟢 PROFITABLE" if net_pnl >= 0 else "🔴 DRAWDOWN"
+
+        msg = (
+            f"🧪 <b>24-HOUR DEMO TRADING SCORECARD</b> 🧪\n\n"
+            f"• <b>Mode:</b> <code>{'DRY RUN (Paper Trading)' if is_dry_run else 'LIVE'}</code>\n"
+            f"• <b>Status:</b> <b>{status_emoji}</b>\n"
+            f"• <b>Virtual Starting Balance:</b> <code>{start_sol:.3f} SOL</code>\n"
+            f"• <b>Current Virtual Balance:</b> <code>{current_sol:.3f} SOL</code>\n"
+            f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.3f} SOL ({pnl_pct:+.1f}%)</code>\n\n"
+            f"• <b>Open Active Positions:</b> <code>{len(active_positions)}</code>\n"
+            f"• <b>Closed Trades:</b> <code>{len(closed_positions)}</code>\n"
+            f"• <b>Win Rate:</b> <code>{win_rate:.1f}%</code>\n\n"
+            f"<i>Strategy: Missed Runner Clone Sniper + Dynamic Kelly Sizer + 4-Tier Moonbag Exit</i>"
+        )
+        await event.reply(msg, parse_mode="html")
 
 
 class TelegramManager(TelegramController):
