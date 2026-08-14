@@ -2,9 +2,11 @@ import subprocess
 import os
 import sys
 
-VPS_HOST = "13.201.69.107"
-VPS_USER = "root"
-KEY_PATH = r"C:\Users\91907\.ssh\id_ed25519"
+VPS_HOST = os.environ.get("VPS_HOST", "")
+VPS_USER = os.environ.get("VPS_USER", "root")
+KEY_PATH = os.environ.get("VPS_KEY_PATH", "")
+if not VPS_HOST or not KEY_PATH:
+    sys.exit("Set VPS_HOST and VPS_KEY_PATH in the environment before running this script.")
 LOCAL_DIR = r"C:\Users\91907\Documents\New project\solbot-private-ai-fix"
 REMOTE_DIR = "/root/solbot-production"
 
