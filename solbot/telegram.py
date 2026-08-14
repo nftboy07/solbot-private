@@ -330,6 +330,18 @@ class TelegramController:
         async def demostats_handler(event):
             await self._cmd_demostats(event)
 
+        @self._client.on(events.NewMessage(pattern='/livestats'))
+        async def livestats_handler(event):
+            await self._cmd_livestats(event)
+
+        @self._client.on(events.NewMessage(pattern='/demo'))
+        async def demo_toggle_handler(event):
+            await self._cmd_demo_toggle(event)
+
+        @self._client.on(events.NewMessage(pattern='/panic|/sellall'))
+        async def panic_handler(event):
+            await self._cmd_panic(event)
+
         @self._client.on(events.NewMessage(pattern='/silent|/mute'))
         async def silent_handler(event):
             await self._cmd_silent(event)
@@ -2102,19 +2114,45 @@ class TelegramController:
             return
         if hasattr(self._bot, "ensure_live_trading"):
             self._bot.ensure_live_trading()
+        self._paper_mode = False
+        if hasattr(self._bot, '_config') and hasattr(self._bot._config, 'strategy'):
+            object.__setattr__(self._bot._config.strategy, 'dry_run', False)
+        if self._bot._pump_client and hasattr(self._bot._pump_client, '_paper_enabled'):
+            self._bot._pump_client._paper_enabled = False
         bal = 0.0
         if self._bot._pump_client:
             try:
                 bal = await self._bot._pump_client.get_sol_balance()
             except Exception:
                 pass
+        wallet_addr = getattr(self._bot._wallet, "pubkey_str", "Unknown")
         await event.reply(
-            "🟢 <b>Live trading enforced</b>\n"
-            f"Autobuy: <code>ON</code>\n"
-            f"Paper: <code>OFF</code>\n"
-            f"Kill: <code>OFF</code>\n"
-            f"Profile: <code>{getattr(self._bot, '_filter_profile_name', 'degen')}</code>\n"
-            f"Wallet: <code>{bal:.4f} SOL</code>"
+            "🔴 <b>LIVE ON-CHAIN TRADING ACTIVATED</b> 🔴\n\n"
+            f"• <b>Trading Mode:</b> <code>LIVE (Real SOL)</code>\n"
+            f"• <b>Autobuy:</b> <code>ENABLED</code>\n"
+            f"• <b>Jito MEV Bundles:</b> <code>ARMED</code>\n"
+            f"• <b>Portfolio Guard:</b> <code>ACTIVE</code>\n"
+            f"• <b>Wallet:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code>\n"
+            f"• <b>SOL Balance:</b> <code>{bal:.4f} SOL</code>\n\n"
+            "<i>Use <code>/livestats</code> to track on-chain performance or <code>/demo</code> to switch back.</i>",
+            parse_mode="html"
+        )
+
+    async def _cmd_demo_toggle(self, event):
+        if not await self._require_admin(event):
+            return
+        self._paper_mode = True
+        if hasattr(self._bot, '_config') and hasattr(self._bot._config, 'strategy'):
+            object.__setattr__(self._bot._config.strategy, 'dry_run', True)
+        if self._bot._pump_client and hasattr(self._bot._pump_client, '_paper_enabled'):
+            self._bot._pump_client._paper_enabled = True
+        await event.reply(
+            "🟡 <b>DEMO (PAPER TRADING) MODE ACTIVATED</b>\n\n"
+            "• <b>Trading Mode:</b> <code>DRY RUN (Simulated)</code>\n"
+            "• <b>Virtual Bankroll:</b> <code>5.000 SOL</code>\n"
+            "• <b>Execution:</b> <code>Paper Fills</code>\n\n"
+            "<i>Use <code>/demostats</code> to check your 24-hour demo scorecard.</i>",
+            parse_mode="html"
         )
 
     async def _cmd_stats(self, event):
@@ -2210,37 +2248,165 @@ class TelegramController:
     async def _cmd_active(self, event):
         await self.log_brain_event('active', 'Active positions checked')
         positions = getattr(self._bot, '_positions', {})
-        active = {m: p for m, p in positions.items() if p.active}
+        active = {m: p for m, p in positions.items() if getattr(p, "active", True)}
         if not active:
-            await event.reply("<b>📍 ACTIVE POSITIONS</b>\nNo active positions.")
+            await event.reply("<b>📍 ACTIVE POSITIONS</b>\nNo open positions right now.", parse_mode="html")
             return
-        lines = ["<b>📍 ACTIVE POSITIONS</b>"]
+
+        sol_p = getattr(self, "_sol_price", 150.0) or 150.0
+        lines = [f"<b>📍 ACTIVE POSITIONS ({len(active)} open)</b>\n"]
         for mint, pos in active.items():
-            entry = pos.entry_price
-            current = pos.current_price
+            entry = getattr(pos, "entry_price", 0.0)
+            current = getattr(pos, "current_price", 0.0)
+            if (current <= 0 or current == entry) and self._bot._pump_client:
+                try:
+                    live_p = await self._bot._pump_client.get_bonding_curve_mcap(mint, sol_p)
+                    if live_p > 0:
+                        pos.current_price = live_p
+                        current = live_p
+                except Exception:
+                    pass
+            current = current or entry
             roi = ((current / entry) - 1.0) * 100 if entry > 0 else 0.0
-            lines.append(f"• <code>{pos.symbol}</code> (<code>{mint[:8]}</code>) | Size: <code>{pos.size} SOL</code> | ROI: <code>{roi:+.2f}%</code>")
-        await event.reply("\n".join(lines))
+            mult = (current / entry) if entry > 0 else 1.0
+            entry_str = f"${entry/1000:.1f}k" if entry < 1_000_000 else f"${entry/1_000_000:.2f}M"
+            curr_str = f"${current/1000:.1f}k" if current < 1_000_000 else f"${current/1_000_000:.2f}M"
+            lines.append(
+                f"• <b>{getattr(pos, 'symbol', mint[:6])}</b> (<code>{mint[:8]}</code>)\n"
+                f"  Entry: <code>{entry_str}</code> ➔ Current: <code>{curr_str}</code> (<b>{mult:.2f}x</b> | <code>{roi:+.1f}%</code>)\n"
+                f"  Size: <code>{getattr(pos, 'size', 0.0):.3f} SOL</code> | Moonbag: <code>{'YES' if getattr(pos, 'is_moonbag', False) else 'NO'}</code>\n"
+                f"  👉 <a href='https://pump.fun/{mint}'>pump.fun</a>"
+            )
+            if len(lines) > 12:
+                lines.append(f"\n<i>...and {len(active)-10} more active positions</i>")
+                break
+
+        await event.reply("\n".join(lines), parse_mode="html", link_preview=False)
 
     async def _cmd_closed(self, event):
         await self.log_brain_event('closed', 'Closed positions checked')
         db = getattr(self._bot, '_db', None)
-        msg = ["<b>📜 LAST 10 CLOSED TRADES</b>"]
+        msg = ["<b>📜 RECENT CLOSED TRADES</b>\n"]
         if db:
             try:
                 rows = await db._execute_read(
-                    "SELECT mint, pnl FROM positions WHERE status = 'closed' ORDER BY timestamp DESC LIMIT 10"
+                    "SELECT mint, pnl, entry_price, exit_marketcap, reason, timestamp FROM positions WHERE status = 'closed' ORDER BY timestamp DESC LIMIT 10"
                 )
                 if rows:
                     for r in rows:
                         pnl = float(r['pnl'] or 0.0)
                         roi = pnl * 100.0
-                        msg.append(f"• <code>{r['mint'][:8]}</code>... | ROI: <code>{roi:+.2f}%</code>")
+                        mint = r['mint'] or "Unknown"
+                        reason = r['reason'] or "Exit"
+                        msg.append(f"• <code>{mint[:8]}...</code> | PnL: <code>{roi:+.1f}%</code> | <i>{reason}</i>")
                 else:
-                    msg.append("No closed trades recorded.")
+                    msg.append("No closed trades recorded yet.")
             except Exception as e:
                 msg.append(f"Error: {e}")
-        await event.reply("\n".join(msg))
+        await event.reply("\n".join(msg), parse_mode="html")
+
+    async def _cmd_panic(self, event):
+        if not await self._require_admin(event):
+            return
+        positions = getattr(self._bot, '_positions', {})
+        active = [p for p in positions.values() if getattr(p, "active", True)]
+        if not active:
+            await event.reply("⚠️ No active positions to liquidate.")
+            return
+
+        status_msg = await event.reply(f"🚨 <b>EMERGENCY SELL-ALL INITIATED!</b>\nLiquidating <code>{len(active)}</code> active positions in parallel...", parse_mode="html")
+        tasks = []
+        for p in active:
+            tasks.append(self._bot._exit_position(p, "Emergency Panic Sell", 1.0))
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await status_msg.edit(f"✅ <b>All {len(active)} active positions liquidated!</b>", parse_mode="html")
+
+    async def _cmd_livestats(self, event):
+        if not await self._require_admin(event):
+            return
+        is_dry_run = getattr(self._bot._config.strategy, "dry_run", True)
+        wallet_addr = getattr(self._bot._wallet, "pubkey_str", "Unknown")
+        bal_sol = 0.0
+        if self._bot._pump_client:
+            try:
+                bal_sol = await self._bot._pump_client.get_sol_balance()
+            except Exception:
+                bal_sol = 0.0
+
+        positions = list(self._bot._positions.values())
+        active_positions = [p for p in positions if getattr(p, "active", True)]
+        closed_positions = [p for p in positions if not getattr(p, "active", True)]
+
+        # Calculate realized PnL
+        realized_pnl = 0.0
+        for p in closed_positions:
+            entry = getattr(p, "entry_price", 0.0)
+            exit_p = getattr(p, "current_price", entry)
+            size = getattr(p, "size", 0.0)
+            if entry > 0:
+                realized_pnl += ((exit_p - entry) / entry) * size
+
+        # Update live prices for active positions
+        unrealized_pnl = 0.0
+        pos_lines = []
+        sol_p = getattr(self, "_sol_price", 150.0) or 150.0
+        for p in active_positions:
+            entry = getattr(p, "entry_price", 0.0)
+            current = getattr(p, "current_price", 0.0)
+            if (current <= 0 or current == entry) and self._bot._pump_client:
+                try:
+                    live_p = await self._bot._pump_client.get_bonding_curve_mcap(p.mint, sol_p)
+                    if live_p > 0:
+                        p.current_price = live_p
+                        current = live_p
+                except Exception:
+                    pass
+            current = current or entry
+            size = getattr(p, "size", 0.0)
+            p_gain_pct = 0.0
+            if entry > 0:
+                p_pnl = ((current - entry) / entry) * size
+                p_gain_pct = ((current / entry) - 1.0) * 100.0
+                unrealized_pnl += p_pnl
+            pos_lines.append(f"• <b>{getattr(p, 'symbol', p.mint[:6])}</b>: <code>{p_gain_pct:+.1f}%</code> ({size:.3f} SOL)")
+
+        net_pnl = realized_pnl + unrealized_pnl
+        wins = [p for p in closed_positions if getattr(p, "highest_price", 0) > getattr(p, "entry_price", 1)]
+        win_rate = (len(wins) / len(closed_positions) * 100) if closed_positions else 0.0
+
+        if len(closed_positions) == 0 and len(active_positions) == 0:
+            status_emoji = "🟢 READY (Zero Open Positions)"
+        elif net_pnl >= 0:
+            status_emoji = "🟢 PROFITABLE"
+        else:
+            status_emoji = "🔴 DRAWDOWN"
+
+        uptime_min = self._bot._stats.uptime_seconds() / 60.0 if getattr(self._bot, "_stats", None) else 0.0
+
+        msg = [
+            "⚡ <b>LIVE ON-CHAIN TRADING SCORECARD</b> ⚡",
+            "",
+            f"• <b>Mode:</b> <code>{'🔴 LIVE (Real SOL)' if not is_dry_run else '🟡 DRY RUN (Paper)'}</code>",
+            f"• <b>Status:</b> <b>{status_emoji}</b>",
+            f"• <b>Wallet Address:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code> (<a href='https://solscan.io/account/{wallet_addr}'>Solscan</a>)",
+            f"• <b>Live SOL Balance:</b> <code>{bal_sol:.4f} SOL</code> (~${bal_sol*sol_p:,.2f})",
+            f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.3f} SOL</code>",
+            f"  └ <i>Realized: {realized_pnl:+.3f} SOL | Unrealized: {unrealized_pnl:+.3f} SOL</i>",
+            "",
+            f"• <b>Active On-Chain Bags:</b> <code>{len(active_positions)}</code>",
+            f"• <b>Closed Trades:</b> <code>{len(closed_positions)}</code>",
+            f"• <b>Live Win Rate:</b> <code>{win_rate:.1f}%</code>",
+            f"• <b>Uptime:</b> <code>{uptime_min:.1f} min</code>",
+        ]
+        if pos_lines:
+            msg.append("")
+            msg.append("<b>Active Bags (Real-Time Price & PnL):</b>")
+            msg.extend(pos_lines[:8])
+            if len(pos_lines) > 8:
+                msg.append(f"<i>...and {len(pos_lines)-8} more in /active</i>")
+
+        msg.append("\n<i>Strategy: Missed Runner Clone Sniper + Dynamic Kelly Sizer + 4-Tier Moonbag Exit</i>")
+        await event.reply("\n".join(msg), parse_mode="html", link_preview=False)
 
     async def _cmd_kollist(self, event):
         await self.log_brain_event('kollist', 'KOL list requested')
