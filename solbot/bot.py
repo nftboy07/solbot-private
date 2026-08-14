@@ -1926,11 +1926,14 @@ class Solbot:
                         pos.trailing_stop_activated = 0.20
                         self._save_state()
 
-            # 3. Stop loss check (only before TP1 fires)
-            if 2.0 not in pos.tp_targets_hit:
-                if gain <= (1.0 - strat.stop_loss_pct):
-                    await self._exit_position(pos, "Stop-loss", 1.0)
+            # 3. Stop loss & Break-even checks
+            if any(tp in pos.tp_targets_hit for tp in (2.0, 3.0)):
+                if gain <= 1.05:
+                    await self._exit_position(pos, "Break-even Stop (+5% Capital Preserved)", 1.0)
                     break
+            elif gain <= (1.0 - strat.stop_loss_pct):
+                await self._exit_position(pos, "Stop-loss", 1.0)
+                break
                     
             await asyncio.sleep(5)
 
