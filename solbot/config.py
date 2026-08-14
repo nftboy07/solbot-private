@@ -84,7 +84,7 @@ class StrategyConfig:
     # be proven end to end before the wallet is funded.
     dry_run: bool = field(default_factory=lambda: _env_bool("DRY_RUN", False))
     dry_run_start_sol: float = field(
-        default_factory=lambda: float(os.getenv("DRY_RUN_START_SOL", "1.0"))
+        default_factory=lambda: float(os.getenv("DRY_RUN_START_SOL", "5.0"))
     )
     min_confidence_score: int = 75
     tp_targets: list[dict] = field(default_factory=lambda: [

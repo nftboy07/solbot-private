@@ -2815,20 +2815,44 @@ class TelegramController:
     async def _cmd_demostats(self, event):
         if not await self._require_admin(event):
             return
-        is_dry_run = getattr(self._bot._config.strategy, "dry_run", False)
+        is_dry_run = getattr(self._bot._config.strategy, "dry_run", True)
         start_sol = getattr(self._bot._config.strategy, "dry_run_start_sol", 5.0)
-        current_sol = getattr(self._bot._risk_manager, "bankroll_sol", start_sol)
-        net_pnl = current_sol - start_sol
-        pnl_pct = (net_pnl / max(start_sol, 0.001)) * 100.0
 
         positions = list(self._bot._positions.values())
         active_positions = [p for p in positions if getattr(p, "active", True)]
         closed_positions = [p for p in positions if not getattr(p, "active", True)]
 
+        # Calculate realized PnL from trades
+        realized_pnl = 0.0
+        for p in closed_positions:
+            entry = getattr(p, "entry_price", 0.0)
+            exit_p = getattr(p, "current_price", entry)
+            size = getattr(p, "size", 0.0)
+            if entry > 0:
+                realized_pnl += ((exit_p - entry) / entry) * size
+
+        # Calculate unrealized PnL from open positions
+        unrealized_pnl = 0.0
+        for p in active_positions:
+            entry = getattr(p, "entry_price", 0.0)
+            current = getattr(p, "current_price", entry)
+            size = getattr(p, "size", 0.0)
+            if entry > 0:
+                unrealized_pnl += ((current - entry) / entry) * size
+
+        net_pnl = realized_pnl + unrealized_pnl
+        current_sol = max(0.0, start_sol + net_pnl)
+        pnl_pct = (net_pnl / max(start_sol, 0.001)) * 100.0
+
         wins = [p for p in closed_positions if getattr(p, "highest_price", 0) > getattr(p, "entry_price", 1)]
         win_rate = (len(wins) / len(closed_positions) * 100) if closed_positions else 0.0
 
-        status_emoji = "🟢 PROFITABLE" if net_pnl >= 0 else "🔴 DRAWDOWN"
+        if len(closed_positions) == 0 and len(active_positions) == 0:
+            status_emoji = "🟢 READY (Zero Trades Yet)"
+        elif net_pnl >= 0:
+            status_emoji = "🟢 PROFITABLE"
+        else:
+            status_emoji = "🔴 DRAWDOWN"
 
         msg = (
             f"🧪 <b>24-HOUR DEMO TRADING SCORECARD</b> 🧪\n\n"
@@ -2836,7 +2860,8 @@ class TelegramController:
             f"• <b>Status:</b> <b>{status_emoji}</b>\n"
             f"• <b>Virtual Starting Balance:</b> <code>{start_sol:.3f} SOL</code>\n"
             f"• <b>Current Virtual Balance:</b> <code>{current_sol:.3f} SOL</code>\n"
-            f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.3f} SOL ({pnl_pct:+.1f}%)</code>\n\n"
+            f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.3f} SOL ({pnl_pct:+.1f}%)</code>\n"
+            f"  └ <i>Realized: {realized_pnl:+.3f} SOL | Unrealized: {unrealized_pnl:+.3f} SOL</i>\n\n"
             f"• <b>Open Active Positions:</b> <code>{len(active_positions)}</code>\n"
             f"• <b>Closed Trades:</b> <code>{len(closed_positions)}</code>\n"
             f"• <b>Win Rate:</b> <code>{win_rate:.1f}%</code>\n\n"
