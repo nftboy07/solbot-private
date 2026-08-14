@@ -6,6 +6,12 @@ import signal
 import sys
 import os
 
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass
+
 from solbot.config import BotConfig
 from solbot.db import Database
 from solbot.core.event_bus import EventBus
