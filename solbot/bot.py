@@ -807,17 +807,22 @@ class Solbot:
         return profile
 
     def ensure_live_trading(self) -> None:
-        """Force live trading defaults on startup (autobuy on, paper/kill off)."""
+        """Force trading defaults on startup (autobuy on, respects DRY_RUN)."""
+        is_dry = bool(getattr(self._config.strategy, "dry_run", False) or os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes", "on"))
         self._autobuy_enabled = True
         self._paused = False
         if self._telegram:
-            self._telegram._paper_mode = False
+            self._telegram._paper_mode = is_dry
             self._telegram._kill_switch = False
+        if self._pump_client:
+            self._pump_client._paper_enabled = is_dry
         if self._risk_manager:
             self._risk_manager.state.kill_switch_active = False
+            if is_dry:
+                self._risk_manager.bankroll_sol = float(getattr(self._config.strategy, "dry_run_start_sol", 5.0))
         self.apply_risk_preset(self._filter_profile_name or "degen")
         self._save_state()
-        logger.info("Live trading enforced: autobuy=ON paper=OFF kill=OFF profile=%s", self._filter_profile_name)
+        logger.info("Trading mode enforced: autobuy=ON paper=%s kill=OFF profile=%s", "ON" if is_dry else "OFF", self._filter_profile_name)
 
     async def _refresh_token_metrics(self, token: TokenEvent) -> None:
         """Refresh mcap/liquidity after sniper delay."""
