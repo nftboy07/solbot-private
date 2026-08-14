@@ -52,6 +52,8 @@ from solbot.agi_brain import AGIBrain
 from solbot.hummingbot_gateway import HummingbotGatewayClient
 from solbot.hummingbot_pmm import HummingbotPMMManager
 from solbot.missed_runner_engine import MissedRunnerEngine
+from solbot.portfolio_guard import PortfolioGuard
+from solbot.risk_sizer import DynamicRiskSizer
 
 def _format_tokens(amount: float) -> str:
     if amount >= 1_000_000_000:
@@ -179,6 +181,8 @@ class Solbot:
         self._hummingbot_gateway = HummingbotGatewayClient(self._config.hummingbot)
         self._hummingbot_pmm = HummingbotPMMManager(self, self._config.hummingbot)
         self._missed_runner_engine = MissedRunnerEngine(self)
+        self._portfolio_guard = PortfolioGuard()
+        self._risk_sizer = DynamicRiskSizer()
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -1255,6 +1259,32 @@ class Solbot:
             if self.is_blacklisted(token.creator):
                 logger.warning(f"SKIPPING {token.symbol}: Creator {token.creator} is blacklisted")
                 return
+
+            # Portfolio Guard & Drawdown Check
+            if hasattr(self, '_portfolio_guard') and self._portfolio_guard:
+                guard_status = self._portfolio_guard.check_buy_allowed(
+                    current_wallet_balance_sol=getattr(self._risk_manager, 'bankroll_sol', 1.0),
+                    creator=token.creator,
+                    buy_amount_sol=size,
+                    active_positions=self._positions,
+                )
+                if guard_status.circuit_breaker_tripped:
+                    logger.warning(f"SKIPPING {token.symbol}: PortfolioGuard circuit tripped ({guard_status.reason})")
+                    return
+
+            # Missed Runner Pattern Check
+            is_runner_clone = False
+            if hasattr(self, '_missed_runner_engine') and self._missed_runner_engine:
+                is_runner, r_score, r_reason = self._missed_runner_engine.matches_runner_pattern(
+                    mcap_usd=token.market_cap_usd,
+                    buy_ratio=0.70,
+                    unique_buyers=25,
+                    dev_holding_pct=0.01,
+                )
+                if is_runner:
+                    is_runner_clone = True
+                    logger.info(f"🏆 MISSED RUNNER CLONE PATTERN DETECTED ({r_score:.0f}/100) for {token.symbol}: {r_reason}")
+                    reason = f"Missed Runner Clone Pattern ({r_score:.0f} pts)"
 
             # Check Creator Genome Score and adjust size/eligibility
             c_score = 50.0
