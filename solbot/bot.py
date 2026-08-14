@@ -51,6 +51,7 @@ from solbot.ml.inference import InferenceEngine
 from solbot.agi_brain import AGIBrain
 from solbot.hummingbot_gateway import HummingbotGatewayClient
 from solbot.hummingbot_pmm import HummingbotPMMManager
+from solbot.missed_runner_engine import MissedRunnerEngine
 
 def _format_tokens(amount: float) -> str:
     if amount >= 1_000_000_000:
@@ -177,6 +178,7 @@ class Solbot:
         )
         self._hummingbot_gateway = HummingbotGatewayClient(self._config.hummingbot)
         self._hummingbot_pmm = HummingbotPMMManager(self, self._config.hummingbot)
+        self._missed_runner_engine = MissedRunnerEngine(self)
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -2508,6 +2510,15 @@ class Solbot:
                     for threshold, label, emoji in MILESTONES:
                         if gain >= threshold and label not in info['notified_milestones']:
                             info['notified_milestones'].add(label)
+                            self._missed_runner_engine.add_missed_token(
+                                symbol=info['symbol'],
+                                name=info['name'],
+                                mint=mint,
+                                alert_mcap=alert_price,
+                                current_mcap=current_price,
+                                multiplier=gain,
+                                elapsed_mins=elapsed_mins,
+                            )
                             missed_sol = (current_price - alert_price) / (self._telegram._sol_price if self._telegram and self._telegram._sol_price > 0 else 150.0)
                             msg = (
                                 f"{emoji} <b>YOU MISSED {label} PROFIT! {emoji}</b>\n\n"

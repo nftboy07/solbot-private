@@ -321,6 +321,10 @@ class TelegramController:
         async def stoppmm_handler(event):
             await self._cmd_stoppmm(event)
 
+        @self._client.on(events.NewMessage(pattern='/runners'))
+        async def runners_handler(event):
+            await self._cmd_runners(event)
+
         @self._client.on(events.NewMessage(pattern='/rpcbalancer'))
         async def rpcbalancer_handler(event):
             await self._cmd_rpcbalancer(event)
@@ -2793,6 +2797,16 @@ class TelegramController:
             await event.reply(f"⏹ <b>PMM Session stopped for:</b> <code>{mint}</code>", parse_mode="html")
         else:
             await event.reply(f"⚠️ No active PMM session found for <code>{mint}</code>.", parse_mode="html")
+
+    async def _cmd_runners(self, event):
+        if not await self._require_admin(event):
+            return
+        engine = getattr(self._bot, "_missed_runner_engine", None)
+        if not engine:
+            await event.reply("❌ Missed Runner Engine not initialized.")
+            return
+        report = engine.get_summary_report()
+        await event.reply(report, parse_mode="html")
 
 
 class TelegramManager(TelegramController):
