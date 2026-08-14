@@ -33,6 +33,7 @@ class TelegramController:
         # UI State
         self._paper_mode = False
         self._kill_switch = False
+        self._silent_mode = os.getenv("TELEGRAM_SILENT", "true").lower() in ("1", "true", "yes", "on")
         
         # Prices (mocked or synced from bot)
         self._sol_price = 150.0 # Placeholder, should ideally be synced
@@ -328,6 +329,10 @@ class TelegramController:
         @self._client.on(events.NewMessage(pattern='/demostats'))
         async def demostats_handler(event):
             await self._cmd_demostats(event)
+
+        @self._client.on(events.NewMessage(pattern='/silent|/mute'))
+        async def silent_handler(event):
+            await self._cmd_silent(event)
 
         @self._client.on(events.NewMessage(pattern='/rpcbalancer'))
         async def rpcbalancer_handler(event):
@@ -1913,8 +1918,11 @@ class TelegramController:
             except Exception as e:
                 logger.error(f"Failed to send Telegram message: {e}")
 
-    async def send_message(self, text: str, buttons=None):
-        """Public method for bot instance to send messages with optional buttons."""
+    async def send_message(self, text: str, buttons=None, force: bool = False):
+        """Public method for bot instance to send messages. Suppressed if silent_mode is active unless force=True."""
+        if self._silent_mode and not force:
+            logger.debug("Telegram alert silenced (Silent Mode ON): %s", text[:60])
+            return
         await self._send_to_admin(text, buttons=buttons)
 
     async def stop(self):
@@ -2868,6 +2876,30 @@ class TelegramController:
             f"<i>Strategy: Missed Runner Clone Sniper + Dynamic Kelly Sizer + 4-Tier Moonbag Exit</i>"
         )
         await event.reply(msg, parse_mode="html")
+
+    async def _cmd_silent(self, event):
+        if not await self._require_admin(event):
+            return
+        args = event.message.text.split()
+        if len(args) > 1:
+            val = args[1].lower()
+            if val in ("on", "1", "true", "yes", "enable"):
+                self._silent_mode = True
+                await event.reply("🔇 <b>Silent Mode Enabled</b>\nBackground trade alerts are now muted. Use <code>/demostats</code> or <code>/active</code> anytime.", parse_mode="html")
+            elif val in ("off", "0", "false", "no", "disable"):
+                self._silent_mode = False
+                await event.reply("🔔 <b>Silent Mode Disabled</b>\nLive trade alerts will now be sent to Telegram.", parse_mode="html")
+            else:
+                await event.reply("Usage: <code>/silent on</code> or <code>/silent off</code>", parse_mode="html")
+        else:
+            status = "ENABLED (Muted)" if self._silent_mode else "DISABLED (Active Alerts)"
+            await event.reply(
+                f"🔇 <b>Silent Background Mode:</b> <code>{status}</code>\n\n"
+                "• Type <code>/silent on</code> to mute all trade alerts\n"
+                "• Type <code>/silent off</code> to receive all trade alerts\n"
+                "• Type <code>/demostats</code> to inspect performance anytime",
+                parse_mode="html"
+            )
 
 
 class TelegramManager(TelegramController):
