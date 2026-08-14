@@ -567,6 +567,11 @@ class Solbot:
     async def _ensure_buy_capital(self, profile, needed_sol: float) -> tuple[bool, Optional[str]]:
         if not self._pump_client:
             return True, None
+        if getattr(self._pump_client, "paper_enabled", False):
+            paper_bal = getattr(self._pump_client, "_paper_sol", 5.0)
+            if paper_bal < needed_sol:
+                return False, f"Paper balance insufficient: {paper_bal:.4f} < {needed_sol:.4f} SOL"
+            return True, None
         settings = self._profile_recycle_settings(profile)
         balance = await self._pump_client.get_sol_balance()
         block = should_block_buy(balance, needed_sol, settings.min_wallet_sol_reserve)
@@ -1262,8 +1267,10 @@ class Solbot:
 
             # Portfolio Guard & Drawdown Check
             if hasattr(self, '_portfolio_guard') and self._portfolio_guard:
+                paper_active = getattr(self._pump_client, "paper_enabled", False) if self._pump_client else False
+                current_bal = self._pump_client._paper_sol if paper_active else getattr(self._risk_manager, 'bankroll_sol', 1.0)
                 guard_status = self._portfolio_guard.check_buy_allowed(
-                    current_wallet_balance_sol=getattr(self._risk_manager, 'bankroll_sol', 1.0),
+                    current_wallet_balance_sol=current_bal,
                     creator=token.creator,
                     buy_amount_sol=size,
                     active_positions=self._positions,

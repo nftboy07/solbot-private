@@ -1,5 +1,6 @@
 """PumpPortal Local Transaction Signing Client with Jito Support."""
 
+import os
 import asyncio
 import time
 import base58
@@ -46,8 +47,8 @@ class PumpFunClient:
         # submissions from this ledger instead of the chain, so the strategy,
         # position manager, TP ladder and moonbag logic all run untouched
         # against live prices without signing anything.
-        self._paper_enabled = bool(getattr(config.strategy, "dry_run", False))
-        self._paper_sol = float(getattr(config.strategy, "dry_run_start_sol", 1.0))
+        self._paper_enabled = bool(getattr(config.strategy, "dry_run", False) or os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes", "on"))
+        self._paper_sol = float(getattr(config.strategy, "dry_run_start_sol", 5.0) or os.getenv("DRY_RUN_START_SOL", "5.0"))
         self._paper_tokens: Dict[str, float] = {}
         self._paper_basis: Dict[str, float] = {}
         self._paper_marks: Dict[str, float] = {}
