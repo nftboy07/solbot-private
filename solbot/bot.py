@@ -509,10 +509,12 @@ class Solbot:
         if self._telegram and getattr(self._telegram, "_kill_switch", False):
             return "kill switch active"
         if self._telegram and getattr(self._telegram, "_paper_mode", False):
-            return "paper mode enabled"
+            is_dry = bool(getattr(self._config.strategy, "dry_run", False) or (self._pump_client and self._pump_client.paper_enabled))
+            if not is_dry:
+                return "paper mode enabled"
         if self._paused:
             return "bot paused"
-        if self._risk_manager.state.kill_switch_active:
+        if self._risk_manager and self._risk_manager.state.kill_switch_active:
             return "risk manager kill switch active"
         return None
 
