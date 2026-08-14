@@ -334,6 +334,10 @@ class TelegramController:
         async def silent_handler(event):
             await self._cmd_silent(event)
 
+        @self._client.on(events.NewMessage(pattern='/cleardemo|/resetdemo'))
+        async def cleardemo_handler(event):
+            await self._cmd_cleardemo(event)
+
         @self._client.on(events.NewMessage(pattern='/rpcbalancer'))
         async def rpcbalancer_handler(event):
             await self._cmd_rpcbalancer(event)
@@ -2839,14 +2843,31 @@ class TelegramController:
             if entry > 0:
                 realized_pnl += ((exit_p - entry) / entry) * size
 
-        # Calculate unrealized PnL from open positions
+        # Update live prices for active positions on-demand so scorecard is always 100% live!
         unrealized_pnl = 0.0
+        pos_lines = []
+        sol_p = getattr(self, "_sol_price", 150.0) or 150.0
         for p in active_positions:
             entry = getattr(p, "entry_price", 0.0)
-            current = getattr(p, "current_price", entry)
+            current = getattr(p, "current_price", 0.0)
+            if (current <= 0 or current == entry) and self._bot._pump_client:
+                try:
+                    live_p = await self._bot._pump_client.get_bonding_curve_mcap(p.mint, sol_p)
+                    if live_p > 0:
+                        p.current_price = live_p
+                        current = live_p
+                        if live_p > getattr(p, "highest_price", 0.0):
+                            p.highest_price = live_p
+                except Exception:
+                    pass
+            current = current or entry
             size = getattr(p, "size", 0.0)
+            p_gain_pct = 0.0
             if entry > 0:
-                unrealized_pnl += ((current - entry) / entry) * size
+                p_pnl = ((current - entry) / entry) * size
+                p_gain_pct = ((current / entry) - 1.0) * 100.0
+                unrealized_pnl += p_pnl
+            pos_lines.append(f"• <b>{getattr(p, 'symbol', p.mint[:6])}</b>: <code>{p_gain_pct:+.1f}%</code> ({size:.3f} SOL)")
 
         net_pnl = realized_pnl + unrealized_pnl
         current_sol = max(0.0, start_sol + net_pnl)
@@ -2862,20 +2883,51 @@ class TelegramController:
         else:
             status_emoji = "🔴 DRAWDOWN"
 
-        msg = (
-            f"🧪 <b>24-HOUR DEMO TRADING SCORECARD</b> 🧪\n\n"
-            f"• <b>Mode:</b> <code>{'DRY RUN (Paper Trading)' if is_dry_run else 'LIVE'}</code>\n"
-            f"• <b>Status:</b> <b>{status_emoji}</b>\n"
-            f"• <b>Virtual Starting Balance:</b> <code>{start_sol:.3f} SOL</code>\n"
-            f"• <b>Current Virtual Balance:</b> <code>{current_sol:.3f} SOL</code>\n"
-            f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.3f} SOL ({pnl_pct:+.1f}%)</code>\n"
-            f"  └ <i>Realized: {realized_pnl:+.3f} SOL | Unrealized: {unrealized_pnl:+.3f} SOL</i>\n\n"
-            f"• <b>Open Active Positions:</b> <code>{len(active_positions)}</code>\n"
-            f"• <b>Closed Trades:</b> <code>{len(closed_positions)}</code>\n"
-            f"• <b>Win Rate:</b> <code>{win_rate:.1f}%</code>\n\n"
-            f"<i>Strategy: Missed Runner Clone Sniper + Dynamic Kelly Sizer + 4-Tier Moonbag Exit</i>"
-        )
-        await event.reply(msg, parse_mode="html")
+        uptime_min = self._bot._stats.uptime_seconds() / 60.0 if getattr(self._bot, "_stats", None) else 0.0
+
+        msg = [
+            "🧪 <b>24-HOUR DEMO TRADING SCORECARD</b> 🧪",
+            "",
+            f"• <b>Mode:</b> <code>{'DRY RUN (Paper Trading)' if is_dry_run else 'LIVE'}</code>",
+            f"• <b>Session Runtime:</b> <code>{uptime_min:.1f} min / 24.0 hrs</code>",
+            f"• <b>Status:</b> <b>{status_emoji}</b>",
+            f"• <b>Virtual Starting Balance:</b> <code>{start_sol:.3f} SOL</code>",
+            f"• <b>Current Virtual Balance:</b> <code>{current_sol:.3f} SOL</code>",
+            f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.3f} SOL ({pnl_pct:+.1f}%)</code>",
+            f"  └ <i>Realized: {realized_pnl:+.3f} SOL | Unrealized: {unrealized_pnl:+.3f} SOL</i>",
+            "",
+            f"• <b>Open Active Positions:</b> <code>{len(active_positions)}</code>",
+            f"• <b>Closed Trades:</b> <code>{len(closed_positions)}</code>",
+            f"• <b>Win Rate:</b> <code>{win_rate:.1f}%</code>",
+        ]
+        if pos_lines:
+            msg.append("")
+            msg.append("<b>Active Demo Bags (Live PnL):</b>")
+            msg.extend(pos_lines[:8])
+            if len(pos_lines) > 8:
+                msg.append(f"<i>...and {len(pos_lines)-8} more in /active</i>")
+
+        msg.append("\n<i>Strategy: Missed Runner Clone Sniper + Dynamic Kelly Sizer + 4-Tier Moonbag Exit</i>")
+        await event.reply("\n".join(msg), parse_mode="html")
+
+    async def _cmd_cleardemo(self, event):
+        if not await self._require_admin(event):
+            return
+        if hasattr(self._bot, '_positions'):
+            self._bot._positions.clear()
+        if hasattr(self._bot, '_trades'):
+            self._bot._trades.clear()
+        if hasattr(self._bot, '_processed_mints'):
+            self._bot._processed_mints.clear()
+        if self._bot._pump_client and hasattr(self._bot._pump_client, '_paper_tokens'):
+            self._bot._pump_client._paper_tokens.clear()
+            self._bot._pump_client._paper_basis.clear()
+            self._bot._pump_client._paper_marks.clear()
+            self._bot._pump_client._paper_sol = 5.0
+            self._bot._pump_client._paper_fills = 0
+        if hasattr(self._bot, '_save_state'):
+            self._bot._save_state()
+        await event.reply("🧹 <b>Demo Session Reset Complete!</b>\nVirtual balance reset to <code>5.000 SOL</code> with 0 open positions.", parse_mode="html")
 
     async def _cmd_silent(self, event):
         if not await self._require_admin(event):

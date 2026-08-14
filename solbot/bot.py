@@ -1788,7 +1788,8 @@ class Solbot:
             if now_ts - last_poll_time >= 15:
                 last_poll_time = now_ts
                 try:
-                    price_usd = await self._pump_client.get_bonding_curve_mcap(pos.mint, self._telegram._sol_price)
+                    sol_p = getattr(self._telegram, "_sol_price", 150.0) or 150.0
+                    price_usd = await self._pump_client.get_bonding_curve_mcap(pos.mint, sol_p)
                     if price_usd <= 0:
                         metrics = await self._dexscreener.get_price_metrics(pos.mint)
                         if metrics:
