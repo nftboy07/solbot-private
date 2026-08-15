@@ -855,7 +855,7 @@ class Solbot:
 
     def ensure_live_trading(self) -> None:
         """Force trading defaults on startup (autobuy on, respects DRY_RUN)."""
-        is_dry = bool(getattr(self._config.strategy, "dry_run", False) or os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes", "on"))
+        is_dry = bool(getattr(self._config.strategy, "dry_run", False) or os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes", "on") or os.getenv("PAPER_MODE", "").lower() in ("1", "true", "yes", "on"))
         self._autobuy_enabled = True
         self._paused = False
         if self._telegram:
@@ -863,15 +863,17 @@ class Solbot:
             self._telegram._kill_switch = False
         if self._pump_client:
             self._pump_client._paper_enabled = is_dry
+            if is_dry and self._pump_client._paper_sol <= 0.1:
+                self._pump_client._paper_sol = 5.0
         if self._risk_manager:
             self._risk_manager.state.kill_switch_active = False
             if is_dry:
                 self._risk_manager.bankroll_sol = float(getattr(self._config.strategy, "dry_run_start_sol", 5.0))
-        env_profile = os.getenv("FILTER_PROFILE", "").strip().lower() or getattr(self._config, "filter_profile", None) or self._filter_profile_name or "normal"
+        env_profile = os.getenv("FILTER_PROFILE", "").strip().lower() or getattr(self._config, "filter_profile", None) or self._filter_profile_name or "alpha"
         self._filter_profile_name = env_profile
         self.apply_risk_preset(env_profile)
         self._save_state()
-        logger.info("Trading mode enforced: autobuy=ON paper=%s kill=OFF profile=%s", "ON" if is_dry else "OFF", self._filter_profile_name)
+        logger.info("Trading mode enforced: autobuy=ON paper=%s kill=OFF profile=%s (Real-life live simulated conditions)", "ON" if is_dry else "OFF", self._filter_profile_name)
 
     async def _refresh_token_metrics(self, token: TokenEvent) -> None:
         """Refresh mcap/liquidity after sniper delay."""

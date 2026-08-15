@@ -99,7 +99,7 @@ class PumpFunClient:
             self._paper_tokens[mint] = self._paper_tokens.get(mint, 0.0) + qty
             self._paper_basis[mint] = self._paper_basis.get(mint, 0.0) + cost
             logger.info(
-                "[DRY_RUN] BUY %s for %.4f SOL | paper wallet %.4f SOL",
+                "[PAPER_SIM] BUY %s for %.4f SOL | paper wallet %.4f SOL",
                 mint[:8], cost, self._paper_sol,
             )
             return TradeResult(
@@ -127,7 +127,7 @@ class PumpFunClient:
             self._paper_basis.pop(mint, None)
             self._paper_marks.pop(mint, None)
         logger.info(
-            "[DRY_RUN] SELL %s %.1f%% at %.2fx | +%.4f SOL | paper wallet %.4f SOL",
+            "[PAPER_SIM] SELL %s %.1f%% at %.2fx | +%.4f SOL | paper wallet %.4f SOL",
             mint[:8], fraction * 100, roi, proceeds, self._paper_sol,
         )
         return TradeResult(
