@@ -238,7 +238,10 @@ class Solbot:
                         data["tp_targets_hit"] = [0.0]
                 valid_fields = Position.__dataclass_fields__.keys()
                 filtered_data = {k: v for k, v in data.items() if k in valid_fields}
-                self._positions[mint] = Position(**filtered_data)
+                pos = Position(**filtered_data)
+                if pos.size > 10.0 or pos.size <= 0:
+                    pos.size = float(getattr(self._config.strategy, "buy_amount_sol", 0.02) or 0.02)
+                self._positions[mint] = pos
             
             # Restore intelligence
             if self._filter:
@@ -675,8 +678,8 @@ class Solbot:
                 self._positions.pop(mint, None)
                 purged.append(mint)
                 asyncio.create_task(self._db.update_position_pnl(mint, 0.0, "closed"))
-            elif pos.size <= 0:
-                pos.size = balance
+            elif pos.size <= 0 or pos.size > 10.0:
+                pos.size = float(getattr(self._config.strategy, "buy_amount_sol", 0.02) or 0.02)
 
         inactive = [m for m, p in self._positions.items() if not p.active]
         for mint in inactive:

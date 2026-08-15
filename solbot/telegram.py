@@ -2295,18 +2295,20 @@ class TelegramController:
             except Exception:
                 bal_sol = 0.0
 
-        # Query closed trades from database
+        # Query closed trades for the current live session
         closed_trades = []
         realized_pnl = 0.0
         db = getattr(self._bot, "_db", None)
+        session_start_ts = getattr(getattr(self._bot, "_stats", None), "_start_time", 0.0) or (time.time() - 86400)
         if db:
             try:
                 rows = await db._execute_read(
-                    "SELECT mint, entry_price, size, pnl, reason FROM positions WHERE status = 'closed'"
+                    "SELECT mint, entry_price, size, pnl, reason, timestamp FROM positions WHERE status = 'closed' AND timestamp >= ?",
+                    (int(session_start_ts),)
                 )
                 for r in rows:
                     pnl_fraction = float(r['pnl'] or 0.0)
-                    size = float(r['size'] or 0.02)
+                    size = min(float(r['size'] or 0.02), 0.1)
                     closed_trades.append({
                         "mint": r['mint'],
                         "pnl_fraction": pnl_fraction,
@@ -2326,8 +2328,9 @@ class TelegramController:
                 sold_frac = 1.0 - rem_frac
                 entry = getattr(p, "entry_price", 0.0)
                 highest = getattr(p, "highest_price", entry)
+                effective_size = min(float(getattr(p, "size", 0.02) or 0.02), 0.1)
                 if entry > 0:
-                    realized_pnl += p.size * sold_frac * ((highest - entry) / entry)
+                    realized_pnl += effective_size * sold_frac * ((highest - entry) / entry)
 
         # Update live prices for active positions
         unrealized_pnl = 0.0
@@ -2348,7 +2351,11 @@ class TelegramController:
                     pass
             current = current or entry
             rem_frac = getattr(p, "remaining_fraction", 1.0)
-            effective_size = getattr(p, "size", 0.0) * rem_frac
+            raw_size = float(getattr(p, "size", 0.02) or 0.02)
+            if raw_size > 0.1 or raw_size <= 0:
+                raw_size = 0.02
+                p.size = 0.02
+            effective_size = raw_size * rem_frac
             p_gain_pct = 0.0
             if entry > 0:
                 p_pnl = ((current - entry) / entry) * effective_size
@@ -2381,13 +2388,13 @@ class TelegramController:
             f"• <b>Status:</b> <b>{status_emoji}</b>",
             f"• <b>Wallet Address:</b> <code>{wallet_addr[:6]}...{wallet_addr[-4:]}</code> (<a href='https://solscan.io/account/{wallet_addr}'>Solscan</a>)",
             f"• <b>Live SOL Balance:</b> <code>{bal_sol:.4f} SOL</code> (~${bal_sol*sol_p:,.2f})",
-            f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.3f} SOL</code>",
-            f"  └ <i>Realized: {realized_pnl:+.3f} SOL | Unrealized: {unrealized_pnl:+.3f} SOL</i>",
+            f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.4f} SOL</code>",
+            f"  └ <i>Realized: {realized_pnl:+.4f} SOL | Unrealized: {unrealized_pnl:+.4f} SOL</i>",
             "",
             f"• <b>Active On-Chain Bags:</b> <code>{len(active_positions)}</code> (<b>{active_in_profit}/{len(active_positions)} in Profit</b>)",
-            f"• <b>Closed Trades:</b> <code>{len(closed_trades)}</code>",
+            f"• <b>Session Closed Trades:</b> <code>{len(closed_trades)}</code>",
             f"• <b>Closed Win Rate:</b> <code>{win_rate:.1f}%</code>",
-            f"• <b>Uptime:</b> <code>{uptime_min:.1f} min</code>",
+            f"• <b>Session Uptime:</b> <code>{uptime_min:.1f} min</code>",
         ]
         if formatted_pos:
             msg.append("")
