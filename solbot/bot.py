@@ -1841,8 +1841,8 @@ class Solbot:
                 self._save_state()
                 break
             now_ts = time()
-            # Poll real-time price from RPC every 15 seconds
-            if now_ts - last_poll_time >= 15:
+            # Poll real-time price from RPC every 2.5 seconds for instant rug/dump detection
+            if now_ts - last_poll_time >= 2.5:
                 last_poll_time = now_ts
                 try:
                     sol_p = getattr(self._telegram, "_sol_price", 150.0) or 150.0
@@ -1870,6 +1870,11 @@ class Solbot:
 
             gain = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
             drawdown = (pos.highest_price - pos.current_price) / pos.highest_price if pos.highest_price > 0 else 0.0
+
+            # Emergency Rug / Baseline Floor Check: If MCAP crashes near zero/rug floor
+            if pos.current_price > 0 and pos.current_price < 3800.0 and pos.entry_price >= 4500.0:
+                await self._exit_position(pos, "EMERGENCY RUG DUMP EXIT (Bonding curve floor hit)", 1.0)
+                break
 
             # V4 exit logic: check if it is already a moonbag or not
             if pos.is_moonbag:
@@ -1935,12 +1940,12 @@ class Solbot:
                                 1.0,
                             )
                             break
-                    elif gain <= (1.0 - profile.stop_loss_pct):
+                    elif gain <= (1.0 - profile.stop_loss_pct) or (drawdown >= 0.14 and gain < 1.0):
                         await self._exit_position(
-                            pos, f"STOP LOSS ({profile.stop_loss_pct*100:.0f}%)", 1.0,
+                            pos, f"STOP LOSS ({((1.0-gain)*100):.1f}% loss / {(drawdown*100):.1f}% drop)", 1.0,
                         )
                         break
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1.0)
                     continue
 
                 # Not a moonbag yet. Check TP Presets (Aggressive by default, or Conservative)
@@ -1992,11 +1997,11 @@ class Solbot:
                 if gain <= 1.05:
                     await self._exit_position(pos, "Break-even Stop (+5% Capital Preserved)", 1.0)
                     break
-            elif gain <= (1.0 - getattr(strat, "stop_loss_pct", 0.15)):
-                await self._exit_position(pos, "Stop-loss", 1.0)
+            elif gain <= (1.0 - getattr(strat, "stop_loss_pct", 0.10)) or (drawdown >= 0.14 and gain < 1.0):
+                await self._exit_position(pos, f"Stop-loss (Gain={((gain-1.0)*100):.1f}% / Drop={(drawdown*100):.1f}%)", 1.0)
                 break
                     
-            await asyncio.sleep(5)
+            await asyncio.sleep(1.0)
 
     async def _exit_position(self, pos: Position, reason: str, pct: float):
         if not pos.active: return
