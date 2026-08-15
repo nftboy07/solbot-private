@@ -2298,7 +2298,28 @@ class TelegramController:
                         roi = pnl * 100.0
                         mint = r['mint'] or "Unknown"
                         reason = r['reason'] or "Exit"
-await event.reply("\n".join(msg), parse_mode="html")
+                        msg.append(f"• <code>{mint[:8]}...</code> | PnL: <code>{roi:+.1f}%</code> | <i>{reason}</i>")
+                else:
+                    msg.append("No closed trades recorded yet.")
+            except Exception as e:
+                msg.append(f"Error: {e}")
+        await event.reply("\n".join(msg), parse_mode="html")
+
+    async def _cmd_panic(self, event):
+        if not await self._require_admin(event):
+            return
+        positions = getattr(self._bot, '_positions', {})
+        active = [p for p in positions.values() if getattr(p, "active", True)]
+        if not active:
+            await event.reply("⚠️ No active positions to liquidate.")
+            return
+
+        status_msg = await event.reply(f"🚨 <b>EMERGENCY SELL-ALL INITIATED!</b>\nLiquidating <code>{len(active)}</code> active positions in parallel...", parse_mode="html")
+        tasks = []
+        for p in active:
+            tasks.append(self._bot._exit_position(p, "Emergency Panic Sell", 1.0))
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await status_msg.edit(f"✅ <b>All {len(active)} active positions liquidated!</b>", parse_mode="html")
 
     async def _cmd_livestats(self, event):
         if not await self._require_admin(event):
