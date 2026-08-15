@@ -1063,6 +1063,39 @@ class Solbot:
         if not qualified:
             return
 
+        # 3. AGI Brain Machine Learning Prediction Engine
+        brain_features = {
+            "price_change_1m": 0.0,
+            "price_change_5m": 0.0,
+            "price_change_1h": 0.0,
+            "volume_change_5m": 0.0,
+            "volume_change_1h": 0.0,
+            "holder_growth_1h": 0.0,
+            "holder_growth_24h": 0.0,
+            "dev_balance": float(getattr(token, "creator_holding", 0.0) or 0.0),
+            "social_score": float(ai_score),
+            "kol_mention_count": float(len(self._kol_mentions.get(token.mint, {}).get("mentions", []))),
+            "age_minutes": float((time() - token.timestamp) / 60.0) if token.timestamp else 0.0,
+            "market_cap": float(token.market_cap_usd or 0.0),
+            "liquidity": float(token.liquidity_sol or 0.0),
+            "volatility_1h": 0.0,
+            "buy_pressure": float(c_score / 100.0),
+            "sell_pressure": 0.0
+        }
+        brain_pred = await self._brain.predict(token.mint, brain_features)
+        brain_score = float(brain_pred.get("score", 75.0))
+        brain_decision = brain_pred.get("decision", "BUY_FULL")
+        
+        logger.info(
+            "🧠 AGI Brain ML Evaluation for %s: Score=%.1f | Decision=%s | AI=%.1f | Creator=%.1f",
+            token.symbol, brain_score, brain_decision, ai_score, c_score
+        )
+        
+        if brain_decision == "SKIP" or brain_score < 40.0:
+            self._stats.bump("skip_ai")
+            logger.warning("SKIPPING %s: AGI Brain rejected with score %.1f (%s)", token.symbol, brain_score, brain_decision)
+            return
+
         if not profile.skip_mayhem_check:
             if await self._reject_mayhem_token(token.mint, token.symbol):
                 return
