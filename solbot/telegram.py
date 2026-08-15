@@ -274,6 +274,26 @@ class TelegramController:
         async def rugshield_handler(event):
             await self._cmd_rugshield(event)
 
+        @self._client.on(events.NewMessage(pattern='/strategy'))
+        async def strategy_handler(event):
+            await self._cmd_strategy(event)
+
+        @self._client.on(events.NewMessage(pattern='/autoswitch'))
+        async def autoswitch_handler(event):
+            await self._cmd_autoswitch(event)
+
+        @self._client.on(events.NewMessage(pattern='/setsize'))
+        async def setsize_handler(event):
+            await self._cmd_setsize(event)
+
+        @self._client.on(events.NewMessage(pattern='/setmaxbags'))
+        async def setmaxbags_handler(event):
+            await self._cmd_setmaxbags(event)
+
+        @self._client.on(events.NewMessage(pattern='/panic|/sellall'))
+        async def panic_handler(event):
+            await self._cmd_panic(event)
+
         @self._client.on(events.NewMessage(pattern='/live'))
         async def live_handler(event):
             await self._cmd_live(event)
@@ -2301,6 +2321,105 @@ class TelegramController:
             "<i>RugShield actively guards against serial rug deployers, insider bundles, and duplicate contract spam.</i>"
         ]
         await event.reply("\n".join(msg), parse_mode="html")
+
+    async def _cmd_strategy(self, event):
+        if not await self._require_admin(event):
+            return
+        orchestrator = getattr(self._bot, "_orchestrator", None)
+        if not orchestrator:
+            await event.reply("❌ Strategy Orchestrator not loaded.", parse_mode="html")
+            return
+        
+        parts = event.raw_text.strip().split()
+        if len(parts) > 1:
+            target = parts[1]
+            ok, msg = orchestrator.switch_strategy(target, reason="Manual Telegram Command")
+            await event.reply(msg, parse_mode="html")
+            return
+        
+        dashboard = orchestrator.get_dashboard_text()
+        await event.reply(dashboard, parse_mode="html")
+
+    async def _cmd_autoswitch(self, event):
+        if not await self._require_admin(event):
+            return
+        orchestrator = getattr(self._bot, "_orchestrator", None)
+        if not orchestrator:
+            await event.reply("❌ Strategy Orchestrator not loaded.", parse_mode="html")
+            return
+        
+        parts = event.raw_text.strip().split()
+        if len(parts) > 1:
+            val = parts[1].lower()
+            if val in ["on", "true", "enable", "1"]:
+                orchestrator.auto_switch_enabled = True
+                await event.reply("🟢 <b>Auto-Failover Strategy Switching ENABLED.</b>", parse_mode="html")
+            elif val in ["off", "false", "disable", "0"]:
+                orchestrator.auto_switch_enabled = False
+                await event.reply("🔴 <b>Auto-Failover Strategy Switching DISABLED.</b>", parse_mode="html")
+            else:
+                await event.reply("Usage: <code>/autoswitch on</code> or <code>/autoswitch off</code>", parse_mode="html")
+            return
+        
+        status_str = "🟢 ENABLED" if orchestrator.auto_switch_enabled else "🔴 DISABLED"
+        await event.reply(f"• <b>Auto-Failover Switching:</b> <code>{status_str}</code>\nToggle with <code>/autoswitch on|off</code>", parse_mode="html")
+
+    async def _cmd_setsize(self, event):
+        if not await self._require_admin(event):
+            return
+        parts = event.raw_text.strip().split()
+        if len(parts) < 2:
+            current_size = getattr(self._bot._config.jupiter, "buy_amount_sol", 0.02)
+            await event.reply(f"• <b>Current Buy Size:</b> <code>{current_size} SOL</code>\nUsage: <code>/setsize 0.02</code>", parse_mode="html")
+            return
+        try:
+            new_size = float(parts[1])
+            if new_size <= 0 or new_size > 10.0:
+                await event.reply("❌ Please specify a valid size between 0.001 and 10.0 SOL.", parse_mode="html")
+                return
+            object.__setattr__(self._bot._config.jupiter, "buy_amount_sol", new_size)
+            if hasattr(self._bot, "_orchestrator") and self._bot._orchestrator:
+                self._bot._orchestrator.current.buy_amount_sol = new_size
+            self._bot._save_state()
+            await event.reply(f"✅ <b>Buy Size updated to {new_size} SOL.</b>", parse_mode="html")
+        except Exception as e:
+            await event.reply(f"❌ Error setting size: {e}", parse_mode="html")
+
+    async def _cmd_setmaxbags(self, event):
+        if not await self._require_admin(event):
+            return
+        parts = event.raw_text.strip().split()
+        if len(parts) < 2:
+            current_max = getattr(self._bot._orchestrator.current, "max_positions", 3) if hasattr(self._bot, "_orchestrator") else 3
+            await event.reply(f"• <b>Current Max Bags:</b> <code>{current_max}</code>\nUsage: <code>/setmaxbags 3</code>", parse_mode="html")
+            return
+        try:
+            new_max = int(parts[1])
+            if new_max <= 0 or new_max > 50:
+                await event.reply("❌ Please specify a valid max bags cap between 1 and 50.", parse_mode="html")
+                return
+            if hasattr(self._bot, "_orchestrator") and self._bot._orchestrator:
+                self._bot._orchestrator.current.max_positions = new_max
+            await event.reply(f"✅ <b>Max Open Bags cap updated to {new_max}.</b>", parse_mode="html")
+        except Exception as e:
+            await event.reply(f"❌ Error setting max bags: {e}", parse_mode="html")
+
+    async def _cmd_panic(self, event):
+        if not await self._require_admin(event):
+            return
+        positions = getattr(self._bot, '_positions', {})
+        active = [p for p in positions.values() if getattr(p, "active", True)]
+        if not active:
+            await event.reply("<b>📍 PANIC EXIT</b>\nNo open positions to sell.", parse_mode="html")
+            return
+        
+        await event.reply(f"🚨 <b>EMERGENCY SELL ALL INITIATED:</b> Dumping {len(active)} active bags...", parse_mode="html")
+        for pos in active:
+            try:
+                await self._bot._exit_position(pos, "PANIC / EMERGENCY SELL ALL", 1.0)
+            except Exception as e:
+                logger.error(f"Error panic selling {pos.symbol}: {e}")
+        await event.reply("✅ <b>PANIC SELL COMPLETE:</b> All open bags dumped to liquid SOL.", parse_mode="html")
 
     async def _cmd_active(self, event):
         await self.log_brain_event('active', 'Active positions checked')

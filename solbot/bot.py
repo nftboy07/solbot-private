@@ -54,6 +54,7 @@ from solbot.hummingbot_pmm import HummingbotPMMManager
 from solbot.missed_runner_engine import MissedRunnerEngine
 from solbot.portfolio_guard import PortfolioGuard
 from solbot.risk_sizer import DynamicRiskSizer
+from solbot.strategy_orchestrator import StrategyOrchestrator
 
 def _format_tokens(amount: float) -> str:
     if amount >= 1_000_000_000:
@@ -135,6 +136,8 @@ class Solbot:
         self._owns_db = db is None
         self._brain = AGIBrain(self._db, self._config)
         self._risk_manager = RiskManager()
+        self._orchestrator = StrategyOrchestrator(initial_strategy="alpha_sniper", auto_switch=True)
+        self._orchestrator.set_callback(self._on_strategy_switched)
         self._position_manager_tasks: Dict[str, asyncio.Task] = {}
         # Missed entry tracker: mint -> {symbol, alert_price_usd, alert_time, notified_milestones}
         self._missed_runners: Dict[str, Dict] = {}
@@ -305,6 +308,19 @@ class Solbot:
             logger.info(f"Loaded {len(self._positions)} positions, {len(self._filter._copy_targets)} whales, and {len(self._kol_tracker.wallets)} KOLs")
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
+
+    def _on_strategy_switched(self, old_strat: str, new_strat: str, reason: str):
+        if self._telegram:
+            curr = self._orchestrator.current
+            msg = (
+                f"🔄 <b>STRATEGY SWITCHED</b> 🔄\n\n"
+                f"• <b>Active:</b> <b>{curr.display_name}</b>\n"
+                f"• <b>Previous:</b> <code>{old_strat}</code>\n"
+                f"• <b>Reason:</b> <i>{reason}</i>\n"
+                f"• <b>Size:</b> <code>{curr.buy_amount_sol} SOL</code> | <b>Max Bags:</b> <code>{curr.max_positions}</code>\n"
+                f"• <b>Stop Loss:</b> <code>{curr.stop_loss_pct*100:.0f}%</code> | <b>AI Min:</b> <code>{curr.ai_min_score}</code>"
+            )
+            asyncio.create_task(self._telegram.send_message(msg))
 
     async def start(self):
         setup_logger(self._config.logging)
@@ -2085,6 +2101,12 @@ class Solbot:
                 pnl_sol = pos.size * (roi - 1.0)
                 await self._risk_manager.on_position_closed(pos.mint, pnl_sol)
                 
+                # Record trade result in Strategy Orchestrator (Auto-Failover)
+                if hasattr(self, "_orchestrator") and self._orchestrator:
+                    failover_alert = self._orchestrator.record_trade_result(pnl_sol, (roi - 1.0) * 100)
+                    if failover_alert and self._telegram:
+                        asyncio.create_task(self._telegram.send_message(failover_alert))
+
                 # Auto-reclaim ATA rent refund upon full close
                 if self._pump_client and not getattr(self._pump_client, "paper_enabled", False):
                     asyncio.create_task(self._pump_client.reclaim_empty_token_accounts())
