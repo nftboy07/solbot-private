@@ -674,6 +674,9 @@ class Solbot:
                 )
                 asyncio.create_task(self._db.update_position_pnl(mint, 0.0, "closed"))
             elif balance <= 0:
+                # Allow 60 seconds for RPC nodes to index fresh on-chain token accounts
+                if time() - getattr(pos, "start_time", 0) < 60.0:
+                    continue
                 pos.active = False
                 self._positions.pop(mint, None)
                 purged.append(mint)

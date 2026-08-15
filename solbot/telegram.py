@@ -2312,13 +2312,14 @@ class TelegramController:
                 for r in rows:
                     pnl_fraction = float(r['pnl'] or 0.0)
                     size = min(float(r['size'] or 0.02), 0.1)
-                    closed_trades.append({
-                        "mint": r['mint'],
-                        "pnl_fraction": pnl_fraction,
-                        "pnl_sol": pnl_fraction * size,
-                        "is_win": pnl_fraction > 0,
-                    })
-                    realized_pnl += pnl_fraction * size
+                    if abs(pnl_fraction) > 0.001:
+                        closed_trades.append({
+                            "mint": r['mint'],
+                            "pnl_fraction": pnl_fraction,
+                            "pnl_sol": pnl_fraction * size,
+                            "is_win": pnl_fraction > 0,
+                        })
+                        realized_pnl += pnl_fraction * size
             except Exception as e:
                 logger.error(f"Error querying closed positions: {e}")
 
@@ -3014,13 +3015,14 @@ class TelegramController:
                 for r in rows:
                     pnl_fraction = float(r['pnl'] or 0.0)
                     size = min(float(r['size'] or 0.02), 0.1)
-                    closed_trades.append({
-                        "mint": r['mint'],
-                        "pnl_fraction": pnl_fraction,
-                        "pnl_sol": pnl_fraction * size,
-                        "is_win": pnl_fraction > 0,
-                    })
-                    realized_pnl += pnl_fraction * size
+                    if abs(pnl_fraction) > 0.001:
+                        closed_trades.append({
+                            "mint": r['mint'],
+                            "pnl_fraction": pnl_fraction,
+                            "pnl_sol": pnl_fraction * size,
+                            "is_win": pnl_fraction > 0,
+                        })
+                        realized_pnl += pnl_fraction * size
             except Exception as e:
                 logger.error(f"Error querying closed positions for demostats: {e}")
 
