@@ -695,6 +695,8 @@ class Solbot:
                 len(purged), len(on_chain),
             )
             self._save_state()
+            if self._pump_client and not getattr(self._pump_client, "_paper_enabled", False):
+                asyncio.create_task(self._pump_client.reclaim_empty_token_accounts())
 
     async def _rotate_until_under_cap(
         self,
@@ -1992,8 +1994,8 @@ class Solbot:
             self._save_state()
             return
         sell_amount = token_balance * pct
-        # We increase priority fee for exits triggered by KOL sales
-        priority_fee = 0.01 if "KOL EXIT" in reason else 0.001
+        # Optimized priority fee for exits
+        priority_fee = 0.0005 if "KOL EXIT" in reason else 0.00005
         # Track actual fraction of initial position being sold
         actual_pct_sold = pct * getattr(pos, "remaining_fraction", 1.0)
         pos.remaining_fraction = max(0.0, getattr(pos, "remaining_fraction", 1.0) - actual_pct_sold)
@@ -2009,6 +2011,7 @@ class Solbot:
             action="sell",
             amount=sell_amount,
             denominated_in_sol=False,
+            slippage=1000,
             priority_fee=priority_fee,
             use_jito=sell_profile.use_jito,
         )
@@ -2057,6 +2060,10 @@ class Solbot:
                 # Track closed position in RiskManager
                 pnl_sol = pos.size * (roi - 1.0)
                 await self._risk_manager.on_position_closed(pos.mint, pnl_sol)
+                
+                # Auto-reclaim ATA rent refund upon full close
+                if self._pump_client and not getattr(self._pump_client, "paper_enabled", False):
+                    asyncio.create_task(self._pump_client.reclaim_empty_token_accounts())
                 
                 # Check for 100 trades retraining
                 if len(self._trades) > 0 and len(self._trades) % 100 == 0:
