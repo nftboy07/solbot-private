@@ -554,9 +554,10 @@ class PumpFunClient:
         start_time = time.perf_counter()
         
         amount = amount or self._jupiter_config.buy_amount_sol
-        slippage = slippage or self._jupiter_config.slippage_bps
+        if slippage is None:
+            slippage = 1000 if action == "sell" else getattr(self._jupiter_config, "slippage_bps", 300)
         # Config carries basis points; PumpPortal's `slippage` field is a percent.
-        # Sending bps straight through asks for 300% tolerance instead of 3%.
+        # Sending 1000 bps becomes 10.0% slippage.
         slippage_pct = slippage / 100.0
 
         if self._paper_enabled:

@@ -446,9 +446,24 @@ class Solbot:
         self._missed_tracker = asyncio.create_task(self._missed_entry_tracker_loop())
         self._congestion_poller = asyncio.create_task(self._poll_network_congestion())
         self._autotune_poller = asyncio.create_task(self._ai_autotune_loop())
+        asyncio.create_task(self._auto_rent_reclaimer_loop())
         asyncio.create_task(self._component_heartbeat_loop())
         if self._config.hummingbot.enabled:
             await self._hummingbot_pmm.start()
+
+    async def _auto_rent_reclaimer_loop(self):
+        """Periodically scan and reclaim empty ATA rent deposits in the background."""
+        while self._running:
+            try:
+                await asyncio.sleep(180)
+                if self._pump_client and not getattr(self._pump_client, "_paper_enabled", False):
+                    reclaimed = await self._pump_client.reclaim_empty_token_accounts()
+                    if reclaimed > 0:
+                        logger.info("Auto Rent Reclaimer: Refunded +%.4f SOL to wallet", reclaimed)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Error in auto rent reclaimer loop: %s", e)
 
     def _sentiment_for_mint(self, mint: str) -> str:
         info = self._kol_mentions.get(mint)
@@ -1969,11 +1984,15 @@ class Solbot:
                         self._save_state()
 
             # 3. Stop loss & Break-even checks
-            if any(tp in pos.tp_targets_hit for tp in (2.0, 3.0)):
+            # Dynamic Break-Even Floor: Once token hits +20% gain, lock stop-loss to +2% profit floor
+            if pos.highest_price >= (pos.entry_price * 1.20) and gain <= 1.02:
+                await self._exit_position(pos, "Break-even Floor Triggered (+2% Profit Protected)", 1.0)
+                break
+            elif any(tp in pos.tp_targets_hit for tp in (1.4, 2.0, 3.0)):
                 if gain <= 1.05:
                     await self._exit_position(pos, "Break-even Stop (+5% Capital Preserved)", 1.0)
                     break
-            elif gain <= (1.0 - strat.stop_loss_pct):
+            elif gain <= (1.0 - getattr(strat, "stop_loss_pct", 0.15)):
                 await self._exit_position(pos, "Stop-loss", 1.0)
                 break
                     

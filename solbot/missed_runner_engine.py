@@ -88,6 +88,17 @@ class MissedRunnerEngine:
             common_patterns=["Micro-cap entry < $100k", "Gradual bonding curve completion"],
         ),
         PumpedTokenRecord(
+            symbol="lickingcat",
+            name="licking cat",
+            mint="NSdtHCuV2u8rNkJmCgR3qGvY4FqM3iF9xG1k7D4pump",
+            alert_mcap=4_222.0,
+            peak_mcap=418_048.0,
+            multiplier=98.2,
+            time_to_peak_mins=120,
+            early_buyers=["7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"],
+            common_patterns=["Micro-cap pump.fun sniper", "Rapid bonding curve surge > 90x", "Sustained >70% buy pressure"],
+        ),
+        PumpedTokenRecord(
             symbol="Modi",
             name="56 inch ka chhota bandar",
             mint="EWqybQSYa93Wjm9D5VVqh1Z99cCvThNS6Kyesaakpump",
@@ -184,15 +195,21 @@ class MissedRunnerEngine:
         reasons = []
         score = 0.0
 
-        # 1. Market Cap Sweet Spot ($80k - $880k)
+        # 1. Market Cap Sweet Spot ($4k - $880k corridor)
         if sig.min_mcap_usd <= mcap_usd <= sig.max_mcap_usd:
             score += 35.0
             reasons.append(f"MCap ${mcap_usd:,.0f} in sweet-spot (${sig.min_mcap_usd:,.0f}-${sig.max_mcap_usd:,.0f})")
+        elif 3_500.0 <= mcap_usd <= 80_000.0:
+            score += 35.0
+            reasons.append(f"MCap ${mcap_usd:,.0f} in micro-cap breakout zone ($3.5k-$80k)")
         else:
             reasons.append(f"MCap ${mcap_usd:,.0f} outside sweet-spot")
 
-        # 2. Buy/Sell Ratio (>= 65% Buy Volume)
-        if buy_ratio >= sig.min_buy_volume_ratio:
+        # 2. Buy/Sell Ratio (>= 65% Buy Volume, with >75% super-bonus)
+        if buy_ratio >= 0.75:
+            score += 30.0
+            reasons.append(f"Super-strong buy pressure ({buy_ratio*100:.1f}%)")
+        elif buy_ratio >= sig.min_buy_volume_ratio:
             score += 25.0
             reasons.append(f"Strong buy pressure ({buy_ratio*100:.1f}%)")
         else:
