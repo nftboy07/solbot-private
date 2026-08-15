@@ -939,6 +939,32 @@ class Solbot:
     async def _evaluate_token_for_snipe(self, token: TokenEvent, raw_data: dict):
         """Run the full filter chain after sniper delay."""
         profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+
+        # 1. Anti-Spam Duplicate Symbol Protection: Max 1 active position per ticker symbol
+        active_symbols = [
+            getattr(p, "symbol", "").strip().upper()
+            for p in self._positions.values()
+            if getattr(p, "active", True)
+        ]
+        token_sym = (token.symbol or "").strip().upper()
+        if token_sym and active_symbols.count(token_sym) >= 1:
+            logger.warning(
+                "SKIPPING %s: Already holding active bag for ticker %s (anti-spam clone throttle)",
+                token.symbol, token_sym,
+            )
+            return
+
+        # 2. Max Active Positions Cap
+        active_count = sum(1 for p in self._positions.values() if getattr(p, "active", True))
+        max_cap = getattr(profile, "max_positions_cap", 25) or 25
+        if active_count >= max_cap and not getattr(profile, "recycle_mode", False):
+            self._stats.bump("skip_position_limit")
+            logger.warning(
+                "SKIPPING %s: Max positions cap reached (%s >= %s)",
+                token.symbol, active_count, max_cap,
+            )
+            return
+
         genome = {}
 
         c_score = 50.0
