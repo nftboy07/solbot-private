@@ -834,7 +834,9 @@ class Solbot:
             self._risk_manager.state.kill_switch_active = False
             if is_dry:
                 self._risk_manager.bankroll_sol = float(getattr(self._config.strategy, "dry_run_start_sol", 5.0))
-        self.apply_risk_preset(self._filter_profile_name or "degen")
+        env_profile = os.getenv("FILTER_PROFILE", "").strip().lower() or getattr(self._config, "filter_profile", None) or self._filter_profile_name or "normal"
+        self._filter_profile_name = env_profile
+        self.apply_risk_preset(env_profile)
         self._save_state()
         logger.info("Trading mode enforced: autobuy=ON paper=%s kill=OFF profile=%s", "ON" if is_dry else "OFF", self._filter_profile_name)
 
