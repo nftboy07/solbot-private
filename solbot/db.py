@@ -294,12 +294,14 @@ class Database:
         await self._execute_write(query, params)
 
     async def update_position_pnl(self, mint: str, pnl: float, status: str = None):
+        import time
+        now_ts = int(time.time())
         if status:
-            query = "UPDATE positions SET pnl = ?, status = ? WHERE mint = ?"
-            params = (pnl, status, mint)
+            query = "UPDATE positions SET pnl = ?, status = ?, timestamp = ? WHERE mint = ?"
+            params = (pnl, status, now_ts, mint)
         else:
-            query = "UPDATE positions SET pnl = ? WHERE mint = ?"
-            params = (pnl, mint)
+            query = "UPDATE positions SET pnl = ?, timestamp = ? WHERE mint = ?"
+            params = (pnl, now_ts, mint)
         await self._execute_write(query, params)
 
     async def get_active_positions(self) -> List[Dict]:

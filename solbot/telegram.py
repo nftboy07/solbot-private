@@ -2299,7 +2299,10 @@ class TelegramController:
         closed_trades = []
         realized_pnl = 0.0
         db = getattr(self._bot, "_db", None)
-        session_start_ts = getattr(getattr(self._bot, "_stats", None), "_start_time", 0.0) or (time.time() - 86400)
+        stats_obj = getattr(self._bot, "_stats", None)
+        session_start_ts = float(getattr(stats_obj, "started_at", 0.0) or 0.0)
+        if session_start_ts <= 0:
+            session_start_ts = time.time() - 3600
         if db:
             try:
                 rows = await db._execute_read(
@@ -2994,18 +2997,23 @@ class TelegramController:
         is_dry_run = getattr(self._bot._config.strategy, "dry_run", True)
         start_sol = getattr(self._bot._config.strategy, "dry_run_start_sol", 5.0)
 
-        # 1. Query closed trades from database
+        # 1. Query closed trades from database for this session
         closed_trades = []
         realized_pnl = 0.0
         db = getattr(self._bot, "_db", None)
+        stats_obj = getattr(self._bot, "_stats", None)
+        session_start_ts = float(getattr(stats_obj, "started_at", 0.0) or 0.0)
+        if session_start_ts <= 0:
+            session_start_ts = time.time() - 3600
         if db:
             try:
                 rows = await db._execute_read(
-                    "SELECT mint, entry_price, size, pnl, reason FROM positions WHERE status = 'closed'"
+                    "SELECT mint, entry_price, size, pnl, reason, timestamp FROM positions WHERE status = 'closed' AND timestamp >= ?",
+                    (int(session_start_ts),)
                 )
                 for r in rows:
                     pnl_fraction = float(r['pnl'] or 0.0)
-                    size = float(r['size'] or 0.02)
+                    size = min(float(r['size'] or 0.02), 0.1)
                     closed_trades.append({
                         "mint": r['mint'],
                         "pnl_fraction": pnl_fraction,
@@ -3025,8 +3033,9 @@ class TelegramController:
                 sold_frac = 1.0 - rem_frac
                 entry = getattr(p, "entry_price", 0.0)
                 highest = getattr(p, "highest_price", entry)
+                effective_size = min(float(getattr(p, "size", 0.02) or 0.02), 0.1)
                 if entry > 0:
-                    realized_pnl += p.size * sold_frac * ((highest - entry) / entry)
+                    realized_pnl += effective_size * sold_frac * ((highest - entry) / entry)
 
         # 3. Update live prices for active positions on-demand so scorecard is always 100% live!
         unrealized_pnl = 0.0
