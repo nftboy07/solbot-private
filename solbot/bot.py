@@ -397,6 +397,12 @@ class Solbot:
 
         for pos in self._positions.values():
             if pos.active:
+                if getattr(self._pump_client, "paper_enabled", False) and pos.mint not in self._pump_client._paper_tokens:
+                    qty = pos.size * getattr(pos, "remaining_fraction", 1.0) * self._pump_client.PAPER_TOKENS_PER_SOL
+                    self._pump_client._paper_tokens[pos.mint] = qty
+                    self._pump_client._paper_basis[pos.mint] = pos.size * getattr(pos, "remaining_fraction", 1.0)
+                    if pos.entry_price > 0:
+                        self._pump_client.set_paper_mark(pos.mint, pos.current_price / pos.entry_price)
                 self._spawn_position_manager(pos)
                 
         # Start watch queue manager
@@ -1940,6 +1946,11 @@ class Solbot:
     async def _exit_position(self, pos: Position, reason: str, pct: float):
         if not pos.active: return
         token_balance = await self._pump_client.get_token_balance(pos.mint)
+        if token_balance <= 0 and getattr(self._pump_client, "paper_enabled", False):
+            token_balance = pos.size * getattr(pos, "remaining_fraction", 1.0) * self._pump_client.PAPER_TOKENS_PER_SOL
+            self._pump_client._paper_tokens[pos.mint] = token_balance
+            self._pump_client._paper_basis[pos.mint] = pos.size * getattr(pos, "remaining_fraction", 1.0)
+
         if token_balance <= 0:
             pos.active = False
             if pos.mint in self._positions: del self._positions[pos.mint]

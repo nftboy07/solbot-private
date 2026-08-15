@@ -2298,28 +2298,7 @@ class TelegramController:
                         roi = pnl * 100.0
                         mint = r['mint'] or "Unknown"
                         reason = r['reason'] or "Exit"
-                        msg.append(f"• <code>{mint[:8]}...</code> | PnL: <code>{roi:+.1f}%</code> | <i>{reason}</i>")
-                else:
-                    msg.append("No closed trades recorded yet.")
-            except Exception as e:
-                msg.append(f"Error: {e}")
-        await event.reply("\n".join(msg), parse_mode="html")
-
-    async def _cmd_panic(self, event):
-        if not await self._require_admin(event):
-            return
-        positions = getattr(self._bot, '_positions', {})
-        active = [p for p in positions.values() if getattr(p, "active", True)]
-        if not active:
-            await event.reply("⚠️ No active positions to liquidate.")
-            return
-
-        status_msg = await event.reply(f"🚨 <b>EMERGENCY SELL-ALL INITIATED!</b>\nLiquidating <code>{len(active)}</code> active positions in parallel...", parse_mode="html")
-        tasks = []
-        for p in active:
-            tasks.append(self._bot._exit_position(p, "Emergency Panic Sell", 1.0))
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await status_msg.edit(f"✅ <b>All {len(active)} active positions liquidated!</b>", parse_mode="html")
+await event.reply("\n".join(msg), parse_mode="html")
 
     async def _cmd_livestats(self, event):
         if not await self._require_admin(event):
@@ -2333,18 +2312,39 @@ class TelegramController:
             except Exception:
                 bal_sol = 0.0
 
+        # Query closed trades from database
+        closed_trades = []
+        realized_pnl = 0.0
+        db = getattr(self._bot, "_db", None)
+        if db:
+            try:
+                rows = await db._execute_read(
+                    "SELECT mint, entry_price, size, pnl, reason FROM positions WHERE status = 'closed'"
+                )
+                for r in rows:
+                    pnl_fraction = float(r['pnl'] or 0.0)
+                    size = float(r['size'] or 0.02)
+                    closed_trades.append({
+                        "mint": r['mint'],
+                        "pnl_fraction": pnl_fraction,
+                        "pnl_sol": pnl_fraction * size,
+                        "is_win": pnl_fraction > 0,
+                    })
+                    realized_pnl += pnl_fraction * size
+            except Exception as e:
+                logger.error(f"Error querying closed positions: {e}")
+
+        # Active positions and partial TP calculations
         positions = list(self._bot._positions.values())
         active_positions = [p for p in positions if getattr(p, "active", True)]
-        closed_positions = [p for p in positions if not getattr(p, "active", True)]
-
-        # Calculate realized PnL
-        realized_pnl = 0.0
-        for p in closed_positions:
-            entry = getattr(p, "entry_price", 0.0)
-            exit_p = getattr(p, "current_price", entry)
-            size = getattr(p, "size", 0.0)
-            if entry > 0:
-                realized_pnl += ((exit_p - entry) / entry) * size
+        for p in active_positions:
+            rem_frac = getattr(p, "remaining_fraction", 1.0)
+            if rem_frac < 0.99:
+                sold_frac = 1.0 - rem_frac
+                entry = getattr(p, "entry_price", 0.0)
+                highest = getattr(p, "highest_price", entry)
+                if entry > 0:
+                    realized_pnl += p.size * sold_frac * ((highest - entry) / entry)
 
         # Update live prices for active positions
         unrealized_pnl = 0.0
@@ -2359,22 +2359,30 @@ class TelegramController:
                     if live_p > 0:
                         p.current_price = live_p
                         current = live_p
+                        if live_p > getattr(p, "highest_price", 0.0):
+                            p.highest_price = live_p
                 except Exception:
                     pass
             current = current or entry
-            size = getattr(p, "size", 0.0)
+            rem_frac = getattr(p, "remaining_fraction", 1.0)
+            effective_size = getattr(p, "size", 0.0) * rem_frac
             p_gain_pct = 0.0
             if entry > 0:
-                p_pnl = ((current - entry) / entry) * size
+                p_pnl = ((current - entry) / entry) * effective_size
                 p_gain_pct = ((current / entry) - 1.0) * 100.0
                 unrealized_pnl += p_pnl
-            pos_lines.append(f"• <b>{getattr(p, 'symbol', p.mint[:6])}</b>: <code>{p_gain_pct:+.1f}%</code> ({size:.3f} SOL)")
+            pos_lines.append((p_gain_pct, f"• <b>{getattr(p, 'symbol', p.mint[:6])}</b>: <code>{p_gain_pct:+.1f}%</code> ({effective_size:.3f} SOL)"))
+
+        # Sort top performing bags first
+        pos_lines.sort(key=lambda x: x[0], reverse=True)
+        formatted_pos = [line for _, line in pos_lines]
 
         net_pnl = realized_pnl + unrealized_pnl
-        wins = [p for p in closed_positions if getattr(p, "highest_price", 0) > getattr(p, "entry_price", 1)]
-        win_rate = (len(wins) / len(closed_positions) * 100) if closed_positions else 0.0
+        closed_wins = sum(1 for t in closed_trades if t["is_win"])
+        win_rate = (closed_wins / len(closed_trades) * 100.0) if closed_trades else 0.0
+        active_in_profit = sum(1 for p in active_positions if getattr(p, "current_price", 0) > getattr(p, "entry_price", 1))
 
-        if len(closed_positions) == 0 and len(active_positions) == 0:
+        if len(closed_trades) == 0 and len(active_positions) == 0:
             status_emoji = "🟢 READY (Zero Open Positions)"
         elif net_pnl >= 0:
             status_emoji = "🟢 PROFITABLE"
@@ -2393,9 +2401,9 @@ class TelegramController:
             f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.3f} SOL</code>",
             f"  └ <i>Realized: {realized_pnl:+.3f} SOL | Unrealized: {unrealized_pnl:+.3f} SOL</i>",
             "",
-            f"• <b>Active On-Chain Bags:</b> <code>{len(active_positions)}</code>",
-            f"• <b>Closed Trades:</b> <code>{len(closed_positions)}</code>",
-            f"• <b>Live Win Rate:</b> <code>{win_rate:.1f}%</code>",
+            f"• <b>Active On-Chain Bags:</b> <code>{len(active_positions)}</code> (<b>{active_in_profit}/{len(active_positions)} in Profit</b>)",
+            f"• <b>Closed Trades:</b> <code>{len(closed_trades)}</code>",
+            f"• <b>Closed Win Rate:</b> <code>{win_rate:.1f}%</code>",
             f"• <b>Uptime:</b> <code>{uptime_min:.1f} min</code>",
         ]
         if pos_lines:
@@ -2996,20 +3004,41 @@ class TelegramController:
         is_dry_run = getattr(self._bot._config.strategy, "dry_run", True)
         start_sol = getattr(self._bot._config.strategy, "dry_run_start_sol", 5.0)
 
+        # 1. Query closed trades from database
+        closed_trades = []
+        realized_pnl = 0.0
+        db = getattr(self._bot, "_db", None)
+        if db:
+            try:
+                rows = await db._execute_read(
+                    "SELECT mint, entry_price, size, pnl, reason FROM positions WHERE status = 'closed'"
+                )
+                for r in rows:
+                    pnl_fraction = float(r['pnl'] or 0.0)
+                    size = float(r['size'] or 0.02)
+                    closed_trades.append({
+                        "mint": r['mint'],
+                        "pnl_fraction": pnl_fraction,
+                        "pnl_sol": pnl_fraction * size,
+                        "is_win": pnl_fraction > 0,
+                    })
+                    realized_pnl += pnl_fraction * size
+            except Exception as e:
+                logger.error(f"Error querying closed positions for demostats: {e}")
+
+        # 2. Active positions and partial TP calculations
         positions = list(self._bot._positions.values())
         active_positions = [p for p in positions if getattr(p, "active", True)]
-        closed_positions = [p for p in positions if not getattr(p, "active", True)]
+        for p in active_positions:
+            rem_frac = getattr(p, "remaining_fraction", 1.0)
+            if rem_frac < 0.99:
+                sold_frac = 1.0 - rem_frac
+                entry = getattr(p, "entry_price", 0.0)
+                highest = getattr(p, "highest_price", entry)
+                if entry > 0:
+                    realized_pnl += p.size * sold_frac * ((highest - entry) / entry)
 
-        # Calculate realized PnL from trades
-        realized_pnl = 0.0
-        for p in closed_positions:
-            entry = getattr(p, "entry_price", 0.0)
-            exit_p = getattr(p, "current_price", entry)
-            size = getattr(p, "size", 0.0)
-            if entry > 0:
-                realized_pnl += ((exit_p - entry) / entry) * size
-
-        # Update live prices for active positions on-demand so scorecard is always 100% live!
+        # 3. Update live prices for active positions on-demand so scorecard is always 100% live!
         unrealized_pnl = 0.0
         pos_lines = []
         sol_p = getattr(self, "_sol_price", 150.0) or 150.0
@@ -3027,22 +3056,28 @@ class TelegramController:
                 except Exception:
                     pass
             current = current or entry
-            size = getattr(p, "size", 0.0)
+            rem_frac = getattr(p, "remaining_fraction", 1.0)
+            effective_size = getattr(p, "size", 0.0) * rem_frac
             p_gain_pct = 0.0
             if entry > 0:
-                p_pnl = ((current - entry) / entry) * size
+                p_pnl = ((current - entry) / entry) * effective_size
                 p_gain_pct = ((current / entry) - 1.0) * 100.0
                 unrealized_pnl += p_pnl
-            pos_lines.append(f"• <b>{getattr(p, 'symbol', p.mint[:6])}</b>: <code>{p_gain_pct:+.1f}%</code> ({size:.3f} SOL)")
+            pos_lines.append((p_gain_pct, f"• <b>{getattr(p, 'symbol', p.mint[:6])}</b>: <code>{p_gain_pct:+.1f}%</code> ({effective_size:.3f} SOL)"))
+
+        # Sort top multi-baggers to the top
+        pos_lines.sort(key=lambda x: x[0], reverse=True)
+        formatted_pos = [line for _, line in pos_lines]
 
         net_pnl = realized_pnl + unrealized_pnl
         current_sol = max(0.0, start_sol + net_pnl)
         pnl_pct = (net_pnl / max(start_sol, 0.001)) * 100.0
 
-        wins = [p for p in closed_positions if getattr(p, "highest_price", 0) > getattr(p, "entry_price", 1)]
-        win_rate = (len(wins) / len(closed_positions) * 100) if closed_positions else 0.0
+        closed_wins = sum(1 for t in closed_trades if t["is_win"])
+        win_rate = (closed_wins / len(closed_trades) * 100.0) if closed_trades else 0.0
+        active_in_profit = sum(1 for p in active_positions if getattr(p, "current_price", 0) > getattr(p, "entry_price", 1))
 
-        if len(closed_positions) == 0 and len(active_positions) == 0:
+        if len(closed_trades) == 0 and len(active_positions) == 0:
             status_emoji = "🟢 READY (Zero Trades Yet)"
         elif net_pnl >= 0:
             status_emoji = "🟢 PROFITABLE"
@@ -3062,16 +3097,16 @@ class TelegramController:
             f"• <b>Net PnL:</b> <code>{'+' if net_pnl >= 0 else ''}{net_pnl:.3f} SOL ({pnl_pct:+.1f}%)</code>",
             f"  └ <i>Realized: {realized_pnl:+.3f} SOL | Unrealized: {unrealized_pnl:+.3f} SOL</i>",
             "",
-            f"• <b>Open Active Positions:</b> <code>{len(active_positions)}</code>",
-            f"• <b>Closed Trades:</b> <code>{len(closed_positions)}</code>",
-            f"• <b>Win Rate:</b> <code>{win_rate:.1f}%</code>",
+            f"• <b>Open Active Positions:</b> <code>{len(active_positions)}</code> (<b>{active_in_profit}/{len(active_positions)} in Profit</b>)",
+            f"• <b>Closed Trades:</b> <code>{len(closed_trades)}</code>",
+            f"• <b>Closed Win Rate:</b> <code>{win_rate:.1f}%</code>",
         ]
-        if pos_lines:
+        if formatted_pos:
             msg.append("")
-            msg.append("<b>Active Demo Bags (Live PnL):</b>")
-            msg.extend(pos_lines[:8])
-            if len(pos_lines) > 8:
-                msg.append(f"<i>...and {len(pos_lines)-8} more in /active</i>")
+            msg.append("<b>Top Active Bags (Live Multi-Baggers):</b>")
+            msg.extend(formatted_pos[:8])
+            if len(formatted_pos) > 8:
+                msg.append(f"<i>...and {len(formatted_pos)-8} more in /active</i>")
 
         msg.append("\n<i>Strategy: Missed Runner Clone Sniper + Dynamic Kelly Sizer + 4-Tier Moonbag Exit</i>")
         await event.reply("\n".join(msg), parse_mode="html")
