@@ -258,6 +258,10 @@ class TelegramController:
         async def pipeline_handler(event):
             await self._cmd_pipeline(event)
 
+        @self._client.on(events.NewMessage(pattern='/reclaim'))
+        async def reclaim_handler(event):
+            await self._cmd_reclaim(event)
+
         @self._client.on(events.NewMessage(pattern='/live'))
         async def live_handler(event):
             await self._cmd_live(event)
@@ -2206,6 +2210,25 @@ class TelegramController:
                 f"Ghosts Purged: <code>{stats.ghosts_purged}</code>",
             ])
         await event.reply("\n".join(msg), parse_mode="html")
+
+    async def _cmd_reclaim(self, event):
+        if not await self._require_admin(event):
+            return
+        await event.reply("🔄 <b>Scanning on-chain token accounts to reclaim SOL rent...</b>", parse_mode="html")
+        if self._bot._pump_client:
+            try:
+                reclaimed = await self._bot._pump_client.reclaim_empty_token_accounts()
+                bal = await self._bot._pump_client.get_sol_balance()
+                await event.reply(
+                    f"✅ <b>RENT RECLAIM COMPLETE</b>\n\n"
+                    f"• <b>SOL Refunded:</b> <code>+{reclaimed:.4f} SOL</code>\n"
+                    f"• <b>New Balance:</b> <code>{bal:.4f} SOL</code>",
+                    parse_mode="html"
+                )
+            except Exception as e:
+                await event.reply(f"❌ Error reclaiming rent: <code>{e}</code>", parse_mode="html")
+        else:
+            await event.reply("Pump client unavailable.", parse_mode="html")
 
     async def _cmd_active(self, event):
         await self.log_brain_event('active', 'Active positions checked')

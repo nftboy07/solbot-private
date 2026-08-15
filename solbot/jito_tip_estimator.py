@@ -84,6 +84,6 @@ class JitoTipEstimator:
         elif priority == "max":
             key = "95th"
 
-        tip = self._percentiles.get(key, 0.00005)
-        # Enforce safety boundaries: min 0.0005 SOL, max 0.03 SOL to protect user wallet
-        return max(0.0005, min(0.03, tip))
+        tip = self._percentiles.get(key, 0.00003)
+        # Enforce safety boundaries: min 0.00003 SOL, max 0.001 SOL to protect user wallet from fee drag
+        return max(0.00003, min(0.001, tip))

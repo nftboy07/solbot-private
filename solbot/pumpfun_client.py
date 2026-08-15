@@ -534,11 +534,11 @@ class PumpFunClient:
                         # Convert to SOL (assume 200k compute units limit standard)
                         lamports = (micro_lamports * 200000) / 1000000.0
                         fee_sol = lamports / 1e9
-                        # Safety limits: min 0.00005 SOL, max 0.01 SOL
-                        return max(0.00005, min(0.01, fee_sol))
+                        # Safety limits: min 0.00001 SOL, max 0.001 SOL
+                        return max(0.00001, min(0.001, fee_sol))
         except Exception as e:
             logger.error(f"Error fetching prioritization fees: {e}")
-        return 0.00005
+        return 0.00001
 
     async def execute_trade(
         self, 
@@ -668,4 +668,77 @@ class PumpFunClient:
         except Exception as e:
             logger.error(f"Execution failed for {mint}: {e}")
             return TradeResult(success=False, token_mint=mint, error=str(e))
+
+    async def reclaim_empty_token_accounts(self) -> float:
+        """Finds all 0-balance token accounts and closes them to refund rent (0.00204 SOL each) to wallet."""
+        if self._paper_enabled:
+            return 0.0
+        try:
+            from spl.token.instructions import close_account, CloseAccountParams
+            from spl.token.constants import TOKEN_PROGRAM_ID
+            from solders.instruction import Instruction
+            from solders.message import Message
+            from solders.hash import Hash
+            from solders.transaction import VersionedTransaction
+
+            programs = list(TOKEN_PROGRAMS)
+            reclaimed_sol = 0.0
+            instructions = []
+            
+            for program_id in programs:
+                prog_pk = Pubkey.from_string(program_id)
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTokenAccountsByOwner",
+                    "params": [
+                        self._wallet.pubkey_str,
+                        {"programId": program_id},
+                        {"encoding": "jsonParsed"}
+                    ]
+                }
+                data, _, _ = await self._rpc_post(payload, method="getTokenAccountsByOwner")
+                if not data:
+                    continue
+                accounts = data.get("result", {}).get("value", [])
+                for acc in accounts:
+                    info = acc["account"]["data"]["parsed"]["info"]
+                    amount = float(info["tokenAmount"]["uiAmount"] or 0)
+                    acc_pubkey = Pubkey.from_string(acc["pubkey"])
+                    if amount == 0:
+                        ix = close_account(CloseAccountParams(
+                            program_id=prog_pk,
+                            account=acc_pubkey,
+                            dest=self._wallet.keypair.pubkey(),
+                            owner=self._wallet.keypair.pubkey()
+                        ))
+                        instructions.append(ix)
+                        reclaimed_sol += 0.002039
+
+            if not instructions:
+                return 0.0
+
+            rpc_url = await self._get_rpc_url()
+            for chunk in [instructions[i:i+10] for i in range(0, len(instructions), 10)]:
+                payload_hash = {
+                    "jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash",
+                    "params": [{"commitment": "confirmed"}]
+                }
+                async with self._session.post(rpc_url, json=payload_hash) as hb_resp:
+                    if hb_resp.status == 200:
+                        hb_data = await hb_resp.json()
+                        recent_blockhash = hb_data.get("result", {}).get("value", {}).get("blockhash")
+                        if recent_blockhash:
+                            msg = Message.new_with_blockhash(chunk, self._wallet.keypair.pubkey(), Hash.from_string(recent_blockhash))
+                            tx = VersionedTransaction(msg, [self._wallet.keypair])
+                            rpc_payload = {
+                                "jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
+                                "params": [base58.b58encode(bytes(tx)).decode("utf-8"), {"skipPreflight": True}]
+                            }
+                            await self._rpc_post(rpc_payload, method="sendTransaction")
+            logger.info(f"Reclaimed ~{reclaimed_sol:.4f} SOL from {len(instructions)} empty token accounts!")
+            return reclaimed_sol
+        except Exception as e:
+            logger.error(f"Error reclaiming empty token accounts: {e}")
+            return 0.0
 
