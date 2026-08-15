@@ -254,6 +254,10 @@ class TelegramController:
         async def stats_handler(event):
             await self._cmd_stats(event)
 
+        @self._client.on(events.NewMessage(pattern='/pipeline|/funnel'))
+        async def pipeline_handler(event):
+            await self._cmd_pipeline(event)
+
         @self._client.on(events.NewMessage(pattern='/live'))
         async def live_handler(event):
             await self._cmd_live(event)
@@ -2157,93 +2161,51 @@ class TelegramController:
 
     async def _cmd_stats(self, event):
         await self.log_brain_event('stats', 'Performance stats requested')
+        return await self._cmd_livestats(event)
+
+    async def _cmd_pipeline(self, event):
+        await self.log_brain_event('pipeline', 'Pipeline funnel stats requested')
         db = getattr(self._bot, '_db', None)
         stats = getattr(self._bot, "_stats", None)
         profile = getattr(self._bot._filter, "profile", None) if getattr(self._bot, "_filter", None) else None
         uptime_min = stats.uptime_seconds() / 60.0 if stats else 0.0
 
         msg = [
-            "<b>📊 SNIPER PIPELINE STATS</b>",
+            "<b>📊 SNIPER PIPELINE FUNNEL STATS</b>",
             f"Uptime: <code>{uptime_min:.1f} min</code>",
             f"Profile: <code>{getattr(self._bot, '_filter_profile_name', 'degen')}</code>",
             "",
-            "<b>Trading switches</b>",
+            "<b>Trading Switches</b>",
             f"Autobuy: <code>{'ON' if getattr(self._bot, '_autobuy_enabled', False) else 'OFF'}</code>",
-            f"Paper: <code>{'ON' if self._paper_mode else 'OFF'}</code>",
-            f"Kill: <code>{'ON' if self._kill_switch else 'OFF'}</code>",
-            f"Blacklist enforce: <code>{'ON' if profile and profile.enforce_creator_blacklist else 'OFF'}</code>",
+            f"Mode: <code>{'DRY RUN (Paper)' if self._paper_mode else 'LIVE ON-CHAIN'}</code>",
+            f"Kill Switch: <code>{'ON' if self._kill_switch else 'OFF'}</code>",
+            f"Blacklist Enforce: <code>{'ON' if profile and profile.enforce_creator_blacklist else 'OFF'}</code>",
         ]
 
         if self._bot._pump_client:
             try:
                 bal = await self._bot._pump_client.get_sol_balance()
-                msg.append(f"Wallet SOL: <code>{bal:.4f}</code>")
+                msg.append(f"Wallet SOL: <code>{bal:.4f} SOL</code>")
             except Exception as e:
                 msg.append(f"Wallet SOL: <code>error ({e})</code>")
 
         if stats:
             msg.extend([
                 "",
-                "<b>Session funnel</b>",
-                f"Tokens seen: <code>{stats.tokens_seen}</code>",
-                f"Blacklist skips: <code>{stats.skip_blacklist}</code>",
-                f"Filter skips: <code>{stats.skip_filter}</code>",
-                f"AI skips: <code>{stats.skip_ai}</code>",
+                "<b>Session Funnel</b>",
+                f"Tokens Seen: <code>{stats.tokens_seen}</code>",
+                f"Blacklist Skips: <code>{stats.skip_blacklist}</code>",
+                f"Filter Skips: <code>{stats.skip_filter}</code>",
+                f"AI Skips: <code>{stats.skip_ai}</code>",
                 f"Qualified: <code>{stats.qualified}</code>",
-                f"Snipes started: <code>{stats.snipes_started}</code>",
-                f"Buys OK / fail: <code>{stats.buys_success}</code> / <code>{stats.buys_failed}</code>",
-                f"Trading blocked: <code>{stats.skip_trading_blocked}</code>",
-                f"Low balance skips: <code>{stats.skip_low_balance}</code>",
-                f"Capital rotations: <code>{stats.capital_rotations}</code>",
-                f"Ghosts purged: <code>{stats.ghosts_purged}</code>",
+                f"Snipes Started: <code>{stats.snipes_started}</code>",
+                f"Buys OK / Fail: <code>{stats.buys_success}</code> / <code>{stats.buys_failed}</code>",
+                f"Trading Blocked: <code>{stats.skip_trading_blocked}</code>",
+                f"Low Balance Skips: <code>{stats.skip_low_balance}</code>",
+                f"Capital Rotations: <code>{stats.capital_rotations}</code>",
+                f"Ghosts Purged: <code>{stats.ghosts_purged}</code>",
             ])
-        active_n = sum(1 for p in getattr(self._bot, "_positions", {}).values() if p.active)
-        if profile and self._bot._pump_client:
-            try:
-                bal = await self._bot._pump_client.get_sol_balance()
-                cap = dynamic_max_positions(
-                    bal, profile.buy_amount_sol, profile.min_wallet_sol_reserve, profile.max_positions_cap,
-                )
-                msg.append(f"Active positions: <code>{active_n}/{cap}</code>")
-            except Exception:
-                msg.append(f"Active positions: <code>{active_n}</code>")
-        if profile:
-            msg.extend([
-                "",
-                "<b>Capital recycle</b>",
-                f"Mode: <code>{'ON' if profile.recycle_mode else 'OFF'}</code>",
-                f"Min reserve: <code>{profile.min_wallet_sol_reserve:.3f} SOL</code>",
-                f"TP ladder: <code>{profile.tp1_multiplier:.2f}x/{profile.tp2_multiplier:.2f}x</code>",
-                f"Stale exit: <code>{profile.stale_exit_minutes:.0f}m &lt; {profile.stale_min_gain:.2f}x</code>",
-                f"Max hold: <code>{profile.max_hold_minutes:.0f}m</code>",
-            ])
-            top = stats.top_filter_reasons(5)
-            if top:
-                msg.append("")
-                msg.append("<b>Top filter blocks</b>")
-                for reason, count in top:
-                    msg.append(f"• <code>{reason}</code>: {count}")
-
-        if db:
-            try:
-                rows = await db._execute_read("SELECT pnl FROM positions WHERE status = 'closed'")
-                trades = [float(r['pnl']) for r in rows if r['pnl'] is not None]
-                msg.append("")
-                msg.append("<b>All-time closed trades</b>")
-                if trades:
-                    wins = sum(1 for t in trades if t > 0)
-                    win_rate = wins / len(trades)
-                    avg_multiple = sum(t + 1.0 for t in trades) / len(trades)
-                    msg.append(f"Total: <code>{len(trades)}</code> | Win rate: <code>{win_rate*100:.1f}%</code>")
-                    msg.append(f"Avg multiple: <code>{avg_multiple:.2f}x</code>")
-                else:
-                    msg.append("No completed trades yet.")
-            except Exception as e:
-                msg.append(f"DB error: {e}")
-
-        blacklisted = len(getattr(self._bot, "_blacklisted_wallets", []))
-        msg.append(f"\nBlacklisted creators (tracked): <code>{blacklisted}</code>")
-        await event.reply("\n".join(msg))
+        await event.reply("\n".join(msg), parse_mode="html")
 
     async def _cmd_active(self, event):
         await self.log_brain_event('active', 'Active positions checked')
