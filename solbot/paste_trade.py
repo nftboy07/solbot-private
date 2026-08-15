@@ -16,6 +16,7 @@ class PasteTradeClient:
         self.url = (url or os.getenv("PASTE_TRADE_URL") or os.getenv("BOARD_URL") or "https://paste.trade").rstrip("/")
         self.handle = handle or os.getenv("PASTE_TRADE_HANDLE") or "@solbot"
         self._session: Optional[aiohttp.ClientSession] = None
+        self._failed_provision: bool = False
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -30,14 +31,15 @@ class PasteTradeClient:
         """Ensure an API key exists. Auto-provisions a new one if missing."""
         if self.key:
             return self.key
+        if self._failed_provision:
+            return None
 
-        logger.info("[paste.trade] No API key found. Auto-provisioning your identity...")
+        logger.debug("[paste.trade] No API key found. Attempting key resolution...")
         session = await self.get_session()
         try:
             async with session.post(f"{self.url}/api/keys", json={}) as res:
                 if res.status != 200:
-                    err_text = await res.text()
-                    logger.error(f"[paste.trade] Failed to create API key ({res.status}): {err_text}")
+                    self._failed_provision = True
                     return None
 
                 result = await res.json()

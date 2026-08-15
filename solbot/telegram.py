@@ -2389,12 +2389,12 @@ class TelegramController:
             f"• <b>Closed Win Rate:</b> <code>{win_rate:.1f}%</code>",
             f"• <b>Uptime:</b> <code>{uptime_min:.1f} min</code>",
         ]
-        if pos_lines:
+        if formatted_pos:
             msg.append("")
             msg.append("<b>Active Bags (Real-Time Price & PnL):</b>")
-            msg.extend(pos_lines[:8])
-            if len(pos_lines) > 8:
-                msg.append(f"<i>...and {len(pos_lines)-8} more in /active</i>")
+            msg.extend(formatted_pos[:8])
+            if len(formatted_pos) > 8:
+                msg.append(f"<i>...and {len(formatted_pos)-8} more in /active</i>")
 
         msg.append("\n<i>Strategy: Missed Runner Clone Sniper + Dynamic Kelly Sizer + 4-Tier Moonbag Exit</i>")
         await event.reply("\n".join(msg), parse_mode="html", link_preview=False)
