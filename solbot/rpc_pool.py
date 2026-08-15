@@ -82,7 +82,7 @@ class RPCPool:
                     )
                 break
 
-    async def _reactivate_stale_nodes(self, cooldown_seconds: int = 120):
+    async def _reactivate_stale_nodes(self, cooldown_seconds: int = 15):
         now = time.time()
         for node in self.nodes:
             if not node.is_active and node.inactive_since and (now - node.inactive_since) >= cooldown_seconds:
