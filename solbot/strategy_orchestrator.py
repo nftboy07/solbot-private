@@ -193,6 +193,10 @@ class StrategyOrchestrator:
         """Register a callback that is called when strategy switches: cb(old_name, new_name)"""
         self._switch_callbacks.append(cb)
 
+    def set_callback(self, cb):
+        """Alias for register_switch_callback"""
+        self.register_switch_callback(cb)
+
     def switch_strategy(self, strategy_name: str, reason: str = "manual") -> Tuple[bool, str]:
         """Switch the active strategy. Returns (success, message)."""
         norm_name = strategy_name.lower().strip()
