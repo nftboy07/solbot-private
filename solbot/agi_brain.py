@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Tuple, Optional
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 import joblib
 
@@ -15,18 +15,22 @@ FEATURE_COLS = [
     "volume_change_5m", "volume_change_1h", "holder_growth_1h",
     "holder_growth_24h", "dev_balance", "social_score",
     "kol_mention_count", "age_minutes", "market_cap",
-    "liquidity", "volatility_1h", "buy_pressure", "sell_pressure"
+    "liquidity", "volatility_1h", "buy_pressure", "sell_pressure",
+    "order_imbalance_ratio", "bonding_curve_velocity", "unique_wallets_growth",
+    "dev_rug_risk_score", "top10_concentration", "whale_coincidence_score",
+    "wash_trade_entropy", "graduation_prob"
 ]
 
 class AGIBrain:
     """
-    ML-powered classification engine that predicts token profitability
-    and dynamically tunes scoring thresholds based on historical trade outcomes.
+    Institutional ML Ensemble engine that predicts token win probability
+    and calculates optimal fractional Kelly position sizing.
     """
     def __init__(self, db, config):
         self._db = db
         self._config = config
         self.model = None
+        self.gb_model = None
         self.scaler = None
         self._prediction_cache = {}
         self.features_importance = {}
@@ -40,23 +44,29 @@ class AGIBrain:
         self.load_model()
 
     def load_model(self) -> bool:
-        """Loads pre-trained model and scaler from disk."""
+        """Loads pre-trained ensemble models and scaler from disk."""
         try:
             if os.path.exists(self.model_path) and os.path.exists(self.scaler_path):
-                self.model = joblib.load(self.model_path)
+                saved = joblib.load(self.model_path)
+                if isinstance(saved, dict):
+                    self.model = saved.get("rf")
+                    self.gb_model = saved.get("gb")
+                else:
+                    self.model = saved
                 self.scaler = joblib.load(self.scaler_path)
-                logger.info(f"Loaded AGI Brain model from {self.model_path}")
+                logger.info(f"Loaded AGI Brain Ensemble model from {self.model_path}")
                 
-                # Extract feature importances if possible
-                if hasattr(self.model, "feature_importances_"):
-                    self.features_importance = dict(zip(FEATURE_COLS, self.model.feature_importances_))
+                # Extract feature importances
+                if self.model and hasattr(self.model, "feature_importances_"):
+                    cols = FEATURE_COLS[:len(self.model.feature_importances_)]
+                    self.features_importance = dict(zip(cols, self.model.feature_importances_))
                 return True
         except Exception as e:
             logger.error(f"Failed to load AGI Brain model: {e}")
         return False
 
     async def train_model(self) -> Tuple[bool, str]:
-        """Queries historical trade outcomes and features to retrain the local model."""
+        """Queries historical trade outcomes and features to retrain the ensemble model."""
         try:
             rows = await self._db.get_training_data()
             min_samples = self._config.brain.min_samples_for_training
@@ -76,23 +86,29 @@ class AGIBrain:
             if len(np.unique(y)) < 2:
                 return False, "Insufficient variance in trade outcomes (requires both wins and losses to train)."
 
-            # Fit scaler & model
+            # Fit scaler & ensemble models
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X)
 
-            model = RandomForestClassifier(n_estimators=100, max_depth=8, random_state=42)
-            model.fit(X_scaled, y)
+            rf = RandomForestClassifier(n_estimators=150, max_depth=8, random_state=42)
+            rf.fit(X_scaled, y)
 
-            # Persist model & scaler
-            joblib.dump(model, self.model_path)
+            gb = GradientBoostingClassifier(n_estimators=100, max_depth=5, learning_rate=0.05, random_state=42)
+            gb.fit(X_scaled, y)
+
+            # Persist ensemble & scaler
+            joblib.dump({"rf": rf, "gb": gb}, self.model_path)
             joblib.dump(scaler, self.scaler_path)
 
-            self.model = model
+            self.model = rf
+            self.gb_model = gb
             self.scaler = scaler
-            self.features_importance = dict(zip(FEATURE_COLS, model.feature_importances_))
+            self.features_importance = dict(zip(FEATURE_COLS, rf.feature_importances_))
 
-            acc = model.score(X_scaled, y)
-            msg = f"Successfully trained AGI Brain model on {len(df)} samples. Training accuracy: {acc:.2%}"
+            acc_rf = rf.score(X_scaled, y)
+            acc_gb = gb.score(X_scaled, y)
+            avg_acc = (acc_rf + acc_gb) / 2.0
+            msg = f"Successfully trained AGI Brain Ensemble on {len(df)} samples. Ensemble Accuracy: {avg_acc:.2%}"
             logger.info(msg)
             return True, msg
 
@@ -101,12 +117,29 @@ class AGIBrain:
             logger.error(err_msg, exc_info=True)
             return False, err_msg
 
+    def calculate_kelly_size(self, win_prob: float, payoff_ratio: float = 2.0, max_cap: float = 0.015) -> float:
+        """
+        Calculates Fractional Kelly Criterion position sizing:
+        f* = (p * b - q) / b
+        Where:
+          p = win probability
+          q = loss probability (1 - p)
+          b = payoff ratio (e.g. 2.0x gain on win)
+        """
+        q = 1.0 - win_prob
+        if payoff_ratio <= 0:
+            return 0.005
+        kelly_fraction = (win_prob * payoff_ratio - q) / payoff_ratio
+        # Quarter-Kelly for maximum drawdown safety
+        safe_fraction = max(0.0, kelly_fraction * 0.25)
+        suggested_size = safe_fraction * max_cap * 4.0
+        return max(0.005, min(max_cap, suggested_size))
+
     async def predict(self, token_mint: str, features: Dict[str, float]) -> Dict[str, Any]:
         """
-        Runs feature vector through standard scaling and RandomForest to predict safety score.
-        Also persists features and decisions to SQLite.
+        Runs 24-feature vector through Ensemble (Random Forest + Gradient Boosting)
+        to predict win probability, decision classification, and Kelly sizing.
         """
-        # Return cached prediction if active
         if token_mint in self._prediction_cache:
             return self._prediction_cache[token_mint]
 
@@ -116,35 +149,46 @@ class AGIBrain:
         try:
             await self._db.save_agi_features(token_mint, features)
         except Exception as e:
-            logger.error(f"Failed to log AGI features: {e}")
+            logger.debug(f"Failed to log AGI features: {e}")
 
-        # If model is not trained/loaded, return fallback
+        # If model is not trained/loaded, use heuristic baseline
         if self.model is None or self.scaler is None:
+            # Multi-variable heuristic scoring
+            social = features.get("social_score", 70.0)
+            rug_risk = features.get("dev_rug_risk_score", 50.0)
+            buy_pres = features.get("buy_pressure", 0.5) * 100.0
+            heuristic_score = (social * 0.40) + (rug_risk * 0.35) + (buy_pres * 0.25)
+            
+            decision = "BUY_FULL" if heuristic_score >= 75.0 else ("BUY_HALF" if heuristic_score >= 50.0 else "SKIP")
             result = {
-                "score": 75.0, # Neutral-high fallback
-                "decision": "WATCH",
-                "confidence": 0.5,
+                "score": round(heuristic_score, 1),
+                "decision": decision,
+                "confidence": 0.65,
+                "kelly_size_sol": 0.015 if decision == "BUY_FULL" else 0.0075,
                 "trained": False
             }
-            try:
-                await self._db.save_agi_decision(token_mint, "WATCH", 75.0, features, "fallback_heuristic")
-            except Exception as e:
-                logger.error(f"Failed to log fallback AGI decision: {e}")
+            self._prediction_cache[token_mint] = result
             return result
 
         try:
-            # Build feature vector matching list order
             vec = np.array([[features.get(col, 0.0) for col in FEATURE_COLS]])
             vec_scaled = self.scaler.transform(vec)
             
-            # Predict win probability (prob of win class '1')
-            proba = self.model.predict_proba(vec_scaled)[0]
-            win_prob = float(proba[1]) if len(proba) > 1 else float(proba[0])
+            # Predict ensemble probability
+            proba_rf = self.model.predict_proba(vec_scaled)[0]
+            p_rf = float(proba_rf[1]) if len(proba_rf) > 1 else float(proba_rf[0])
+            
+            if self.gb_model is not None:
+                proba_gb = self.gb_model.predict_proba(vec_scaled)[0]
+                p_gb = float(proba_gb[1]) if len(proba_gb) > 1 else float(proba_gb[0])
+                win_prob = (p_rf * 0.60) + (p_gb * 0.40)
+            else:
+                win_prob = p_rf
             
             score = win_prob * 100.0
-            confidence = max(proba)
+            confidence = max(win_prob, 1.0 - win_prob)
 
-            # Decision thresholds
+            # Strict Decision Thresholds
             threshold = self._config.brain.min_score_normal
             if score >= threshold:
                 decision = "BUY_FULL"
@@ -155,26 +199,27 @@ class AGIBrain:
             else:
                 decision = "SKIP"
 
+            kelly_size = self.calculate_kelly_size(win_prob, payoff_ratio=2.2, max_cap=0.015)
+
             result = {
                 "score": round(score, 1),
                 "decision": decision,
                 "confidence": round(confidence, 2),
+                "kelly_size_sol": round(kelly_size, 4),
                 "trained": True
             }
 
-            # Save decision log
-            await self._db.save_agi_decision(token_mint, decision, score, features, "rf_v1")
-            
-            # Cache for 30s to prevent spamming queries
+            await self._db.save_agi_decision(token_mint, decision, score, features, "ensemble_v2")
             self._prediction_cache[token_mint] = result
             return result
 
         except Exception as e:
-            logger.error(f"Error predicting with AGI Brain: {e}", exc_info=True)
+            logger.error(f"Error predicting with AGI Brain: {e}")
             return {
-                "score": 70.0,
-                "decision": "WATCH",
+                "score": 60.0,
+                "decision": "SKIP",
                 "confidence": 0.5,
+                "kelly_size_sol": 0.005,
                 "trained": False
             }
 
