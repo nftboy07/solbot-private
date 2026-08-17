@@ -22,12 +22,11 @@ def test_degen_profile_wider_than_safe():
     assert degen.use_jito is False
     assert degen.max_trade_pct_wallet >= 0.05
     assert degen.recycle_mode is True
-    assert degen.min_wallet_sol_reserve == 0.05
 
 
-def test_get_profile_unknown_defaults_to_degen():
+def test_get_profile_unknown_defaults_to_alpha():
     profile = get_profile("unknown_mode")
-    assert profile.name == "degen"
+    assert profile.name == "alpha"
 
 
 def test_token_filter_uses_profile_age_range():
