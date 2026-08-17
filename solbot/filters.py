@@ -147,20 +147,28 @@ class TokenFilter:
                 return True, 0.0
                 
             top10_sum = 0
+            largest_holder_pct = 0.0
             count = 0
             for account in holders_resp.value:
                 if str(account.address) == str(bonding_curve):
                     continue
-                top10_sum += int(account.amount.amount)
+                holder_amt = int(account.amount.amount)
+                holder_pct = (holder_amt / circulating_supply) * 100.0 if circulating_supply > 0 else 0.0
+                if holder_pct > largest_holder_pct:
+                    largest_holder_pct = holder_pct
+                top10_sum += holder_amt
                 count += 1
                 if count >= 10:
                     break
                     
-            top10_pct = (top10_sum / circulating_supply) * 100.0
+            top10_pct = (top10_sum / circulating_supply) * 100.0 if circulating_supply > 0 else 0.0
             
-            # Avoid Top 10 > 50%
-            if top10_pct > 50.0:
-                logger.warning(f"Top 10 holders hold {top10_pct:.2f}% of supply (exceeds 50%)")
+            # Avoid Top 10 > 25% or single whale > 5% outside bonding curve
+            if top10_pct > 25.0:
+                logger.warning(f"Top 10 holders hold {top10_pct:.2f}% of supply (exceeds 25% safety cap)")
+                return False, top10_pct
+            if largest_holder_pct > 5.0:
+                logger.warning(f"Single whale holds {largest_holder_pct:.2f}% of supply (exceeds 5% safety cap)")
                 return False, top10_pct
                 
             return True, top10_pct

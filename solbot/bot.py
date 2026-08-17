@@ -1892,8 +1892,8 @@ class Solbot:
                 self._save_state()
                 break
             now_ts = time()
-            # Poll real-time price from RPC every 2.5 seconds for instant rug/dump detection
-            if now_ts - last_poll_time >= 2.5:
+            # 1. Sub-second price polling (1.0 second) for instant rug/dump detection
+            if now_ts - last_poll_time >= 1.0:
                 last_poll_time = now_ts
                 try:
                     sol_p = getattr(self._telegram, "_sol_price", 150.0) or 150.0
@@ -1916,32 +1916,56 @@ class Solbot:
                     logger.error(f"Error polling price for {pos.symbol}: {e}")
 
             if pos.current_price == 0:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 continue
 
             gain = pos.current_price / pos.entry_price if pos.entry_price > 0 else 1.0
             drawdown = (pos.highest_price - pos.current_price) / pos.highest_price if pos.highest_price > 0 else 0.0
+            age_seconds = now_ts - pos.start_time
 
-            # Emergency Rug / Baseline Floor Check: If MCAP crashes near zero/rug floor
-            if pos.current_price > 0 and pos.current_price < 3800.0 and pos.entry_price >= 4500.0:
+            # 2. Emergency Rug / Floor Crash Cut
+            if pos.current_price > 0 and pos.current_price < 4000.0 and pos.entry_price >= 4500.0:
                 await self._exit_position(pos, "EMERGENCY RUG DUMP EXIT (Bonding curve floor hit)", 1.0)
                 break
 
-            # V4 exit logic: check if it is already a moonbag or not
+            # 3. Dynamic Time-Decay Stale Liquidator: Cut dead/stale bags fast
+            if age_seconds > 90 and pos.highest_price < (pos.entry_price * 1.15) and gain <= 1.05:
+                await self._exit_position(pos, f"STALE LIQUIDATOR EXIT (Flat {gain:.2f}x @ {age_seconds:.0f}s)", 1.0)
+                break
+            if age_seconds > 180 and gain < 1.25 and not pos.is_moonbag:
+                await self._exit_position(pos, f"TIME STOP EXIT (3min timeout @ {gain:.2f}x)", 1.0)
+                break
+
+            # 4. Multi-Tier Ratchet Stop-Loss Ladder
+            if pos.highest_price >= (pos.entry_price * 2.00) and gain <= 1.65:
+                await self._exit_position(pos, "Ratchet Stop Tier 4 (+65% Guaranteed Profit)", 1.0)
+                break
+            elif pos.highest_price >= (pos.entry_price * 1.75) and gain <= 1.45:
+                await self._exit_position(pos, "Ratchet Stop Tier 3 (+45% Guaranteed Profit)", 1.0)
+                break
+            elif pos.highest_price >= (pos.entry_price * 1.40) and gain <= 1.20:
+                await self._exit_position(pos, "Ratchet Stop Tier 2 (+20% Guaranteed Profit)", 1.0)
+                break
+            elif pos.highest_price >= (pos.entry_price * 1.20) and gain <= 1.05:
+                await self._exit_position(pos, "Ratchet Stop Tier 1 (+5% Guaranteed Profit)", 1.0)
+                break
+
+            # 5. Trailing Peak Drawdown Hard Stop
+            if pos.highest_price >= (pos.entry_price * 1.30) and drawdown >= 0.10:
+                await self._exit_position(pos, f"Peak Drawdown Cut (-{(drawdown*100):.1f}% from peak {pos.highest_price/pos.entry_price:.2f}x)", 1.0)
+                break
+
+            # 6. Moonbag handling
             if pos.is_moonbag:
-                # Trailing stop for moonbags
-                # After 5x: activate 25% trailing stop. After 10x: activate 20% trailing stop.
                 if gain >= 10.0:
                     pos.trailing_stop_activated = 0.20
                 elif gain >= 5.0 and pos.trailing_stop_activated is None:
                     pos.trailing_stop_activated = 0.25
                 
-                # Check trailing stop hit
                 if pos.trailing_stop_activated is not None and drawdown >= pos.trailing_stop_activated:
                     await self._exit_position(pos, f"Moonbag Trailing Stop ({pos.trailing_stop_activated*100:.0f}% hit)", 1.0)
                     break
                     
-                # Periodic checks: AI trend reverses or distribution changes
                 if now_ts - last_moonbag_check_time >= 60:
                     last_moonbag_check_time = now_ts
                     token_data = {
@@ -1954,105 +1978,28 @@ class Solbot:
                         await self._exit_position(pos, f"Moonbag exit: AI Trend Reverse ({current_score})", 1.0)
                         break
             else:
-                profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
-                if profile.recycle_mode:
-                    hold_min = (now_ts - pos.start_time) / 60.0
-                    if hold_min >= profile.max_hold_minutes:
-                        await self._exit_position(pos, f"MAX HOLD ({profile.max_hold_minutes:.0f}m)", 1.0)
-                        break
-                    if hold_min >= profile.stale_exit_minutes and gain < profile.stale_min_gain:
-                        await self._exit_position(
-                            pos, f"STALE EXIT ({hold_min:.0f}m @ {gain:.2f}x)", 1.0,
-                        )
-                        break
-                    if (
-                        gain >= profile.tp2_multiplier
-                        and profile.tp2_multiplier not in pos.tp_targets_hit
-                    ):
-                        await self._exit_position(
-                            pos, f"RECYCLE TP2 ({profile.tp2_multiplier:.2f}x)", profile.tp2_sell_pct,
-                        )
-                        pos.tp_targets_hit.append(profile.tp2_multiplier)
-                        self._save_state()
-                    elif (
-                        gain >= profile.tp1_multiplier
-                        and profile.tp1_multiplier not in pos.tp_targets_hit
-                    ):
-                        await self._exit_position(
-                            pos, f"RECYCLE TP1 ({profile.tp1_multiplier:.2f}x)", profile.tp1_sell_pct,
-                        )
-                        pos.tp_targets_hit.append(profile.tp1_multiplier)
-                        self._save_state()
-                    elif gain >= profile.trailing_activate_gain:
-                        if drawdown >= profile.trailing_stop_pct:
-                            await self._exit_position(
-                                pos,
-                                f"TRAILING STOP ({profile.trailing_stop_pct*100:.0f}% from peak)",
-                                1.0,
-                            )
-                            break
-                    elif gain <= (1.0 - profile.stop_loss_pct) or (drawdown >= 0.14 and gain < 1.0):
-                        await self._exit_position(
-                            pos, f"STOP LOSS ({((1.0-gain)*100):.1f}% loss / {(drawdown*100):.1f}% drop)", 1.0,
-                        )
-                        break
-                    await asyncio.sleep(1.0)
-                    continue
+                # 7. Take-Profit Rungs
+                if gain >= 3.0 and 3.0 not in pos.tp_targets_hit:
+                    await self._exit_position(pos, "TP Rung 3 (3.0x Target)", 0.35)
+                    pos.tp_targets_hit.append(3.0)
+                    pos.is_moonbag = True
+                    self._save_state()
+                elif gain >= 2.0 and 2.0 not in pos.tp_targets_hit:
+                    await self._exit_position(pos, "TP Rung 2 (2.0x Target)", 0.35)
+                    pos.tp_targets_hit.append(2.0)
+                    self._save_state()
+                elif gain >= 1.4 and 1.4 not in pos.tp_targets_hit:
+                    await self._exit_position(pos, "TP Rung 1 (1.4x Target)", 0.35)
+                    pos.tp_targets_hit.append(1.4)
+                    self._save_state()
 
-                # Not a moonbag yet. Check TP Presets (Aggressive by default, or Conservative)
-                preset = getattr(strat, "tp_preset", "aggressive")
-                
-                if preset == "conservative":
-                    # Conservative: 2x (sell 25%), 3x (sell 25%), 5x (sell 25%), leave 25% moonbag
-                    if gain >= 2.0 and 2.0 not in pos.tp_targets_hit:
-                        await self._exit_position(pos, "Conservative TP 2x (Sell 25% of initial)", 0.25)
-                        pos.tp_targets_hit.append(2.0)
-                        self._save_state()
-                    elif gain >= 3.0 and 3.0 not in pos.tp_targets_hit:
-                        # 25% of initial = 33.3% of remaining 75%
-                        await self._exit_position(pos, "Conservative TP 3x (Sell 25% of initial)", 0.3333)
-                        pos.tp_targets_hit.append(3.0)
-                        self._save_state()
-                    elif gain >= 5.0 and 5.0 not in pos.tp_targets_hit:
-                        # 25% of initial = 50% of remaining 50%
-                        await self._exit_position(pos, "Conservative TP 5x (Sell 25% of initial, entering Moonbag)", 0.50)
-                        pos.tp_targets_hit.append(5.0)
-                        pos.is_moonbag = True
-                        pos.trailing_stop_activated = 0.25
-                        self._save_state()
-                else:
-                    # Aggressive: 3x (sell 20%), 5x (sell 30%), 10x (sell 20%), leave 30% moonbag
-                    if gain >= 3.0 and 3.0 not in pos.tp_targets_hit:
-                        await self._exit_position(pos, "Aggressive TP 3x (Sell 20% of initial)", 0.20)
-                        pos.tp_targets_hit.append(3.0)
-                        self._save_state()
-                    elif gain >= 5.0 and 5.0 not in pos.tp_targets_hit:
-                        # 30% of initial = 37.5% of remaining 80%
-                        await self._exit_position(pos, "Aggressive TP 5x (Sell 30% of initial)", 0.375)
-                        pos.tp_targets_hit.append(5.0)
-                        self._save_state()
-                    elif gain >= 10.0 and 10.0 not in pos.tp_targets_hit:
-                        # 20% of initial = 40% of remaining 50%
-                        await self._exit_position(pos, "Aggressive TP 10x (Sell 20% of initial, entering Moonbag)", 0.40)
-                        pos.tp_targets_hit.append(10.0)
-                        pos.is_moonbag = True
-                        pos.trailing_stop_activated = 0.20
-                        self._save_state()
-
-            # 3. Stop loss & Break-even checks
-            # Dynamic Break-Even Floor: Once token hits +20% gain, lock stop-loss to +2% profit floor
-            if pos.highest_price >= (pos.entry_price * 1.20) and gain <= 1.02:
-                await self._exit_position(pos, "Break-even Floor Triggered (+2% Profit Protected)", 1.0)
-                break
-            elif any(tp in pos.tp_targets_hit for tp in (1.4, 2.0, 3.0)):
-                if gain <= 1.05:
-                    await self._exit_position(pos, "Break-even Stop (+5% Capital Preserved)", 1.0)
+                # 8. Hard Stop-Loss (12% Cut)
+                stop_pct = getattr(strat, "stop_loss_pct", 0.12) or 0.12
+                if gain <= (1.0 - stop_pct):
+                    await self._exit_position(pos, f"Hard Stop-Loss ({((1.0-gain)*100):.1f}% Loss Cut)", 1.0)
                     break
-            elif gain <= (1.0 - getattr(strat, "stop_loss_pct", 0.10)) or (drawdown >= 0.14 and gain < 1.0):
-                await self._exit_position(pos, f"Stop-loss (Gain={((gain-1.0)*100):.1f}% / Drop={(drawdown*100):.1f}%)", 1.0)
-                break
-                    
-            await asyncio.sleep(1.0)
+
+            await asyncio.sleep(0.5)
 
     async def _exit_position(self, pos: Position, reason: str, pct: float):
         if not pos.active: return

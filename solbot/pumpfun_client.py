@@ -587,7 +587,21 @@ class PumpFunClient:
             tx = VersionedTransaction.from_bytes(tx_data)
             signed_tx = VersionedTransaction(tx.message, [self._wallet.keypair])
 
-            rpc_url = await self._get_rpc_url()
+            # Pre-flight simulation check to prevent fee waste on reverting transactions
+            if not self._paper_enabled:
+                try:
+                    sim_payload = {
+                        "jsonrpc": "2.0", "id": 1, "method": "simulateTransaction",
+                        "params": [base58.b58encode(bytes(signed_tx)).decode("utf-8"), {"sigVerify": False, "commitment": "processed"}]
+                    }
+                    sim_data, _, _ = await self._rpc_post(sim_payload, method="simulateTransaction", max_attempts=2)
+                    if sim_data and "result" in sim_data:
+                        sim_err = sim_data["result"].get("value", {}).get("err")
+                        if sim_err:
+                            logger.warning("Pre-flight transaction simulation failed for %s: %s (Trade Aborted - Gas Preserved)", mint, sim_err)
+                            return TradeResult(success=False, token_mint=mint, error=f"Pre-flight Sim Failed: {sim_err}", latency_ms=(time.perf_counter() - start_time) * 1000)
+                except Exception as e:
+                    logger.debug(f"Pre-flight simulation check skipped: {e}")
 
             if use_jito:
                 recent_blockhash = None
@@ -598,6 +612,7 @@ class PumpFunClient:
                         "method": "getLatestBlockhash",
                         "params": [{"commitment": "confirmed"}]
                     }
+                    rpc_url = await self._get_rpc_url()
                     async with self._session.post(rpc_url, json=payload_hash) as hb_resp:
                         if hb_resp.status == 200:
                             hb_data = await hb_resp.json()
