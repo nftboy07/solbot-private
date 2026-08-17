@@ -27,8 +27,14 @@ class AIFilter:
         if self._openai_api_key:
             logger.info(f"Using OpenAI Responses API for safety analysis: {self._openai_model}")
 
-        # Legacy chat-completions providers
-        if self._config.ai.nvidia_api_key:
+        # Primary High-Speed AI Providers (Groq / NVIDIA / BluesMinds)
+        groq_key = getattr(self._config.ai, "groq_api_key", None) or os.environ.get("GROQ_API_KEY")
+        if groq_key:
+            self._api_key = groq_key
+            self._base_url = "https://api.groq.com/openai/v1/chat/completions"
+            self._model = "llama-3.3-70b-versatile"
+            logger.info(f"Using Groq High-Speed API (Primary): {self._model}")
+        elif self._config.ai.nvidia_api_key:
             self._api_key = self._config.ai.nvidia_api_key
             self._base_url = self._config.ai.nvidia_api_url
             self._model = self._config.ai.nvidia_model
@@ -330,21 +336,7 @@ class AIFilter:
         71-100: Safe/Low risk
         """
 
-        openai_score = await self._score_with_openai(prompt)
-        if openai_score is not None:
-            return openai_score
-
-        if self._config.ai.openrouter_api_key:
-            openrouter_score = await self._score_with_openrouter(prompt)
-            if openrouter_score is not None:
-                return openrouter_score
-
-        # Try Gemini next as it may be configured in VPS .env.
-        if self._config.ai.gemini_api_key:
-            gemini_score = await self._score_with_gemini(prompt)
-            if gemini_score is not None:
-                return gemini_score
-
+        # 1. High-Speed Direct API (Groq / NVIDIA / BluesMinds)
         if self._api_key:
             try:
                 payload = {
@@ -357,17 +349,36 @@ class AIFilter:
                     "Content-Type": "application/json"
                 }
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(self._base_url, json=payload, headers=headers) as resp:
+                    async with session.post(self._base_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=5.0)) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             content = data['choices'][0]['message']['content'].strip()
                             match = re.search(r'\d+', content)
                             if match:
-                                return int(match.group())
+                                score = int(match.group())
+                                logger.info(f"AI API ({self._model}) scored token: {score}")
+                                return score
                         else:
                             logger.error(f"Primary AI API error: {resp.status}")
             except Exception as e:
                 logger.error(f"Primary AI scoring failed: {e}")
+
+        # 2. OpenAI Responses API Fallback
+        openai_score = await self._score_with_openai(prompt)
+        if openai_score is not None:
+            return openai_score
+
+        # 3. OpenRouter Fallback
+        if self._config.ai.openrouter_api_key:
+            openrouter_score = await self._score_with_openrouter(prompt)
+            if openrouter_score is not None:
+                return openrouter_score
+
+        # 4. Gemini Fallback
+        if self._config.ai.gemini_api_key:
+            gemini_score = await self._score_with_gemini(prompt)
+            if gemini_score is not None:
+                return gemini_score
 
         logger.info("Attempting Amazon Bedrock fallback...")
         bedrock_score = await self._score_with_bedrock(prompt)
