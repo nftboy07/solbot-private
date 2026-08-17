@@ -104,7 +104,7 @@ class TestOpenRouterIntegration(unittest.IsolatedAsyncioTestCase):
             model_1 = args_list[0][1]["json"]["model"]
             model_2 = args_list[1][1]["json"]["model"]
             self.assertEqual(model_1, "meta-llama/llama-3-8b-instruct:free")
-            self.assertEqual(model_2, "nvidia/nemotron-4-340b-instruct:free")
+            self.assertEqual(model_2, "meta-llama/llama-3.1-8b-instruct:free")
 
     async def test_detect_rug_risks_openrouter_success(self):
         mock_response = MagicMock()

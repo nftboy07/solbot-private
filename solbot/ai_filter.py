@@ -224,19 +224,21 @@ class AIFilter:
         if not self._config.ai.openrouter_api_key:
             return None
 
-        # Build fallback model pool
+        # Build fallback model pool with active free endpoints
         primary = self._config.ai.openrouter_model
         fallbacks = [
-            "meta-llama/llama-3-8b-instruct:free",
-            "nvidia/nemotron-4-340b-instruct:free",
-            "google/gemma-2-9b-it:free",
-            "qwen/qwen-2.5-72b-instruct:free",
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "microsoft/phi-3-medium-128k-instruct:free"
+            "meta-llama/llama-3.1-8b-instruct:free",
+            "meta-llama/llama-3.2-3b-instruct:free",
+            "meta-llama/llama-3.2-1b-instruct:free",
+            "mistralai/mistral-7b-instruct:free",
+            "deepseek/deepseek-r1:free",
+            "google/gemini-2.0-flash-exp:free",
+            "google/gemini-flash-1.5-exp:free",
+            "qwen/qwen-2.5-coder-32b-instruct:free",
         ]
         
         # Ensure primary model is first, and deduplicate
-        models = [primary]
+        models = [primary] if primary else []
         for fb in fallbacks:
             if fb not in models:
                 models.append(fb)
