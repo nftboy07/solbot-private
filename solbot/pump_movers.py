@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import re
 from typing import List, Dict, Any, Optional
 from time import time
@@ -31,7 +32,7 @@ class PumpMovers:
         self._session: Optional[AsyncSession] = None
         self._trending_url = "https://frontend-api-v3.pump.fun/coins"
         self._seen_mints: set = set()
-        self._poll_interval = 30  
+        self._poll_interval = float(os.getenv("SNIPER_MOVERS_INTERVAL_SECONDS", "30"))
         
         # Thresholds for auto-buying movers
         self.min_market_cap_usd = 10000  
@@ -104,7 +105,8 @@ class PumpMovers:
                         timestamp=time()
                     )
                     
-                    asyncio.create_task(self.bot._execute_snipe(token, self.bot._config.jupiter.buy_amount_sol, "Pump Mover"))
+                    # Same filter/buy path as WS + 1s scanner — do not skip junk checks.
+                    asyncio.create_task(self.bot._schedule_token_evaluation(token, m))
                     self._seen_mints.add(mint)
         except Exception as e:
             logger.error(f"Movers polling exception: {e}")

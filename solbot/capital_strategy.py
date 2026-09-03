@@ -35,7 +35,7 @@ class RecycleSettings:
 
 
 def default_min_wallet_reserve() -> float:
-    return float(os.getenv("MIN_WALLET_SOL_RESERVE", "0.05"))
+    return float(os.getenv("MIN_WALLET_SOL_RESERVE", "0.1"))
 
 
 def spendable_balance(wallet_sol: float, reserve: float) -> float:
