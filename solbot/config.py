@@ -22,6 +22,22 @@ def _env_csv(name: str, default: str = "") -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _env_float_first(*names: str, default: float) -> float:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is not None and str(raw).strip():
+            return float(raw)
+    return float(default)
+
+
+def _env_int_first(*names: str, default: int) -> int:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is not None and str(raw).strip():
+            return int(raw)
+    return int(default)
+
+
 def _read_secret_from_env_or_file(env_name: str, file_env_name: str) -> str:
     direct_value = os.getenv(env_name, "").strip()
     if direct_value:
@@ -55,7 +71,10 @@ class BotMode(Enum):
 class SolanaConfig:
     rpc_url: str = field(default_factory=lambda: os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"))
     ws_url: str = field(default_factory=lambda: os.getenv("SOLANA_WS_URL", "wss://api.mainnet-beta.solana.com"))
-    private_key: str = field(default_factory=lambda: os.getenv("WALLET_PRIVATE_KEY", ""))
+    # Same secret pattern as OPENAI_API_KEY: env value, or first non-comment line in a file.
+    private_key: str = field(
+        default_factory=lambda: _read_secret_from_env_or_file("WALLET_PRIVATE_KEY", "WALLET_PRIVATE_KEY_FILE")
+    )
 
 
 @dataclass(frozen=True)
@@ -70,7 +89,7 @@ class PumpFunConfig:
 @dataclass(frozen=True)
 class JupiterConfig:
     api_url: str = field(default_factory=lambda: os.getenv("JUPITER_API_URL", "https://quote-api.jup.ag/v6"))
-    buy_amount_sol: float = field(default_factory=lambda: float(os.getenv("BUY_AMOUNT_SOL", "0.005")))
+    buy_amount_sol: float = field(default_factory=lambda: _env_float_first("SNIPER_CLIP_SOL", "BUY_AMOUNT_SOL", default=0.25))
     slippage_bps: int = field(default_factory=lambda: int(os.getenv("SLIPPAGE_BPS", "300")))
     max_retries: int = field(default_factory=lambda: int(os.getenv("MAX_RETRIES", "3")))
     retry_delay_ms: int = field(default_factory=lambda: int(os.getenv("RETRY_DELAY_MS", "500")))
@@ -100,7 +119,9 @@ class StrategyConfig:
     dev_dump_score_threshold: float = -0.2
     momentum_timeout_minutes: int = 30
     mcap_tp_target_usd: float = field(default_factory=lambda: float(os.getenv("MCAP_TP_TARGET_USD", "200000")))
-    max_active_positions: int = field(default_factory=lambda: int(os.getenv("MAX_ACTIVE_POSITIONS", "100")))
+    max_active_positions: int = field(
+        default_factory=lambda: _env_int_first("SNIPER_MAX_OPEN", "MAX_ACTIVE_POSITIONS", default=3)
+    )
 
 
 @dataclass(frozen=True)
@@ -190,6 +211,45 @@ class PasteTradeConfig:
     handle: str = field(default_factory=lambda: os.getenv("PASTE_TRADE_HANDLE", "@solbot"))
 
 
+def _optional_float(name: str) -> float | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    return float(raw)
+
+
+@dataclass(frozen=True)
+class SniperConfig:
+    """Meme-token sniper knobs. Env wins; never hardcode bankroll in the loop."""
+
+    enabled: bool = field(default_factory=lambda: _env_bool("SNIPER_ENABLED", True))
+    bankroll_sol: float = field(default_factory=lambda: float(os.getenv("SNIPER_BANKROLL_SOL", "1.3")))
+    clip_sol: float = field(
+        default_factory=lambda: _env_float_first("SNIPER_CLIP_SOL", "BUY_AMOUNT_SOL", default=0.25)
+    )
+    max_open: int = field(
+        default_factory=lambda: _env_int_first("SNIPER_MAX_OPEN", "MAX_ACTIVE_POSITIONS", default=3)
+    )
+    fee_reserve_sol: float = field(default_factory=lambda: float(os.getenv("MIN_WALLET_SOL_RESERVE", "0.1")))
+    scan_interval_seconds: float = field(
+        default_factory=lambda: float(os.getenv("SNIPER_SCAN_INTERVAL_SECONDS", "1.0"))
+    )
+    delay_seconds: float | None = field(default_factory=lambda: _optional_float("SNIPER_DELAY_SECONDS"))
+    sources: list[str] = field(
+        default_factory=lambda: [s.lower() for s in _env_csv("SNIPER_SOURCES", "pumpfun,raydium")]
+    )
+
+    def rules(self):
+        from solbot.sniper_bankroll import BankrollRules
+
+        return BankrollRules(
+            bankroll_sol=self.bankroll_sol,
+            clip_sol=self.clip_sol,
+            max_open=self.max_open,
+            fee_reserve_sol=self.fee_reserve_sol,
+        )
+
+
 @dataclass(frozen=True)
 class HummingbotConfig:
     enabled: bool = field(default_factory=lambda: _env_bool("HUMMINGBOT_ENABLED", False))
@@ -219,6 +279,7 @@ class BotConfig:
     brain: BrainConfig = field(default_factory=BrainConfig)
     paste_trade: PasteTradeConfig = field(default_factory=PasteTradeConfig)
     hummingbot: HummingbotConfig = field(default_factory=HummingbotConfig)
+    sniper: SniperConfig = field(default_factory=SniperConfig)
     proxy_url: str = field(default_factory=lambda: os.getenv("PROXY_URL", ""))
     proxy_list_path: str = field(default_factory=lambda: os.getenv("PROXY_LIST_PATH", "data/proxies.txt"))
     residential_proxy: str = field(default_factory=lambda: os.getenv("RESIDENTIAL_PROXY", ""))
@@ -237,4 +298,12 @@ class BotConfig:
             errors.append("CABAL_TOP_HOLDERS_LIMIT must be positive")
         if self.cabal.max_cluster_supply_pct <= 0:
             errors.append("CABAL_MAX_CLUSTER_SUPPLY_PCT must be positive")
+        if self.sniper.clip_sol <= 0:
+            errors.append("SNIPER_CLIP_SOL / BUY_AMOUNT_SOL must be positive")
+        if self.sniper.max_open <= 0:
+            errors.append("SNIPER_MAX_OPEN / MAX_ACTIVE_POSITIONS must be positive")
+        if self.sniper.scan_interval_seconds <= 0:
+            errors.append("SNIPER_SCAN_INTERVAL_SECONDS must be positive")
+        if self.sniper.fee_reserve_sol < 0:
+            errors.append("MIN_WALLET_SOL_RESERVE must be non-negative")
         return errors

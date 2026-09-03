@@ -114,16 +114,16 @@ class RiskManager:
         - Below 50 = skip unless floor_sol set
         Capped at 2% of wallet balance.
         """
-        if confidence_score >= 90:
+        # Env/config clip (floor_sol) is the intended bag size. The old 0.005–0.02
+        # ladder only applies when no clip was provided.
+        if floor_sol > 0 and confidence_score > 0:
+            base_size = floor_sol
+        elif confidence_score >= 90:
             base_size = 0.02
         elif confidence_score >= 80:
             base_size = 0.01
         elif confidence_score >= 70:
             base_size = 0.005
-        elif confidence_score >= 50 and floor_sol > 0:
-            base_size = floor_sol
-        elif floor_sol > 0 and confidence_score > 0:
-            base_size = floor_sol
         else:
             return 0.0
 

@@ -55,6 +55,8 @@ from solbot.missed_runner_engine import MissedRunnerEngine
 from solbot.portfolio_guard import PortfolioGuard
 from solbot.risk_sizer import DynamicRiskSizer
 from solbot.strategy_orchestrator import StrategyOrchestrator
+from solbot.sniper_bankroll import clip_for_buy, overlay_sniper_bankroll
+from solbot.new_launch_scanner import NewLaunchScanner
 
 def _format_tokens(amount: float) -> str:
     if amount >= 1_000_000_000:
@@ -184,8 +186,12 @@ class Solbot:
         self._hummingbot_gateway = HummingbotGatewayClient(self._config.hummingbot)
         self._hummingbot_pmm = HummingbotPMMManager(self, self._config.hummingbot)
         self._missed_runner_engine = MissedRunnerEngine(self)
-        self._portfolio_guard = PortfolioGuard()
+        self._portfolio_guard = PortfolioGuard(
+            min_wallet_reserve_sol=self._config.sniper.fee_reserve_sol,
+            max_creator_exposure_sol=max(0.50, self._config.sniper.clip_sol * 2),
+        )
         self._risk_sizer = DynamicRiskSizer()
+        self._launch_scanner = NewLaunchScanner(self)
 
     def _save_state(self):
         """Persist positions, trades, and intelligence to a JSON file."""
@@ -348,8 +354,15 @@ class Solbot:
         await self._pump_client.start()
         try:
             bal = await self._pump_client.get_sol_balance()
-            self._risk_manager.bankroll_sol = max(1.0, bal)
-            logger.info(f"Initialized RiskManager bankroll to {bal:.4f} SOL")
+            self._risk_manager.bankroll_sol = max(self._config.sniper.bankroll_sol, bal)
+            self._risk_manager.MAX_CONCURRENT_POSITIONS = self._config.sniper.max_open
+            self._risk_manager.MAX_EXPOSURE_SOL = self._config.sniper.bankroll_sol
+            logger.info(
+                "Initialized RiskManager bankroll=%.4f SOL (wallet=%.4f) max_open=%s clip=%.4f reserve=%.4f",
+                self._risk_manager.bankroll_sol, bal,
+                self._config.sniper.max_open, self._config.sniper.clip_sol,
+                self._config.sniper.fee_reserve_sol,
+            )
         except Exception as e:
             logger.error(f"Failed to fetch initial wallet balance for RiskManager: {e}")
         self._jupiter = JupiterClient(self._config.jupiter, self._wallet, self._config.solana)
@@ -451,8 +464,9 @@ class Solbot:
         self._tungscreener = TungscreenerScraper(self)
         asyncio.create_task(self._tungscreener.start_monitoring())
 
-        # Pump.fun Movers Monitor
+        # Pump.fun Movers Monitor (secondary; new-launch 1s scanner is the cadence path)
         asyncio.create_task(self._pump_movers.start_monitoring())
+        asyncio.create_task(self._launch_scanner.start_monitoring())
 
         self._running = True
         asyncio.create_task(self._process_events())
@@ -576,16 +590,22 @@ class Solbot:
         )
 
     async def _effective_max_positions(self, profile) -> int:
+        hard_cap = min(
+            int(getattr(self._config.strategy, "max_active_positions", 3) or 3),
+            int(getattr(profile, "max_positions_cap", 3) or 3),
+            int(self._config.sniper.max_open or 3),
+        )
+        hard_cap = max(1, hard_cap)
         if not profile.use_dynamic_position_cap:
-            return getattr(self._config.strategy, "max_active_positions", 100)
+            return hard_cap
         if not self._pump_client:
-            return profile.max_positions_cap
+            return hard_cap
         balance = await self._pump_client.get_sol_balance()
         return dynamic_max_positions(
             balance,
-            profile.buy_amount_sol,
+            profile.buy_amount_sol or self._config.sniper.clip_sol,
             profile.min_wallet_sol_reserve,
-            profile.max_positions_cap,
+            hard_cap,
         )
 
     async def _reject_mayhem_token(
@@ -813,6 +833,8 @@ class Solbot:
         if self._monitor_scraper: await self._monitor_scraper.stop()
         if self._tungscreener: await self._tungscreener.stop()
         if self._pump_movers: await self._pump_movers.stop()
+        if getattr(self, "_launch_scanner", None):
+            await self._launch_scanner.stop()
         if hasattr(self, '_brain_tracker') and self._brain_tracker:
             self._brain_tracker.cancel()
         if hasattr(self, '_wallet_scanner') and self._wallet_scanner:
@@ -829,7 +851,11 @@ class Solbot:
 
     def apply_risk_preset(self, preset: str):
         """Apply a full risk/filter preset (safe, normal, degen)."""
-        profile = get_profile(preset)
+        profile = overlay_sniper_bankroll(
+            get_profile(preset),
+            self._config.sniper.rules(),
+            delay_seconds=self._config.sniper.delay_seconds,
+        )
         self._filter_profile_name = profile.name
         if self._filter:
             self._filter.set_profile(profile)
@@ -838,6 +864,7 @@ class Solbot:
         object.__setattr__(self._config.jupiter, "buy_amount_sol", profile.buy_amount_sol)
         object.__setattr__(self._config.strategy, "trailing_stop_pct", profile.trailing_stop_pct)
         object.__setattr__(self._config.strategy, "stop_loss_pct", profile.stop_loss_pct)
+        object.__setattr__(self._config.strategy, "max_active_positions", self._config.sniper.max_open)
         logger.info(
             "Applied %s preset: delay=%.1fs age=[%.1f,%.1f] mcap=[%.0f,%.0f] ai_min=%d blacklist=%s recycle=%s reserve=%.3f",
             profile.name,
@@ -1115,25 +1142,32 @@ class Solbot:
 
         self._stats.bump("qualified")
         wallet_balance = await self._pump_client.get_sol_balance()
-        size = self._risk_manager.calculate_position_size(
-            confidence_score,
-            wallet_balance,
-            floor_sol=profile.buy_amount_sol,
-            max_trade_pct=profile.max_trade_pct_wallet,
+        open_count = active_position_count(self._positions)
+        open_exposure = sum(
+            float(getattr(p, "size", 0.0) or 0.0)
+            for p in self._positions.values()
+            if getattr(p, "active", True)
+        )
+        size, bankroll_reason = clip_for_buy(
+            self._config.sniper.rules(), open_count, open_exposure, wallet_balance,
         )
         if size <= 0.0:
             self._stats.bump("skip_risk")
             logger.info(
-                "Skipping %s: Size calculated to 0.0 SOL (Confidence: %.1f)",
-                token.symbol, confidence_score,
+                "Skipping %s: bankroll gate (%s) (Confidence: %.1f)",
+                token.symbol, bankroll_reason, confidence_score,
             )
             return
 
+        trade_pct = max(
+            float(profile.max_trade_pct_wallet or 0.0),
+            size / max(wallet_balance, self._config.sniper.bankroll_sol, 1e-9),
+        )
         allowed, reason = await self._risk_manager.can_trade(
             token.mint,
             size,
             wallet_balance,
-            max_trade_pct=profile.max_trade_pct_wallet,
+            max_trade_pct=trade_pct,
             max_rpc_latency_ms=profile.max_rpc_latency_ms,
         )
         if not allowed:
@@ -1497,6 +1531,26 @@ class Solbot:
         self._processed_mints.add(token.mint)
         try:
             exec_profile = self._filter.profile if self._filter else get_profile(self._filter_profile_name)
+            if not manual_override:
+                wallet_balance = 0.0
+                if self._pump_client:
+                    wallet_balance = await self._pump_client.get_sol_balance()
+                open_count = active_position_count(self._positions)
+                open_exposure = sum(
+                    float(getattr(p, "size", 0.0) or 0.0)
+                    for p in self._positions.values()
+                    if getattr(p, "active", True)
+                )
+                clip, bankroll_reason = clip_for_buy(
+                    self._config.sniper.rules(), open_count, open_exposure, wallet_balance,
+                )
+                if clip <= 0.0:
+                    self._stats.bump("skip_low_balance")
+                    logger.warning("Trade blocked for %s: %s", token.symbol, bankroll_reason)
+                    self._processed_mints.discard(token.mint)
+                    self._active_buys.discard(token.mint)
+                    return
+                size = min(float(size), clip)
             if not exec_profile.skip_mayhem_check:
                 if await self._reject_mayhem_token(token.mint, token.symbol):
                     self._processed_mints.discard(token.mint)
@@ -1871,7 +1925,7 @@ class Solbot:
 
             except Exception as e:
                 logger.error(f"Error in _watch_queue_manager: {e}")
-            await asyncio.sleep(10)
+            await asyncio.sleep(max(0.25, float(self._config.sniper.scan_interval_seconds or 1.0)))
 
     async def _position_manager(self, pos: Position):
         strat = self._config.strategy
