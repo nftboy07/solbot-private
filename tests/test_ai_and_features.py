@@ -12,9 +12,10 @@ from solbot.ml.feature_store import RealTimeFeatureStore
 class TestAIAndFeatures(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.mock_ai_filter = MagicMock()
-        self.mock_ai_filter._config.ai.openai_api_key = "test-key"
-        self.mock_ai_filter._config.ai.gemini_api_key = "test-key"
-        self.mock_ai_filter._config.ai.openrouter_api_key = "test-key"
+        # Short placeholders so tools/check_secrets.py does not treat tests as leaks.
+        self.mock_ai_filter._config.ai.openai_api_key = "dummy"
+        self.mock_ai_filter._config.ai.gemini_api_key = "dummy"
+        self.mock_ai_filter._config.ai.openrouter_api_key = "dummy"
         self.consensus = MultiAgentConsensusEngine(self.mock_ai_filter)
         self.auditor = TokenAuditor()
         self.store = RealTimeFeatureStore()
