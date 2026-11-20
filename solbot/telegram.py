@@ -94,6 +94,23 @@ class TelegramController:
 
     def _register_handlers(self):
         """Register all V3 command handlers."""
+
+        @self._client.on(events.NewMessage())
+        async def admin_gate(event):
+            text = event.message.text or ""
+            if not (text.startswith("/") or text in {
+                "📊 Dashboard", "⚙️ Settings", "📍 Portfolio", "🚨 Kill Switch"
+            }):
+                return
+            command = text.split()[0].split("@", 1)[0]
+            if command in {"/start", "/help", "/ping", "/version"}:
+                return
+            try:
+                if await self._require_admin(event):
+                    return
+            except Exception:
+                logger.exception("Telegram admin authorization failed")
+            raise events.StopPropagation
         
         @self._client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
@@ -564,6 +581,8 @@ class TelegramController:
         await event.reply(msg2, buttons=self._menu_buttons, parse_mode='html')
 
     async def _cmd_status(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('status', 'System Status requested')
         uptime = str(datetime.now() - self._start_time).split('.')[0]
         mode = "🧪 PAPER" if self._paper_mode else "⚔️ LIVE"
@@ -583,6 +602,8 @@ class TelegramController:
         await event.reply(msg)
 
     async def _cmd_health(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('health', 'System Health checked')
         # Wiring to network health and rpc pool
         rpc_url = "N/A"
@@ -612,6 +633,8 @@ class TelegramController:
         await event.reply(timeline)
 
     async def _cmd_model(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('model', 'Model settings updated/scanned')
         args = event.message.text.split()
         if len(args) > 1:
@@ -639,6 +662,8 @@ class TelegramController:
         await event.reply(msg, buttons=buttons, parse_mode='html')
 
     async def _cmd_panel(self, event, tab=None):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('panel', 'Unified Panel command executed')
         if not tab:
             tab = getattr(self, "_active_panel_tab", "settings")
@@ -767,6 +792,8 @@ class TelegramController:
         return msg, buttons
 
     async def _cmd_settings(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('settings', 'Settings command requested')
         msg, buttons = await self._get_settings_dashboard_content()
         await event.reply(msg, buttons=buttons, parse_mode='html')
@@ -1087,6 +1114,8 @@ class TelegramController:
         await event.reply(msg, parse_mode="html")
 
     async def _cmd_brain_train(self, event):
+        if not await self._require_admin(event):
+            return
         brain = getattr(self._bot, "_brain", None)
         if not brain:
             await event.reply("❌ <b>AGI Brain is not initialized.</b>")
@@ -1104,6 +1133,8 @@ class TelegramController:
         await status_msg.edit(msg, parse_mode="html")
 
     async def _cmd_brain_predict(self, event):
+        if not await self._require_admin(event):
+            return
         args = event.message.text.split()
         if len(args) < 2:
             await event.reply("Usage: <code>/brain_predict &lt;mint&gt;</code>", parse_mode="html")
@@ -1537,6 +1568,8 @@ class TelegramController:
         await event.reply(msg)
 
     async def _cmd_signals(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('signals', 'Signals requested')
         db = getattr(self._bot, '_db', None)
         total_signals = 0
@@ -1567,6 +1600,8 @@ class TelegramController:
         await event.reply("\n".join(msg))
 
     async def _cmd_portfolio(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('portfolio', 'Portfolio requested')
         positions = getattr(self._bot, '_positions', {})
         if not positions:
@@ -1593,6 +1628,8 @@ class TelegramController:
         await event.reply("\n".join(lines), parse_mode='html')
 
     async def _cmd_execution(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('execution', 'Execution metrics requested')
         avg_latency = 45.0
         active_proxies = 0
@@ -1641,6 +1678,8 @@ class TelegramController:
         await event.reply(f"🧪 <b>Paper Trading Mode:</b> <code>{status}</code>")
 
     async def _cmd_autobuy(self, event):
+        if not await self._require_admin(event):
+            return
         args = event.message.text.split()
         if len(args) > 1:
             val = args[1].lower()
@@ -1654,6 +1693,8 @@ class TelegramController:
         await event.reply(f"🤖 <b>Autobuy:</b> <code>{status}</code>")
 
     async def _cmd_autorunner(self, event):
+        if not await self._require_admin(event):
+            return
         args = event.message.text.split()
         valid_amounts = [0.01, 0.02, 0.05, 0.1]
         
@@ -1807,6 +1848,8 @@ class TelegramController:
         await event.reply(msg)
 
     async def _cmd_why(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('why', 'Why query requested')
         args = event.message.text.split()
         db = getattr(self._bot, '_db', None)
@@ -1865,6 +1908,8 @@ class TelegramController:
         await event.reply(msg)
 
     async def _cmd_alpha(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('alpha', 'Alpha query requested')
         db = getattr(self._bot, '_db', None) or getattr(self._bot, 'db', None)
         lines = ["<b>💎 ACTIVE SMART MONEY & KOL CONVICTION ALPHA</b>", ""]
@@ -2008,6 +2053,8 @@ class TelegramController:
 
 
     async def _cmd_runner(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('runner', 'Runners listed')
         db = getattr(self._bot, '_db', None)
         msg = ["<b>🚀 RECENT RUNNERS DETECTED</b>"]
@@ -2040,6 +2087,8 @@ class TelegramController:
         await event.reply("\n".join(msg))
 
     async def _cmd_profit(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('profit', 'Profit stats requested')
         db = getattr(self._bot, '_db', None)
         msg = ["<b>📈 REAL-TIME PROFIT SUMMARY</b>"]
@@ -2061,6 +2110,8 @@ class TelegramController:
         await event.reply("\n".join(msg))
 
     async def _cmd_solbalance(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('solbalance', 'SOL balance requested')
         if hasattr(self._bot, '_pump_client'):
             bal = await self._bot._pump_client.get_sol_balance()
@@ -2069,6 +2120,8 @@ class TelegramController:
             await event.reply("Wallet client offline.")
 
     async def _cmd_blacklist(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('blacklist', 'Blacklisted deployers listed')
         bl = list(getattr(self._bot, '_blacklisted_wallets', []))
         msg = ["<b>🚫 BLACKLISTED DEPLOYERS</b>"]
@@ -2082,6 +2135,8 @@ class TelegramController:
         await event.reply("\n".join(msg))
 
     async def _cmd_whitelist(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('whitelist', 'Smart copy whitelist listed')
         targets = list(self._bot._filter._copy_targets) if (hasattr(self._bot, '_filter') and self._bot._filter) else []
         msg = ["<b>💎 SMART COPY TARGETS</b>"]
@@ -2096,6 +2151,8 @@ class TelegramController:
         await event.reply("\n".join(msg))
 
     async def _cmd_resetrisk(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('resetrisk', 'Risk managers reset requested')
         if hasattr(self._bot, '_risk_manager'):
             await self._bot._risk_manager.resume()
@@ -2104,6 +2161,8 @@ class TelegramController:
             await event.reply("Risk Manager offline.")
 
     async def _cmd_jito(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('jito', 'Jito stats checked')
         tip = 0.001
         msg = (f"<b>⚡️ JITO BUNDLE STATUS</b>\n"
@@ -2113,6 +2172,8 @@ class TelegramController:
         await event.reply(msg)
 
     async def _cmd_clearmemory(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('clearmemory', 'Memory cleared')
         if hasattr(self._bot, '_processed_mints'):
             self._bot._processed_mints.clear()
@@ -2122,6 +2183,8 @@ class TelegramController:
             await event.reply("Memory manager offline.")
 
     async def _cmd_tppreset(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('tppreset', 'TP Preset changed')
         args = event.message.text.split()
         strat = self._bot._config.strategy
@@ -2138,6 +2201,8 @@ class TelegramController:
             await event.reply(f"🎯 <b>Current TP Preset:</b> <code>{current.upper()}</code>")
 
     async def _cmd_slippage(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('slippage', 'Slippage updated')
         args = event.message.text.split()
         jupiter = self._bot._config.jupiter
@@ -2153,6 +2218,8 @@ class TelegramController:
             await event.reply(f"⚙️ <b>Current Slippage:</b> <code>{jupiter.slippage_bps} BPS</code> ({jupiter.slippage_bps/100:.2f}%)")
 
     async def _cmd_priority(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('priority', 'Priority fees updated')
         args = event.message.text.split()
         if len(args) > 1:
@@ -2211,10 +2278,14 @@ class TelegramController:
         )
 
     async def _cmd_stats(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('stats', 'Performance stats requested')
         return await self._cmd_livestats(event)
 
     async def _cmd_pipeline(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('pipeline', 'Pipeline funnel stats requested')
         db = getattr(self._bot, '_db', None)
         stats = getattr(self._bot, "_stats", None)
@@ -2437,6 +2508,8 @@ class TelegramController:
         await event.reply("✅ <b>PANIC SELL COMPLETE:</b> All open bags dumped to liquid SOL.", parse_mode="html")
 
     async def _cmd_active(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('active', 'Active positions checked')
         positions = getattr(self._bot, '_positions', {})
         active = {m: p for m, p in positions.items() if getattr(p, "active", True)}
@@ -2475,6 +2548,8 @@ class TelegramController:
         await event.reply("\n".join(lines), parse_mode="html", link_preview=False)
 
     async def _cmd_closed(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('closed', 'Closed positions checked')
         db = getattr(self._bot, '_db', None)
         msg = ["<b>📜 RECENT CLOSED TRADES</b>\n"]
@@ -2640,6 +2715,8 @@ class TelegramController:
         await event.reply("\n".join(msg), parse_mode="html", link_preview=False)
 
     async def _cmd_kollist(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('kollist', 'KOL list requested')
         args = event.message.text.split()
         page = 1
@@ -2732,6 +2809,8 @@ class TelegramController:
         await event.answer()
 
     async def _cmd_addkol(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('addkol', 'KOL target added')
         args = event.message.text.split()
         if len(args) < 3:
@@ -2750,6 +2829,8 @@ class TelegramController:
             await event.reply("KOL Tracker offline.")
 
     async def _cmd_removekol(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('removekol', 'KOL target removed')
         args = event.message.text.split()
         if len(args) < 2:
@@ -2768,6 +2849,8 @@ class TelegramController:
             await event.reply("KOL not found in active list.")
 
     async def _cmd_blacklistdeployer(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('blacklistdeployer', 'Deployer manually blacklisted')
         args = event.message.text.split()
         if len(args) < 2:
@@ -2782,6 +2865,8 @@ class TelegramController:
             await event.reply("Blacklist offline.")
 
     async def _cmd_removeblacklist(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('removeblacklist', 'Deployer removed from blacklist')
         args = event.message.text.split()
         if len(args) < 2:
@@ -2796,6 +2881,8 @@ class TelegramController:
             await event.reply("Deployer not found in blacklist.")
 
     async def _cmd_modelmode(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('modelmode', 'Model risk mode changed')
         args = event.message.text.split()
         if len(args) > 1:
@@ -2820,6 +2907,8 @@ class TelegramController:
             )
 
     async def _cmd_missed(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('missed', 'Missed entries reviewed')
         missed = getattr(self._bot, '_missed_runners', {})
         import time
@@ -2844,6 +2933,8 @@ class TelegramController:
         await event.reply("\n".join(lines), parse_mode='html', link_preview=False)
 
     async def _cmd_dailyrunner(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('dailyrunner', 'Daily runner list reviewed')
         daily_runners = getattr(self._bot, '_daily_runners', {})
         import time
@@ -2881,6 +2972,8 @@ class TelegramController:
         await event.reply("\n".join(lines), parse_mode='html', link_preview=False)
 
     async def _cmd_kolthreshold(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('kolthreshold', 'Adjusted KOL threshold')
         args = event.message.message.split()
         if len(args) < 2:
@@ -2900,6 +2993,8 @@ class TelegramController:
             await event.reply(f"❌ Invalid argument. Error: {e}")
 
     async def _cmd_kols(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('kols', 'KOLs/Stalkchain commands reviewed')
         args = event.message.message.split()
         
@@ -3030,6 +3125,8 @@ class TelegramController:
                 logger.error(f"Failed to log brain event: {e}")
 
     async def _cmd_autotune(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('autotune', 'AI Autotuning requested')
         args = event.message.text.split()
         ctrl = getattr(self._bot, '_ai_tuner', None)
@@ -3078,6 +3175,8 @@ class TelegramController:
         await event.edit(report, buttons=buttons, parse_mode='html')
 
     async def _cmd_rpcbalancer(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('rpcbalancer', 'RPC Balancer status checked')
         balancer = getattr(self._bot, '_rpc_pool', None)
         if not balancer:
@@ -3091,6 +3190,8 @@ class TelegramController:
         await event.reply(report, parse_mode='html')
 
     async def _cmd_clustermap(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('clustermap', 'Cluster map trace executed')
         args = event.message.text.split()
         if len(args) < 2:
@@ -3113,6 +3214,8 @@ class TelegramController:
         await event.reply(report, parse_mode='html')
 
     async def _cmd_visualize(self, event):
+        if not await self._require_admin(event):
+            return
         await self.log_brain_event('visualize', 'Holder relationship visualization executed')
         args = event.message.text.split()
         if len(args) < 2:
